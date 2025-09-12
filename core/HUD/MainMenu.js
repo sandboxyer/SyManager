@@ -1,7 +1,7 @@
 import Network from '../Network.js'
 import HUD from './HUD.js'
 import WslManager from '../WslManager.js'
-
+import DownloadHUD from '../DownloadHUD.js'
 
 const MainMenu = () => {
     let final = {
@@ -20,6 +20,14 @@ const MainMenu = () => {
             name : 'WSL',
             action : async () => {
                 await WslManager.Run()
+                HUD.displayMenu(MainMenu)
+
+            }
+        },
+        {
+            name : 'DownloadHUB',
+            action : async () => {
+                await DownloadHUD.Start()
                 HUD.displayMenu(MainMenu)
 
             }
