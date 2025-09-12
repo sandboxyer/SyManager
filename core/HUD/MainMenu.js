@@ -1,5 +1,6 @@
 import Network from '../Network.js'
 import HUD from './HUD.js'
+import WslManager from '../WslManager.js'
 
 
 const MainMenu = () => {
@@ -14,7 +15,16 @@ const MainMenu = () => {
                 HUD.displayMenu(MainMenu)
 
             }
+        },
+        {
+            name : 'WSL',
+            action : async () => {
+                await WslManager.Run()
+                HUD.displayMenu(MainMenu)
+
+            }
         }
+
         ]
     }
 
