@@ -2,6 +2,9 @@ import Network from '../Network.js'
 import HUD from './HUD.js'
 import WslManager from '../WslManager.js'
 import DownloadHUD from '../DownloadHUD.js'
+import System from '../System.js'
+
+//no AppHUD passar por padrão na props informações gerais do sistema (explorar a fundo cada vez mais a quantidade de informação passada, configuravel controle de performance, iniciar com o tipo do sistema...)
 
 const MainMenu = () => {
     let final = {
@@ -34,6 +37,10 @@ const MainMenu = () => {
         }
 
         ]
+    }
+
+    if(System() == 'linux'){
+        final.options.splice(1,1)
     }
 
 
