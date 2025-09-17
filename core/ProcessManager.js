@@ -3,6 +3,9 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
 
 const PROCESS_REGISTRY = path.resolve('./processes.json');
 const LOG_DIR = path.resolve('./logs');
@@ -323,11 +326,8 @@ Options:
     }
 }
 
-// If this file is being run directly, parse the command line arguments
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] === __filename) {
     ProcessManager.parseArguments();
 }
 
 export default ProcessManager;
-
-//implementar por aqui uma camada que controla a % do total cpu contando o total de cpus, em um nível global, tem que ser possivel reeiniciar um processo alterando a % de forma que o controle da % fica no proprio metodo de restartar o processo, reiniciando processos com prioridade baixa alterando a % para se adequar a o controle global
