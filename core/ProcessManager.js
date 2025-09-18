@@ -53,7 +53,8 @@ class ProcessManager {
             name: processName,
             path: resolvedPath,
             log: logPath,
-            createdAt: new Date().toISOString()
+            createdAt: new Date().toISOString(),
+            status: 'running' // Track process status
         };
 
         const registry = this._loadRegistry();
@@ -69,6 +70,16 @@ class ProcessManager {
         
         // Check each process and clean up dead ones
         for (const process of registry) {
+            // Skip processes that are in the middle of a restart
+            if (process.status === 'restarting') {
+                cleanedRegistry.push({
+                    status: 'Restarting',
+                    id: process.id,
+                    name: process.name
+                });
+                continue;
+            }
+            
             const isAlive = this.isAlive(process.id);
             
             if (isAlive) {
@@ -104,6 +115,19 @@ class ProcessManager {
             registry.splice(index, 1);
             this._saveRegistry(registry);
         }
+    }
+
+    static _updateProcessStatus(id, status) {
+        const registry = this._loadRegistry();
+        const index = registry.findIndex(process => process.id === id);
+        
+        if (index !== -1) {
+            registry[index].status = status;
+            this._saveRegistry(registry);
+            return true;
+        }
+        
+        return false;
     }
 
     static kill(pidOrId) {
@@ -224,6 +248,55 @@ class ProcessManager {
         }, 500);
     }
 
+    static restart(pidOrId) {
+        const registry = this._loadRegistry();
+        const index = registry.findIndex(process => process.pid === pidOrId || process.id === pidOrId);
+    
+        if (index === -1) {
+            console.error('Process not found in registry.');
+            return false;
+        }
+    
+        const entry = registry[index];
+        const processId = entry.pid;
+        
+        // Mark process as restarting to prevent accidental removal
+        this._updateProcessStatus(entry.id, 'restarting');
+    
+        // Try to kill the process if it's alive
+        try {
+            process.kill(processId, 0); // Check if it exists
+            process.kill(processId);    // Try to kill it
+            console.log(`Killed process PID ${processId} for restart`);
+        } catch (error) {
+            if (error.code !== 'ESRCH') {
+                console.warn(`Process PID ${processId} may not be running:`, error.message);
+            }
+        }
+        
+        // Wait a moment for the process to fully exit
+        setTimeout(() => {
+            // Start a new process with the same configuration
+            const logFileDescriptor = fs.openSync(entry.log, 'a');
+            
+            const child = spawn(process.execPath, [entry.path], {
+                detached: true,
+                stdio: ['ignore', logFileDescriptor, logFileDescriptor]
+            });
+    
+            child.unref();
+            
+            // Update registry with new PID and status
+            registry[index].pid = child.pid;
+            registry[index].status = 'running';
+            this._saveRegistry(registry);
+            
+            console.log(`Restarted process: ${entry.name} (New PID: ${child.pid}, ID: ${entry.id})`);
+        }, 500);
+        
+        return true;
+    }
+
     static displayHelp() {
         console.log(`
 Process Manager CLI Usage:
@@ -233,6 +306,7 @@ Commands:
   --run <file>          Run a Node.js script as a background process
   --list                List all managed processes (shows status, ID, and name)
   --kill <pid|id>       Kill a process by PID or ID
+  --restart <pid|id>    Restart a process by PID or ID
   --alive <pid|id>      Check if a process is alive
   --log <pid|id>        Follow logs of a process
   --help                Display this help message
@@ -292,6 +366,18 @@ Options:
             
             const pidOrId = args[killIndex + 1];
             this.kill(pidOrId);
+            return;
+        }
+
+        if (args.includes('--restart')) {
+            const restartIndex = args.indexOf('--restart');
+            if (restartIndex + 1 >= args.length || args[restartIndex + 1].startsWith('--')) {
+                console.error('Error: --restart requires a PID or ID');
+                return;
+            }
+            
+            const pidOrId = args[restartIndex + 1];
+            this.restart(pidOrId);
             return;
         }
 
