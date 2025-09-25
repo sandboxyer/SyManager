@@ -3,15 +3,46 @@ import HUD from './HUD.js'
 import WslManager from '../WslManager.js'
 import DownloadHUD from '../DownloadHUD.js'
 import System from '../System.js'
+import Git from '../util/Git.js'
 
 //no AppHUD passar por padrão na props informações gerais do sistema (explorar a fundo cada vez mais a quantidade de informação passada, configuravel controle de performance, iniciar com o tipo do sistema...)
 
-const MainMenu = () => {
+const GitMenu = () => {
     let final = {
-        title : 'Sy Manager',
+        title : `Sy Manager > GitMenu`,
         options : [
         {
-            name : 'Network',
+            name : 'Git Setup',
+            action : async () => {
+                await Git.setup()
+                await HUD.pressWait()
+                HUD.displayMenu(GitMenu)
+
+            }
+        },
+
+        ]
+    }
+
+      final.options.push( {
+        name : '<- Voltar',
+        action : async () => {
+            HUD.displayMenu(MainMenu)
+
+        }
+    })
+  
+
+
+    return final
+}
+
+const MainMenu = () => {
+    let final = {
+        title : `Sy Manager`,
+        options : [
+        {
+            name : 'Network Overview',
             action : async () => {
                 await Network.Scan({log : true})
                 await HUD.pressWait()
@@ -41,6 +72,21 @@ const MainMenu = () => {
 
     if(System() == 'linux'){
         final.options.splice(1,1)
+    }
+
+    // -------------
+
+    final.options.push( {
+        name : 'Git',
+        action : async () => {
+            HUD.displayMenu(GitMenu)
+
+        }
+    })
+
+    if(System({detectLinuxDistribution : true}) == "ubuntu"){
+       
+    
     }
 
 
