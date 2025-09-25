@@ -1,7 +1,7 @@
 {
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "scripts": {
-    "sy" : "node ./core/HUD/HUD.js"
+    "sy": "node ./core/HUD/HUD.js"
   }
 }
