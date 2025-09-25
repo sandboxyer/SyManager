@@ -64,13 +64,69 @@ int running = 1;
 int log_fd = -1;
 time_t last_config_check = 0;
 time_t program_start_time;
-time_t last_login_check = 0;
 time_t last_stats_update = 0;
+char self_identifier[256] = {0};
+pid_t self_pid;
 
 const char* event_type_names[] = {
     "LOGIN", "LOGOUT", "SSH", "FILE_MOVE", "FILE_EDIT", 
     "FILE_CREATE", "FILE_DELETE", "NETWORK", "PROCESS", "OTHERS"
 };
+
+void load_self_identifier() {
+    self_pid = getpid();
+    
+    // Get the full command line to identify our process
+    FILE *cmdline = fopen("/proc/self/cmdline", "r");
+    if (cmdline) {
+        char full_cmd[1024];
+        if (fread(full_cmd, 1, sizeof(full_cmd) - 1, cmdline) > 0) {
+            // Replace null bytes with spaces for easier searching
+            for (int i = 0; i < sizeof(full_cmd) && full_cmd[i] != 0; i++) {
+                if (full_cmd[i] == 0) full_cmd[i] = ' ';
+            }
+            strncpy(self_identifier, full_cmd, sizeof(self_identifier) - 1);
+        }
+        fclose(cmdline);
+    }
+    
+    printf("Self-identifier loaded (PID: %d)\n", self_pid);
+}
+
+int is_self_event(const system_event_t *event) {
+    // Always ignore events related to our specific files
+    if (strstr(event->details, "system_monitor.log") != NULL) return 1;
+    if (strstr(event->details, "system_monitor_stats") != NULL) return 1;
+    if (strstr(event->details, "system_monitor.conf") != NULL) return 1;
+    if (strstr(event->source, "system_monitor") != NULL) return 1;
+    
+    // Ignore events from monitor_config
+    if (strstr(event->details, "monitor_config") != NULL) return 1;
+    if (strstr(event->source, "monitor_config") != NULL) return 1;
+    
+    // Ignore events that mention our process name
+    if (strstr(event->details, "monitor") != NULL) return 1;
+    
+    // For file events, check if they're in directories we're monitoring but caused by us
+    if (strstr(event->source, "FILE_SYSTEM") != NULL) {
+        // If the event is from a file we're definitely writing to, ignore it
+        if (strstr(event->details, LOG_FILE) != NULL) return 1;
+        if (strstr(event->details, STATS_FILE) != NULL) return 1;
+        if (strstr(event->details, CONFIG_FILE) != NULL) return 1;
+    }
+    
+    // Check if the event is from the current user and might be related to our processes
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && strcmp(event->username, pw->pw_name) == 0) {
+        // If we're monitoring processes and this is about process count changes that include us, ignore
+        if (event->type == EVENT_PROCESS) {
+            // Process events are usually fine, but if they mention our specific process, ignore
+            if (strstr(event->details, "monitor") != NULL) return 1;
+        }
+    }
+    
+    return 0;
+}
 
 void update_stats(event_type_t type) {
     time_t now = time(NULL);
@@ -100,6 +156,11 @@ void update_stats(event_type_t type) {
 }
 
 void log_event(const system_event_t *event) {
+    // Check if this is a self-event BEFORE any processing
+    if (is_self_event(event)) {
+        return; // Completely ignore self-events
+    }
+    
     char timestamp[64];
     struct tm *tm_info;
     
@@ -200,19 +261,21 @@ void monitor_logins_real_time() {
     while ((ut = getutxent()) != NULL) {
         // Only process events that happened after program start
         if (ut->ut_tv.tv_sec > program_start_time) {
+            system_event_t event;
+            strncpy(event.username, ut->ut_user, sizeof(event.username)-1);
+            event.username[sizeof(event.username)-1] = '\0';
+            
+            // Handle empty host fields
+            if (strlen(ut->ut_host) > 0) {
+                strncpy(event.source, ut->ut_host, sizeof(event.source)-1);
+            } else {
+                strncpy(event.source, "local", sizeof(event.source)-1);
+            }
+            event.source[sizeof(event.source)-1] = '\0';
+            
+            event.timestamp = ut->ut_tv.tv_sec;
+            
             if (ut->ut_type == USER_PROCESS) {
-                system_event_t event;
-                strncpy(event.username, ut->ut_user, sizeof(event.username)-1);
-                event.username[sizeof(event.username)-1] = '\0';
-                
-                // Handle empty host fields
-                if (strlen(ut->ut_host) > 0) {
-                    strncpy(event.source, ut->ut_host, sizeof(event.source)-1);
-                } else {
-                    strncpy(event.source, "local", sizeof(event.source)-1);
-                }
-                event.source[sizeof(event.source)-1] = '\0';
-                
                 if (strlen(ut->ut_host) > 0) {
                     snprintf(event.details, sizeof(event.details), 
                             "Login from %s on %s", ut->ut_host, ut->ut_line);
@@ -222,28 +285,15 @@ void monitor_logins_real_time() {
                 }
                 
                 event.type = EVENT_LOGIN;
-                event.timestamp = ut->ut_tv.tv_sec;
                 
                 if (filters[EVENT_LOGIN].enabled) {
                     log_event(&event);
                 }
             }
             else if (ut->ut_type == DEAD_PROCESS) {
-                system_event_t event;
-                strncpy(event.username, ut->ut_user, sizeof(event.username)-1);
-                event.username[sizeof(event.username)-1] = '\0';
-                
-                if (strlen(ut->ut_host) > 0) {
-                    strncpy(event.source, ut->ut_host, sizeof(event.source)-1);
-                } else {
-                    strncpy(event.source, "local", sizeof(event.source)-1);
-                }
-                event.source[sizeof(event.source)-1] = '\0';
-                
                 snprintf(event.details, sizeof(event.details), 
                         "Logout from %s", ut->ut_line);
                 event.type = EVENT_LOGOUT;
-                event.timestamp = ut->ut_tv.tv_sec;
                 
                 if (filters[EVENT_LOGOUT].enabled) {
                     log_event(&event);
@@ -275,7 +325,7 @@ void handle_file_event(const struct inotify_event *event, const char* base_path)
     strncpy(sys_event.username, get_username(), sizeof(sys_event.username)-1);
     sys_event.username[sizeof(sys_event.username)-1] = '\0';
     
-    strncpy(sys_event.source, base_path, sizeof(sys_event.source)-1);
+    strncpy(sys_event.source, "FILE_SYSTEM", sizeof(sys_event.source)-1);
     sys_event.source[sizeof(sys_event.source)-1] = '\0';
     
     sys_event.timestamp = time(NULL);
@@ -473,8 +523,14 @@ void create_sample_config() {
     fprintf(config, "# System Monitor Configuration\n");
     fprintf(config, "# Use 'enable' or 'disable' for each event type\n\n");
     
+    // Default: disable file events, enable others
     for (int i = 0; i < EVENT_COUNT; i++) {
-        fprintf(config, "%s=enable\n", event_type_names[i]);
+        if (i == EVENT_FILE_MOVE || i == EVENT_FILE_EDIT || 
+            i == EVENT_FILE_CREATE || i == EVENT_FILE_DELETE) {
+            fprintf(config, "%s=disable\n", event_type_names[i]);
+        } else {
+            fprintf(config, "%s=enable\n", event_type_names[i]);
+        }
     }
     
     fclose(config);
@@ -491,6 +547,7 @@ int main(int argc, char *argv[]) {
     
     program_start_time = time(NULL);
     initialize_stats();
+    load_self_identifier();
     
     if (getuid() != 0) {
         printf("Warning: Running without root privileges. Some features may not work.\n");
@@ -509,10 +566,16 @@ int main(int argc, char *argv[]) {
         create_sample_config();
     }
     
-    // Initialize filters
+    // Initialize filters - disable file events by default
     for (int i = 0; i < EVENT_COUNT; i++) {
         filters[i].type = i;
-        filters[i].enabled = 1;
+        // Default: enable all except file events
+        if (i == EVENT_FILE_MOVE || i == EVENT_FILE_EDIT || 
+            i == EVENT_FILE_CREATE || i == EVENT_FILE_DELETE) {
+            filters[i].enabled = 0;
+        } else {
+            filters[i].enabled = 1;
+        }
     }
     
     load_config();
@@ -530,6 +593,7 @@ int main(int argc, char *argv[]) {
     printf("Monitoring started at: %s", ctime(&program_start_time));
     printf("Log file: %s\n", LOG_FILE);
     printf("Configuration: %s\n", CONFIG_FILE);
+    printf("Self-events will be automatically filtered out.\n");
     printf("Press Ctrl+C to stop monitoring.\n\n");
     
     char buffer[BUF_LEN];
