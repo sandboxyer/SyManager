@@ -1,15 +1,37 @@
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 
+/**
+ * A class for compiling and executing C code with caching capabilities
+ * @class
+ */
 class C {
+  /** @private */
   static #cacheDir = path.join(os.homedir(), '.c_runner_cache');
+  /** @private */
   static #compiler = 'gcc';
+  /** @private */
   static #logTime = false;
+  /** @private */
   static #forceRecompile = false;
+  /** @private */
+  static #childProcesses = new Map();
+  /** @private */
+  static #cleanupSetup = false;
 
+  /**
+   * Configure the C runner settings
+   * @param {Object} config - Configuration object
+   * @param {boolean} [config.logTime=false] - Whether to log execution time
+   * @param {string} [config.compiler='gcc'] - Compiler to use (gcc, clang, etc.)
+   * @param {boolean} [config.forceRecompile=false] - Force recompilation even if cached
+   * @param {string} [config.cacheDir] - Custom cache directory path
+   * @static
+   */
   static config({ 
     logTime = false, 
     compiler = 'gcc',
@@ -22,16 +44,25 @@ class C {
     if (cacheDir) this.#cacheDir = cacheDir;
   }
 
+  /**
+   * @private
+   */
   static #initCache() {
     if (!fs.existsSync(this.#cacheDir)) {
       fs.mkdirSync(this.#cacheDir, { recursive: true, mode: 0o755 });
     }
   }
 
+  /**
+   * @private
+   */
   static #getExecutablePath(tag) {
     return path.join(this.#cacheDir, `${tag}.out`);
   }
 
+  /**
+   * @private
+   */
   static #compileAndSave(code, tag) {
     this.#initCache();
     const tempFile = path.join(this.#cacheDir, `${tag}.c`);
@@ -39,7 +70,8 @@ class C {
 
     try {
       fs.writeFileSync(tempFile, code, { mode: 0o644 });
-      execSync(`${this.#compiler} ${tempFile} -o ${executable}`);
+      const compileCommand = `${this.#compiler} ${tempFile} -o ${executable}`;
+      execSync(compileCommand);
       fs.chmodSync(executable, 0o755);
       fs.unlinkSync(tempFile);
       return executable;
@@ -49,44 +81,281 @@ class C {
     }
   }
 
-  static #execute(executable, args = []) {
-    const start = Date.now();
-    try {
-      const argString = args.map(arg => 
-        typeof arg === 'string' ? `"${arg.replace(/"/g, '\\"')}"` : arg.toString()
-      ).join(' ');
+  /**
+   * @private
+   */
+  static #setupProcessCleanup() {
+    if (this.#cleanupSetup) return;
+    this.#cleanupSetup = true;
 
-      const output = execSync(`${executable} ${argString}`).toString();
+    // Store original signal handlers
+    const originalHandlers = {
+      SIGINT: process.listeners('SIGINT'),
+      SIGTERM: process.listeners('SIGTERM')
+    };
 
-      if (this.#logTime) {
-        console.log(`Execution time: ${Date.now() - start}ms`);
+    const cleanupChildProcesses = () => {
+      for (const [pid, childProcess] of this.#childProcesses) {
+        try {
+          if (!childProcess.killed && childProcess.exitCode === null) {
+            // Use process group kill to ensure all child processes are terminated
+            try {
+              process.kill(-childProcess.pid, 'SIGTERM');
+            } catch (err) {
+              // If process group kill fails, kill the process directly
+              childProcess.kill('SIGTERM');
+            }
+            
+            // Force kill after short timeout
+            setTimeout(() => {
+              try {
+                if (!childProcess.killed && childProcess.exitCode === null) {
+                  try {
+                    process.kill(-childProcess.pid, 'SIGKILL');
+                  } catch (err) {
+                    childProcess.kill('SIGKILL');
+                  }
+                }
+              } catch (err) {
+                // Ignore errors during force kill
+              }
+            }, 100).unref();
+          }
+        } catch (err) {
+          // Ignore errors during cleanup
+        }
       }
-      return output;
-    } catch (err) {
-      throw new Error(`Execution failed: ${err.message}`);
-    }
+    };
+
+    // Handle process exit (normal termination)
+    process.on('exit', () => {
+      cleanupChildProcesses();
+    });
+
+    // Handle SIGTERM (kill command)
+    process.on('SIGTERM', () => {
+      cleanupChildProcesses();
+      // Restore original handlers and re-emit signal after cleanup
+      process.removeAllListeners('SIGTERM');
+      originalHandlers.SIGTERM.forEach(handler => {
+        process.on('SIGTERM', handler);
+      });
+      process.kill(process.pid, 'SIGTERM');
+    });
+
+    // Handle SIGHUP (terminal closed)
+    process.on('SIGHUP', () => {
+      cleanupChildProcesses();
+      process.exit(0);
+    });
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      cleanupChildProcesses();
+      // Let the original exception handling proceed
+      if (originalHandlers.SIGTERM.length === 0) {
+        console.error('Uncaught Exception:', error);
+        process.exit(1);
+      }
+    });
   }
 
-  static run(code, { 
+  /**
+   * @private
+   */
+  static #addChildProcess(childProcess) {
+    this.#childProcesses.set(childProcess.pid, childProcess);
+    this.#setupProcessCleanup();
+  }
+
+  /**
+   * @private
+   */
+  static #removeChildProcess(childProcess) {
+    this.#childProcesses.delete(childProcess.pid);
+  }
+
+  /**
+   * Compile and run C code with full terminal control
+   * @param {string} code - C source code to compile and execute
+   * @param {Object} [options] - Execution options
+   * @param {Array<string|number>} [options.args=[]] - Command line arguments to pass to the executable
+   * @param {string} [options.tag] - Tag for caching the executable (if not provided, temporary execution)
+   * @param {boolean} [options.force=false] - Force recompilation even if cached
+   * @param {Function} [options.onLog] - Optional callback function that receives each log output in real-time
+   * @returns {Promise<string>} - Promise that resolves with the complete output when process ends
+   * @throws {Error} - If compilation or execution fails
+   * @static
+   */
+  static async run(code, { 
     args = [], 
     tag = null, 
-    force = false 
+    force = false,
+    onLog = null
   } = {}) {
-    if (!tag) {
-      const tempTag = `temp_${crypto.randomBytes(4).toString('hex')}`;
-      const executable = this.#compileAndSave(code, tempTag);
-      const result = this.#execute(executable, args);
-      fs.unlinkSync(executable);
-      return result;
+    // Validate onLog callback
+    if (onLog && typeof onLog !== 'function') {
+      throw new Error('onLog must be a function if provided');
     }
 
-    const executable = this.#getExecutablePath(tag);
-    if (force || this.#forceRecompile || !fs.existsSync(executable)) {
-      this.#compileAndSave(code, tag);
+    let executable;
+    const isTemporary = !tag;
+
+    try {
+      // Compile or get cached executable
+      if (isTemporary) {
+        const tempTag = `temp_${crypto.randomBytes(4).toString('hex')}`;
+        executable = this.#compileAndSave(code, tempTag);
+      } else {
+        executable = this.#getExecutablePath(tag);
+        if (force || this.#forceRecompile || !fs.existsSync(executable)) {
+          this.#compileAndSave(code, tag);
+        }
+      }
+
+      return await this.#executeWithFullTerminal(executable, args, onLog);
+    } finally {
+      // Clean up temporary executable
+      if (isTemporary && executable && fs.existsSync(executable)) {
+        try {
+          fs.unlinkSync(executable);
+        } catch (err) {
+          // Ignore cleanup errors
+        }
+      }
     }
-    return this.#execute(executable, args);
   }
 
+  /**
+   * @private
+   */
+  static #executeWithFullTerminal(executable, args = [], onLog = null) {
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      
+      // Spawn the process with proper process group handling
+      const childProcess = spawn(executable, args, {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        shell: true,
+        detached: false // Keep in same process group for proper signal propagation
+      });
+
+      // Track child process for cleanup
+      this.#addChildProcess(childProcess);
+
+      let stdoutData = '';
+      let stderrData = '';
+
+      // Handle stdout - pipe to terminal and capture for return
+      childProcess.stdout.on('data', (data) => {
+        const chunk = data.toString();
+        stdoutData += chunk;
+        
+        // Output to terminal
+        process.stdout.write(chunk);
+        
+        // Call optional log callback
+        if (onLog) {
+          try {
+            onLog(chunk, 'stdout');
+          } catch (err) {
+            console.error('Error in onLog callback:', err);
+          }
+        }
+      });
+
+      // Handle stderr - pipe to terminal and capture for error handling
+      childProcess.stderr.on('data', (data) => {
+        const chunk = data.toString();
+        stderrData += chunk;
+        
+        // Output to terminal
+        process.stderr.write(chunk);
+        
+        // Call optional log callback
+        if (onLog) {
+          try {
+            onLog(chunk, 'stderr');
+          } catch (err) {
+            console.error('Error in onLog callback:', err);
+          }
+        }
+      });
+
+      // Handle process completion
+      childProcess.on('close', (code, signal) => {
+        // Remove from tracking
+        this.#removeChildProcess(childProcess);
+        
+        if (this.#logTime) {
+          console.log(`\nExecution time: ${Date.now() - start}ms`);
+        }
+        
+        // If process was terminated by signal, handle appropriately
+        if (signal) {
+          if (signal === 'SIGINT') {
+            // User pressed Ctrl+C - this is expected behavior
+            resolve(stdoutData);
+          } else {
+            const error = new Error(`Process terminated by signal: ${signal}`);
+            error.exitCode = code;
+            error.signal = signal;
+            error.stderr = stderrData;
+            error.stdout = stdoutData;
+            reject(error);
+          }
+          return;
+        }
+        
+        // If process exited with non-zero code, reject
+        if (code !== 0) {
+          const error = new Error(`Process exited with code ${code}`);
+          error.exitCode = code;
+          error.stderr = stderrData;
+          error.stdout = stdoutData;
+          reject(error);
+          return;
+        }
+        
+        // Normal successful exit
+        resolve(stdoutData);
+      });
+
+      childProcess.on('error', (err) => {
+        this.#removeChildProcess(childProcess);
+        reject(new Error(`Execution failed: ${err.message}`));
+      });
+
+      // Handle Ctrl+C - forward to child process but don't intercept
+      const handleSigInt = () => {
+        // Forward SIGINT to child process but continue normal Node.js shutdown
+        try {
+          childProcess.kill('SIGINT');
+        } catch (err) {
+          // Ignore if process is already dead
+        }
+      };
+
+      // Add our SIGINT handler without removing existing ones
+      process.on('SIGINT', handleSigInt);
+
+      // Clean up when promise settles
+      const cleanup = () => {
+        this.#removeChildProcess(childProcess);
+        process.removeListener('SIGINT', handleSigInt);
+      };
+
+      childProcess.on('close', cleanup);
+      childProcess.on('error', cleanup);
+    });
+  }
+
+  /**
+   * Remove a cached executable by tag
+   * @param {string} tag - Tag of the cached executable to remove
+   * @returns {boolean} - True if the file was removed, false if it didn't exist
+   * @static
+   */
   static removeTag(tag) {
     const executable = this.#getExecutablePath(tag);
     if (fs.existsSync(executable)) {
@@ -96,11 +365,44 @@ class C {
     return false;
   }
 
+  /**
+   * Clear the entire cache directory
+   * @static
+   */
   static clearCache() {
     if (fs.existsSync(this.#cacheDir)) {
       fs.rmSync(this.#cacheDir, { recursive: true });
     }
   }
+
+  /**
+   * Get the number of currently running C processes
+   * @returns {number} - Number of active child processes
+   * @static
+   */
+  static getActiveProcessCount() {
+    return this.#childProcesses.size;
+  }
+
+  /**
+   * Forcefully terminate all running C processes
+   * @static
+   */
+  static terminateAll() {
+    for (const [pid, childProcess] of this.#childProcesses) {
+      try {
+        if (!childProcess.killed && childProcess.exitCode === null) {
+          try {
+            process.kill(-childProcess.pid, 'SIGTERM');
+          } catch (err) {
+            childProcess.kill('SIGTERM');
+          }
+        }
+      } catch (err) {
+        // Ignore errors during termination
+      }
+    }
+  }
 }
 
-export default C
+export default C;
