@@ -126,6 +126,7 @@ Examples:
             }
 
             console.log('Installing GitHub CLI...');
+            await this.#execCommand('sudo apt update');
             await this.#execCommand('sudo apt install -y gh');
             console.log('✅ GitHub CLI installed successfully');
         } catch (error) {
@@ -134,7 +135,7 @@ Examples:
     }
 
     /**
-     * Authenticate with GitHub CLI
+     * Authenticate with GitHub using web flow with manual code display
      */
     static async authenticate() {
         console.log('\n🔐 Authenticating with GitHub...');
@@ -149,16 +150,155 @@ Examples:
                 // Not authenticated, proceed with login
             }
 
-            console.log('Please complete the GitHub authentication in your browser...');
+            console.log('Starting GitHub authentication process...');
             
-            // Use device flow for authentication (non-interactive)
-            await this.#execCommand('gh auth login --web -h github.com', { 
-                stdio: 'inherit' 
+            // Use the web flow but capture the output to get the device code
+            const { spawn } = await import('child_process');
+            
+            console.log('📋 GitHub Authentication Instructions:');
+            console.log('=====================================');
+            console.log('1. The system will display a one-time code');
+            console.log('2. A browser window will open to GitHub');
+            console.log('3. Enter the code when prompted');
+            console.log('4. Complete the authentication in your browser');
+            console.log('=====================================\n');
+
+            // Start the authentication process
+            const authProcess = spawn('gh', ['auth', 'login', '--web', '-h', 'github.com'], {
+                stdio: ['pipe', 'pipe', 'pipe']
             });
+
+            let authOutput = '';
+            let oneTimeCode = '';
+
+            // Capture stdout to extract the one-time code
+            authProcess.stdout.on('data', (data) => {
+                const output = data.toString();
+                authOutput += output;
+                console.log(output);
+                
+                // Look for the one-time code in the output
+                if (output.includes('one-time code:')) {
+                    const codeMatch = output.match(/one-time code:\s*([A-Z0-9-]+)/i);
+                    if (codeMatch) {
+                        oneTimeCode = codeMatch[1];
+                        console.log('\n✨ One-time code detected!');
+                        console.log(`📋 Your code: ${oneTimeCode}`);
+                        console.log('💡 Copy this code and enter it in the browser window that opened.\n');
+                    }
+                }
+            });
+
+            // Capture stderr for error handling
+            authProcess.stderr.on('data', (data) => {
+                const errorOutput = data.toString();
+                console.error('gh auth stderr:', errorOutput);
+            });
+
+            // Wait for the process to complete
+            const exitCode = await new Promise((resolve, reject) => {
+                authProcess.on('close', (code) => {
+                    resolve(code);
+                });
+                
+                authProcess.on('error', (error) => {
+                    reject(error);
+                });
+            });
+
+            if (exitCode === 0) {
+                console.log('✅ GitHub authentication completed successfully!');
+            } else {
+                throw new Error(`Authentication process exited with code ${exitCode}`);
+            }
             
-            console.log('✅ GitHub authentication completed');
         } catch (error) {
-            throw new Error(`GitHub authentication failed: ${error.message}`);
+            console.error('\n❌ Authentication failed:', error.message);
+            await this.#fallbackAuthentication();
+        }
+    }
+
+    /**
+     * Fallback authentication method
+     */
+    static async #fallbackAuthentication() {
+        console.log('\n🔄 Trying alternative authentication method...');
+        
+        try {
+            console.log('📋 Manual GitHub Authentication Instructions:');
+            console.log('=====================================');
+            console.log('1. Run this command in your terminal:');
+            console.log('   gh auth login --web -h github.com');
+            console.log('2. Copy the one-time code that appears');
+            console.log('3. Enter it in the browser window that opens');
+            console.log('4. Complete the authentication process');
+            console.log('=====================================\n');
+
+            const response = await this.#question('Press Enter after you have completed authentication, or type "skip" to skip: ');
+            
+            if (response.toLowerCase() !== 'skip') {
+                // Verify authentication was successful
+                try {
+                    await this.#execCommand('gh auth status');
+                    console.log('✅ GitHub authentication verified!');
+                } catch (verifyError) {
+                    console.log('❌ Authentication not completed. You can run this again later with:');
+                    console.log('   node Git.js --auth');
+                }
+            }
+        } catch (error) {
+            console.error('Fallback authentication failed:', error.message);
+        }
+    }
+
+    /**
+     * Alternative method using token-based authentication
+     */
+    static async authenticateWithToken() {
+        console.log('\n🔐 Token-based GitHub Authentication');
+        console.log('=====================================');
+        console.log('1. Go to: https://github.com/settings/tokens');
+        console.log('2. Generate a new token with appropriate permissions');
+        console.log('3. Copy the token and enter it below');
+        console.log('=====================================\n');
+        
+        try {
+            const token = await this.#question('Enter your GitHub personal access token: ');
+            
+            if (!token.trim()) {
+                throw new Error('Token is required');
+            }
+
+            // Authenticate using the token
+            const { spawn } = await import('child_process');
+            const authProcess = spawn('gh', ['auth', 'login', '--with-token'], {
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+
+            // Send the token to the process
+            authProcess.stdin.write(token.trim());
+            authProcess.stdin.end();
+
+            // Wait for completion
+            const exitCode = await new Promise((resolve, reject) => {
+                authProcess.on('close', (code) => {
+                    resolve(code);
+                });
+                
+                authProcess.on('error', (error) => {
+                    reject(error);
+                });
+            });
+
+            if (exitCode === 0) {
+                console.log('✅ GitHub token authentication completed successfully!');
+            } else {
+                throw new Error('Token authentication failed');
+            }
+            
+        } catch (error) {
+            console.error('Token authentication failed:', error.message);
+            console.log('You can try web authentication instead.');
         }
     }
 
