@@ -4,8 +4,40 @@ import WslManager from '../WslManager.js'
 import DownloadHUD from '../DownloadHUD.js'
 import System from '../System.js'
 import Git from '../util/Git.js'
+import SystemMonitor from '../ctests/SystemMonitor/SystemMonitor.js'
 
 //no AppHUD passar por padrão na props informações gerais do sistema (explorar a fundo cada vez mais a quantidade de informação passada, configuravel controle de performance, iniciar com o tipo do sistema...)
+
+const SystemMonitorMenu = () => {
+let final = {
+title : 'SyManager > SystemMonitor',
+options : [
+{
+name : 'Start',
+action : async () => {
+await SystemMonitor.Start()
+HUD.displayMenu(SystemMonitorMenu)
+}
+},
+{
+name : 'HUD',
+action : async () => {
+await SystemMonitor.HUD()
+HUD.displayMenu(SystemMonitorMenu)
+}
+}
+]
+}
+
+final.options.push({
+name : '<- Voltar',
+action : () => {
+HUD.displayMenu(MainMenu)
+}
+})
+
+return final
+}
 
 const GitMenu = () => {
     let final = {
@@ -83,6 +115,11 @@ const MainMenu = () => {
 
         }
     })
+
+    final.options.push({
+name : 'SystemMonitor',
+action : () => {HUD.displayMenu(SystemMonitorMenu)}
+})
 
     if(System({detectLinuxDistribution : true}) == "ubuntu"){
        
