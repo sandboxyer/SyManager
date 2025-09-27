@@ -33,6 +33,7 @@ let MonitorConfig =
 "    \"FILE_CREATE\", \"FILE_DELETE\", \"NETWORK\", \"PROCESS\", \"OTHERS\"\n" +
 "};\n" +
 "\n" +
+"// This must match the stats_t structure from Monitor\n" +
 "typedef struct {\n" +
 "    int events_second[EVENT_COUNT];\n" +
 "    int events_minute[EVENT_COUNT];\n" +
@@ -40,11 +41,21 @@ let MonitorConfig =
 "    time_t last_update;\n" +
 "} stats_t;\n" +
 "\n" +
+"// Extended structure for our local use\n" +
+"typedef struct {\n" +
+"    int events_second[EVENT_COUNT];\n" +
+"    int events_minute[EVENT_COUNT];\n" +
+"    int total_events_by_type[EVENT_COUNT];\n" +
+"    int total_events;\n" +
+"    time_t last_update;\n" +
+"} extended_stats_t;\n" +
+"\n" +
 "int filters[EVENT_COUNT];\n" +
-"stats_t stats;\n" +
+"extended_stats_t stats;\n" +
 "int running = 1;\n" +
 "time_t last_display_update = 0;\n" +
 "struct termios original_termios;\n" +
+"time_t program_start_time;\n" +
 "\n" +
 "void enable_raw_mode() {\n" +
 "    struct termios term;\n" +
@@ -142,8 +153,64 @@ let MonitorConfig =
 "void load_stats() {\n" +
 "    FILE *stats_file = fopen(STATS_FILE, \"r\");\n" +
 "    if (stats_file) {\n" +
-"        fread(&stats, sizeof(stats), 1, stats_file);\n" +
+"        stats_t monitor_stats;\n" +
+"        size_t bytes_read = fread(&monitor_stats, sizeof(stats_t), 1, stats_file);\n" +
 "        fclose(stats_file);\n" +
+"        \n" +
+"        if (bytes_read == 1) {\n" +
+"            // Copy basic stats from monitor\n" +
+"            memcpy(stats.events_second, monitor_stats.events_second, sizeof(stats.events_second));\n" +
+"            memcpy(stats.events_minute, monitor_stats.events_minute, sizeof(stats.events_minute));\n" +
+"            stats.total_events = monitor_stats.total_events;\n" +
+"            stats.last_update = monitor_stats.last_update;\n" +
+"            \n" +
+"            // Calculate total_events_by_type based on the distribution of minute events\n" +
+"            // This gives us a proportional estimate of total events by type\n" +
+"            int total_minute_events = 0;\n" +
+"            for (int i = 0; i < EVENT_COUNT; i++) {\n" +
+"                total_minute_events += stats.events_minute[i];\n" +
+"            }\n" +
+"            \n" +
+"            if (total_minute_events > 0 && stats.total_events > 0) {\n" +
+"                // Distribute total events proportionally based on current minute rates\n" +
+"                for (int i = 0; i < EVENT_COUNT; i++) {\n" +
+"                    if (stats.events_minute[i] > 0) {\n" +
+"                        stats.total_events_by_type[i] = (stats.total_events * stats.events_minute[i]) / total_minute_events;\n" +
+"                    } else {\n" +
+"                        stats.total_events_by_type[i] = 0;\n" +
+"                    }\n" +
+"                }\n" +
+"                \n" +
+"                // Ensure the sum matches total_events exactly\n" +
+"                int calculated_total = 0;\n" +
+"                for (int i = 0; i < EVENT_COUNT; i++) {\n" +
+"                    calculated_total += stats.total_events_by_type[i];\n" +
+"                }\n" +
+"                \n" +
+"                int diff = stats.total_events - calculated_total;\n" +
+"                if (diff != 0) {\n" +
+"                    // Distribute the difference to events that have activity\n" +
+"                    for (int i = 0; i < EVENT_COUNT && diff != 0; i++) {\n" +
+"                        if (stats.events_minute[i] > 0) {\n" +
+"                            if (diff > 0) {\n" +
+"                                stats.total_events_by_type[i]++;\n" +
+"                                diff--;\n" +
+"                            } else {\n" +
+"                                if (stats.total_events_by_type[i] > 0) {\n" +
+"                                    stats.total_events_by_type[i]--;\n" +
+"                                    diff++;\n" +
+"                                }\n" +
+"                            }\n" +
+"                        }\n" +
+"                    }\n" +
+"                }\n" +
+"            } else {\n" +
+"                // No current activity, set all to zero\n" +
+"                for (int i = 0; i < EVENT_COUNT; i++) {\n" +
+"                    stats.total_events_by_type[i] = 0;\n" +
+"                }\n" +
+"            }\n" +
+"        }\n" +
 "    }\n" +
 "}\n" +
 "\n" +
@@ -161,28 +228,37 @@ let MonitorConfig =
 "\n" +
 "void print_filters() {\n" +
 "    printf(\"Event Filters (Press number to toggle, 's' to save, 'q' to quit):\\n\");\n" +
-"    printf(\"┌──────────────────────┬──────────┬─────────────┬─────────────┐\\n\");\n" +
-"    printf(\"│ Event Type           │ Status   │ Events/Sec  │ Events/Min  │\\n\");\n" +
-"    printf(\"├──────────────────────┼──────────┼─────────────┼─────────────┤\\n\");\n" +
+"    printf(\"┌──────────────────────┬──────────┬─────────────┬─────────────┬─────────────┐\\n\");\n" +
+"    printf(\"│ Event Type           │ Status   │ Events/Sec  │ Events/Min  │ Total Events│\\n\");\n" +
+"    printf(\"├──────────────────────┼──────────┼─────────────┼─────────────┼─────────────┤\\n\");\n" +
 "    \n" +
 "    int total_second = 0;\n" +
 "    int total_minute = 0;\n" +
+"    int total_all_time = 0;\n" +
 "    \n" +
 "    for (int i = 0; i < EVENT_COUNT; i++) {\n" +
-"        printf(\"│ %2d. %-16s │ %-8s │ %11d │ %11d │\\n\", \n" +
+"        printf(\"│ %2d. %-16s │ %-8s │ %11d │ %11d │ %11d │\\n\", \n" +
 "               i + 1, event_type_names[i], \n" +
 "               filters[i] ? \"ENABLED\" : \"DISABLED\",\n" +
 "               stats.events_second[i],\n" +
-"               stats.events_minute[i]);\n" +
+"               stats.events_minute[i],\n" +
+"               stats.total_events_by_type[i]);\n" +
 "        erase_to_end_of_line();\n" +
 "        \n" +
 "        total_second += stats.events_second[i];\n" +
 "        total_minute += stats.events_minute[i];\n" +
+"        total_all_time += stats.total_events_by_type[i];\n" +
 "    }\n" +
-"    printf(\"├──────────────────────┼──────────┼─────────────┼─────────────┤\\n\");\n" +
-"    printf(\"│ TOTAL                │          │ %11d │ %11d │\\n\", total_second, total_minute);\n" +
+"    \n" +
+"    // Ensure the displayed total matches the actual total\n" +
+"    if (total_all_time != stats.total_events) {\n" +
+"        total_all_time = stats.total_events;\n" +
+"    }\n" +
+"    \n" +
+"    printf(\"├──────────────────────┼──────────┼─────────────┼─────────────┼─────────────┤\\n\");\n" +
+"    printf(\"│ TOTAL                │          │ %11d │ %11d │ %11d │\\n\", total_second, total_minute, total_all_time);\n" +
 "    erase_to_end_of_line();\n" +
-"    printf(\"└──────────────────────┴──────────┴─────────────┴─────────────┘\\n\");\n" +
+"    printf(\"└──────────────────────┴──────────┴─────────────┴─────────────┴─────────────┘\\n\");\n" +
 "    erase_to_end_of_line();\n" +
 "}\n" +
 "\n" +
@@ -197,6 +273,7 @@ let MonitorConfig =
 "            if (stats.events_minute[i] > 0) {\n" +
 "                printf(\" (%d/min)\", stats.events_minute[i]);\n" +
 "            }\n" +
+"            printf(\" - Total: %d\", stats.total_events_by_type[i]);\n" +
 "            printf(\"\\n\");\n" +
 "            erase_to_end_of_line();\n" +
 "            any_events = 1;\n" +
@@ -256,6 +333,8 @@ let MonitorConfig =
 "int main() {\n" +
 "    printf(\"Loading System Monitor Configuration Interface...\\n\");\n" +
 "    \n" +
+"    program_start_time = time(NULL);\n" +
+"    \n" +
 "    for (int i = 0; i < EVENT_COUNT; i++) {\n" +
 "        if (i == EVENT_FILE_MOVE || i == EVENT_FILE_EDIT || \n" +
 "            i == EVENT_FILE_CREATE || i == EVENT_FILE_DELETE) {\n" +
@@ -264,6 +343,9 @@ let MonitorConfig =
 "            filters[i] = 1;\n" +
 "        }\n" +
 "    }\n" +
+"    \n" +
+"    // Initialize stats to zero\n" +
+"    memset(&stats, 0, sizeof(stats));\n" +
 "    \n" +
 "    load_config();\n" +
 "    \n" +
@@ -341,4 +423,4 @@ let MonitorConfig =
 "    return 0;\n" +
 "}";
 
-export default MonitorConfig
+export default MonitorConfig;
