@@ -6,6 +6,8 @@ import System from '../System.js'
 import Git from '../util/Git.js'
 import SystemMonitor from '../ctests/SystemMonitor/SystemMonitor.js'
 import ColorText from '../util/ColorText.js'
+import DirServerMenu from './DirServerMenu.js'
+import MiscMenu from './MiscMenu.js'
 
 //no AppHUD passar por padrão na props informações gerais do sistema (explorar a fundo cada vez mais a quantidade de informação passada, configuravel controle de performance, iniciar com o tipo do sistema...)
 
@@ -70,7 +72,7 @@ const GitMenu = () => {
     return final
 }
 
-const MainMenu = () => {
+const MainMenu = async () => {
     let final = {
         title : `Sy Manager`,
         options : [
@@ -122,9 +124,19 @@ name : 'SystemMonitor',
 action : () => {HUD.displayMenu(SystemMonitorMenu)}
 })
 
-    if(System({detectLinuxDistribution : true}) == "ubuntu"){
-       
+final.options.push({
+    name : 'DirServer',
+    action : () => {HUD.displayMenu(DirServerMenu)}
+    })
+
+
+        final.options.push({
+            name : ColorText.yellow('Misc'),
+            action :async  () => {await HUD.displayMenu(MiscMenu)}
+            })
     
+            if(System({detectLinuxDistribution : true}) == "ubuntu"){
+
     }
 
     final.options.push( {
