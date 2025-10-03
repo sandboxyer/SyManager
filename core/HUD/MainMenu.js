@@ -47,9 +47,18 @@ const GitMenu = () => {
         title : `Sy Manager > GitMenu`,
         options : [
         {
-            name : 'Git Setup',
+            name : 'Git Full Setup',
             action : async () => {
                 await Git.setup()
+                await HUD.pressWait()
+                HUD.displayMenu(GitMenu)
+
+            }
+        },
+        {
+            name : 'Git Config',
+            action : async () => {
+                await Git.configure()
                 await HUD.pressWait()
                 HUD.displayMenu(GitMenu)
 
