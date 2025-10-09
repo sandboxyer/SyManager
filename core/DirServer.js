@@ -62,6 +62,7 @@ class DirServer {
         const indexHtmlPath = path.join(absolutePath, 'index.html');
         if (!fs.existsSync(indexHtmlPath)) {
             console.warn(`Warning: index.html not found in: ${absolutePath}`);
+            console.log('🔍 Will use largest HTML file as fallback when accessing root path');
         }
 
         this.server = http.createServer((req, res) => {
@@ -328,6 +329,36 @@ node "${scriptPath}" "$@"`;
     }
 
     /**
+     * Finds the largest HTML file in a directory
+     * @param {string} directoryPath - Path to search for HTML files
+     * @returns {string|null} Path to largest HTML file or null if none found
+     */
+    static findLargestHtmlFile(directoryPath) {
+        try {
+            const files = fs.readdirSync(directoryPath);
+            let largestFile = null;
+            let largestSize = -1;
+
+            for (const file of files) {
+                const filePath = path.join(directoryPath, file);
+                const stat = fs.statSync(filePath);
+                
+                if (stat.isFile() && path.extname(file).toLowerCase() === '.html') {
+                    if (stat.size > largestSize) {
+                        largestSize = stat.size;
+                        largestFile = filePath;
+                    }
+                }
+            }
+
+            return largestFile;
+        } catch (error) {
+            console.error('❌ Error searching for HTML files:', error.message);
+            return null;
+        }
+    }
+
+    /**
      * Serves a file if it exists, otherwise returns 404
      */
     static serveFile(res, filePath, basePath) {
@@ -342,9 +373,24 @@ node "${scriptPath}" "$@"`;
                 // Try index.html for directory paths
                 if (filePath.endsWith('/index.html')) {
                     const dirPath = filePath.slice(0, -10);
-                    const dirIndexPath = path.join(dirPath, 'index.html');
-                    this.serveFile(res, dirIndexPath, basePath);
-                    return;
+                    
+                    // Special case: if this is the root index.html that doesn't exist,
+                    // try to find the largest HTML file as fallback
+                    if (dirPath === basePath) {
+                        console.log('🔍 index.html not found, searching for largest HTML file...');
+                        const largestHtml = this.findLargestHtmlFile(basePath);
+                        
+                        if (largestHtml) {
+                            console.log(`✅ Using fallback: ${path.basename(largestHtml)}`);
+                            this.serveFile(res, largestHtml, basePath);
+                            return;
+                        }
+                    } else {
+                        // For subdirectories, try their own index.html
+                        const dirIndexPath = path.join(dirPath, 'index.html');
+                        this.serveFile(res, dirIndexPath, basePath);
+                        return;
+                    }
                 }
                 
                 this.sendError(res, 404, `File not found: ${path.relative(basePath, filePath)}`);
