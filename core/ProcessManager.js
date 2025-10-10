@@ -113,122 +113,134 @@ AUTO_RESTART="${autoRestart}"
 RESTART_TRIES="${restartTries}"
 CURRENT_TRIES=0
 MAX_RETRIES=${restartTries > 0 ? restartTries : 999999}
-REGISTRY_FILE="${PROCESS_REGISTRY}"
-MONITOR_PID=$$
 
-cleanup() {
-    echo "\$(date +'%Y-%m-%d %H:%M:%S') - MONITOR STOPPED - Process: \$PROCESS_NAME" >> "\$LOG_PATH"
-    update_registry "dead" "null"
-    exit 0
-}
-
-trap cleanup SIGINT SIGTERM
-
-echo "\$(date +'%Y-%m-%d %H:%M:%S') - MONITOR STARTED - Process: \$PROCESS_NAME (ID: \$PROCESS_ID)" >> "\$LOG_PATH"
+echo "=== PROCESS MONITOR STARTED ===" >> "$LOG_PATH"
+echo "Process: $PROCESS_NAME (ID: $PROCESS_ID)" >> "$LOG_PATH"
+echo "Auto-restart: $AUTO_RESTART" >> "$LOG_PATH"
+echo "Max restarts: $MAX_RETRIES" >> "$LOG_PATH"
+echo "Started at: $(date)" >> "$LOG_PATH"
+echo "=================================" >> "$LOG_PATH"
 
 # Function to update registry
 update_registry() {
-    local status="\\$1"
-    local node_pid="\\$2"
-    node -e "
-    const fs = require('fs');
-    const path = require('path');
+    local status="$1"
+    local node_pid="$2"
+    local current_tries="$3"
+    
+    # Create a temporary Node.js script to update the registry
+    cat > /tmp/update_registry_$$.js << EOF
+const fs = require('fs');
+const path = require('path');
+try {
     const registryPath = '${PROCESS_REGISTRY}';
-    try {
+    if (fs.existsSync(registryPath)) {
         const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
         const processIndex = registry.findIndex(p => p.id === '${processId}');
         if (processIndex !== -1) {
-            registry[processIndex].status = '\$status';
-            if ('\$node_pid' && '\$node_pid' !== 'null') {
-                registry[processIndex].pid = parseInt('\$node_pid');
+            registry[processIndex].status = '$status';
+            if ('$node_pid' && '$node_pid' !== 'null') {
+                registry[processIndex].pid = parseInt('$node_pid');
             }
-            registry[processIndex].monitorPid = \$MONITOR_PID;
-            registry[processIndex].config.currentTries = \$CURRENT_TRIES;
+            registry[processIndex].monitorPid = $$;
+            registry[processIndex].config.currentTries = $current_tries;
             registry[processIndex].lastUpdate = new Date().toISOString();
             fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+            console.log('Registry updated successfully');
         }
-    } catch (error) {
-        // Registry might be temporarily unavailable
     }
-    " 2>/dev/null || true
+} catch (error) {
+    // Silently fail if registry update fails
+}
+EOF
+    
+    node /tmp/update_registry_$$.js 2>/dev/null
+    rm -f /tmp/update_registry_$$.js
 }
 
-# Function to check if we should continue monitoring
-should_continue_monitoring() {
-    node -e "
-    const fs = require('fs');
-    const path = require('path');
+# Function to check if we should continue
+should_continue() {
+    # Create a temporary Node.js script to check registry
+    cat > /tmp/check_registry_$$.js << EOF
+const fs = require('fs');
+const path = require('path');
+try {
     const registryPath = '${PROCESS_REGISTRY}';
-    try {
+    if (fs.existsSync(registryPath)) {
         const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
         const process = registry.find(p => p.id === '${processId}');
         if (!process || process.status === 'stopped' || process.status === 'dead') {
             process.exit(1);
         }
         process.exit(0);
-    } catch (e) {
+    } else {
         process.exit(1);
     }
-    " 2>/dev/null
-    return \\$?
+} catch (e) {
+    process.exit(0); // Continue by default if registry is corrupted
+}
+EOF
+    
+    node /tmp/check_registry_$$.js 2>/dev/null
+    local result=$?
+    rm -f /tmp/check_registry_$$.js
+    return $result
 }
 
-# Function to start the Node.js process
-start_node_process() {
-    echo "\$(date +'%Y-%m-%d %H:%M:%S') - STARTING NODE PROCESS - Attempt: \$((CURRENT_TRIES + 1))/\$MAX_RETRIES" >> "\$LOG_PATH"
-   
-    # Start Node.js process
-    node "\$FILE_PATH" >> "\$LOG_PATH" 2>&1 &
-    NODE_PID=\$!
-   
-    # Update registry with running status and actual Node.js PID
-    update_registry "running" "\$NODE_PID"
-   
-    echo "\$(date +'%Y-%m-%d %H:%M:%S') - NODE PROCESS STARTED - PID: \$NODE_PID" >> "\$LOG_PATH"
-   
-    # Wait for the Node.js process to exit
-    wait \$NODE_PID
-    NODE_EXIT_CODE=\$?
-   
-    echo "\$(date +'%Y-%m-%d %H:%M:%S') - NODE PROCESS EXITED - Code: \$NODE_EXIT_CODE" >> "\$LOG_PATH"
-   
-    return \$NODE_EXIT_CODE
+# Function to start and monitor the Node.js process
+start_and_monitor() {
+    local attempt=$1
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting process - Attempt: $((attempt + 1))/$MAX_RETRIES" >> "$LOG_PATH"
+    
+    # Start the Node.js process
+    node "$FILE_PATH" >> "$LOG_PATH" 2>&1 &
+    local NODE_PID=$!
+    
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Process started with PID: $NODE_PID" >> "$LOG_PATH"
+    
+    # Update registry with running status
+    update_registry "running" "$NODE_PID" "$attempt"
+    
+    # Wait for the process to exit
+    wait $NODE_PID
+    local exit_code=$?
+    
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Process exited with code: $exit_code" >> "$LOG_PATH"
+    
+    return $exit_code
 }
 
-# Main monitor loop
-monitor_loop() {
+# Main monitor function
+main() {
     while true; do
-        if ! should_continue_monitoring; then
-            echo "\$(date +'%Y-%m-%d %H:%M:%S') - MONITOR STOPPED BY REGISTRY" >> "\$LOG_PATH"
+        # Check if we should continue monitoring
+        if ! should_continue; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry" >> "$LOG_PATH"
+            update_registry "dead" "null" "$CURRENT_TRIES"
             break
         fi
         
-        # Start the Node.js process and wait for it to complete
-        start_node_process
-        NODE_EXIT_CODE=\$?
-       
-        # Check if we should restart
-        if [[ "\$AUTO_RESTART" == "true" && \$CURRENT_TRIES -lt \$((MAX_RETRIES - 1)) ]]; then
-            CURRENT_TRIES=\$((CURRENT_TRIES + 1))
-            echo "\$(date +'%Y-%m-%d %H:%M:%S') - AUTO-RESTARTING - Attempt: \$CURRENT_TRIES/\$MAX_RETRIES" >> "\$LOG_PATH"
-            update_registry "restarting" "null"
+        # Start and monitor the process
+        start_and_monitor $CURRENT_TRIES
+        local exit_code=$?
+        
+        # Check if auto-restart is enabled and we have tries left
+        if [[ "$AUTO_RESTART" == "true" && $CURRENT_TRIES -lt $((MAX_RETRIES - 1)) ]]; then
+            CURRENT_TRIES=$((CURRENT_TRIES + 1))
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Auto-restarting... Attempt: $CURRENT_TRIES/$MAX_RETRIES" >> "$LOG_PATH"
+            update_registry "restarting" "null" "$CURRENT_TRIES"
             sleep 2
         else
-            echo "\$(date +'%Y-%m-%d %H:%M:%S') - NO MORE RESTART ATTEMPTS" >> "\$LOG_PATH"
-            update_registry "dead" "null"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No more restart attempts" >> "$LOG_PATH"
+            update_registry "dead" "null" "$CURRENT_TRIES"
             break
         fi
     done
+    
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped for process: $PROCESS_NAME" >> "$LOG_PATH"
 }
 
-# Start the monitoring loop
-echo "\$(date +'%Y-%m-%d %H:%M:%S') - STARTING MONITOR LOOP" >> "\$LOG_PATH"
-monitor_loop
-
-echo "\$(date +'%Y-%m-%d %H:%M:%S') - MONITOR STOPPED - Process: \$PROCESS_NAME" >> "\$LOG_PATH"
-
-# Final cleanup
-update_registry "dead" "null"
+# Start the main function
+main
 `;
 
         const scriptPath = path.join(LOG_DIR, `monitor_${processId}.sh`);
@@ -264,13 +276,16 @@ update_registry "dead" "null"
                 config.restartTries || 0
             );
            
+            // Start the monitor script
             child = spawn('bash', [monitorScript], {
                 detached: true,
                 stdio: 'ignore'
             });
 
-            child.unref();
             actualPid = child.pid;
+            child.unref();
+
+            console.log(`✓ Started monitor with PID: ${actualPid}`);
         } else {
             // For regular processes, start directly
             const logFileDescriptor = fs.openSync(logPath, 'a');
@@ -280,8 +295,8 @@ update_registry "dead" "null"
                 stdio: ['ignore', logFileDescriptor, logFileDescriptor]
             });
 
-            child.unref();
             actualPid = child.pid;
+            child.unref();
         }
 
         const entry = {
@@ -377,39 +392,39 @@ update_registry "dead" "null"
 
     static kill(pidOrId) {
         const registry = this._loadRegistry();
-        const process = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
+        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
    
-        if (!process) {
+        if (!proc) {
             console.error('Process not found in registry.');
             return false;
         }
    
-        console.log(`Killing process: ${process.name} (ID: ${process.id})`);
+        console.log(`Killing process: ${proc.name} (ID: ${proc.id})`);
        
         // Mark as stopped in registry first
-        process.status = 'stopped';
+        proc.status = 'stopped';
         this._saveRegistry(registry);
        
         let killed = false;
        
-        if (process.isAutoRestart) {
+        if (proc.isAutoRestart) {
             // For auto-restart processes, kill the monitor and all its children
-            if (process.monitorPid) {
-                killed = this._killProcessTree(process.monitorPid);
+            if (proc.monitorPid) {
+                killed = this._killProcessTree(proc.monitorPid);
             }
             // Also kill the main PID if different
-            if (process.pid !== process.monitorPid) {
-                this._killProcessTree(process.pid);
+            if (proc.pid !== proc.monitorPid) {
+                this._killProcessTree(proc.pid);
             }
         } else {
             // For regular processes, kill the process tree
-            killed = this._killProcessTree(process.pid);
+            killed = this._killProcessTree(proc.pid);
         }
        
         if (killed) {
-            console.log(`✓ Successfully killed process: ${process.name}`);
+            console.log(`✓ Successfully killed process: ${proc.name}`);
         } else {
-            console.log(`- Process ${process.name} was not running`);
+            console.log(`- Process ${proc.name} was not running`);
         }
        
         return true;
@@ -426,28 +441,28 @@ update_registry "dead" "null"
         console.log(`Killing all ${registry.length} processes...`);
        
         // First, mark all as stopped in registry
-        for (const process of registry) {
-            process.status = 'stopped';
+        for (const proc of registry) {
+            proc.status = 'stopped';
         }
         this._saveRegistry(registry);
        
         let killedCount = 0;
        
         // Then kill all processes
-        for (const process of registry) {
+        for (const proc of registry) {
             let killed = false;
            
-            if (process.isAutoRestart && process.monitorPid) {
-                killed = this._killProcessTree(process.monitorPid);
+            if (proc.isAutoRestart && proc.monitorPid) {
+                killed = this._killProcessTree(proc.monitorPid);
             } else {
-                killed = this._killProcessTree(process.pid);
+                killed = this._killProcessTree(proc.pid);
             }
            
             if (killed) {
                 killedCount++;
-                console.log(`✓ Killed: ${process.name}`);
+                console.log(`✓ Killed: ${proc.name}`);
             } else {
-                console.log(`- Already dead: ${process.name}`);
+                console.log(`- Already dead: ${proc.name}`);
             }
         }
        
@@ -459,15 +474,15 @@ update_registry "dead" "null"
    
     static isAlive(pidOrId) {
         const registry = this._loadRegistry();
-        const process = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
+        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
    
-        if (!process) return false;
+        if (!proc) return false;
    
         try {
-            if (process.isAutoRestart && process.monitorPid) {
-                process.kill(process.monitorPid, 0);
+            if (proc.isAutoRestart && proc.monitorPid) {
+                process.kill(proc.monitorPid, 0);
             } else {
-                process.kill(process.pid, 0);
+                process.kill(proc.pid, 0);
             }
             return true;
         } catch (error) {
@@ -542,42 +557,41 @@ update_registry "dead" "null"
             }
         });
 
-        // Handle cleanup - FIXED: Use global process object
+        // Handle cleanup
         const cleanup = () => {
             watcher.close();
             console.log('\n\n📋 Log following stopped.');
             process.exit(0);
         };
 
-        // FIXED: Use global process object instead of parameter shadowing
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
     }
 
     static restart(pidOrId) {
         const registry = this._loadRegistry();
-        const process = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
+        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
    
-        if (!process) {
+        if (!proc) {
             console.error('Process not found.');
             return false;
         }
    
-        console.log(`Restarting process: ${process.name} (ID: ${process.id})`);
+        console.log(`Restarting process: ${proc.name} (ID: ${proc.id})`);
        
         // Kill the current process
-        this.kill(process.id);
+        this.kill(proc.id);
        
         // Wait a moment for cleanup
         setTimeout(() => {
             // Remove from registry
-            this._removeFromRegistry(process.id);
+            this._removeFromRegistry(proc.id);
            
             // Start a new process with the same configuration
-            const newProcess = this.run(process.path, {
-                name: process.name,
-                autoRestart: process.config.autoRestart,
-                restartTries: process.config.restartTries
+            const newProcess = this.run(proc.path, {
+                name: proc.name,
+                autoRestart: proc.config.autoRestart,
+                restartTries: proc.config.restartTries
             });
            
             console.log(`✓ Successfully restarted: ${newProcess.name} (New PID: ${newProcess.pid}, ID: ${newProcess.id})`);
@@ -590,11 +604,11 @@ update_registry "dead" "null"
         const registry = this._loadRegistry();
         const aliveProcesses = [];
        
-        for (const process of registry) {
-            if (this.isAlive(process.id)) {
-                aliveProcesses.push(process);
+        for (const proc of registry) {
+            if (this.isAlive(proc.id)) {
+                aliveProcesses.push(proc);
             } else {
-                console.log(`Cleaning up dead process: ${process.name} (ID: ${process.id})`);
+                console.log(`Cleaning up dead process: ${proc.name} (ID: ${proc.id})`);
             }
         }
        
