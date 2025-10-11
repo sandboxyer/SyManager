@@ -14,7 +14,7 @@ const LOG_DIR = path.resolve('./logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
 if (!fs.existsSync(PROCESS_REGISTRY)) fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
 
-class ProcessManager {
+class SyPM {
     static _loadRegistry() {
         const raw = fs.readFileSync(PROCESS_REGISTRY, 'utf-8');
         return JSON.parse(raw);
@@ -623,7 +623,7 @@ main
     static displayHelp() {
         console.log(`
 Process Manager CLI Usage:
-  node ProcessManager [command] [options]
+  node SyPM [command] [options]
 
 Commands:
   --run <file>          Run a Node.js script as a background process
@@ -642,10 +642,10 @@ Options for --run:
   --restart-tries <n>   Number of restart attempts (implies auto-restart)
 
 Examples:
-  node ProcessManager --run app.js --name my-app
-  node ProcessManager --run app.js --auto-restart
-  node ProcessManager --run app.js --restart-tries 3
-  node ProcessManager --run app.js --name my-app --auto-restart --restart-tries 5
+  node SyPM --run app.js --name my-app
+  node SyPM --run app.js --auto-restart
+  node SyPM --run app.js --restart-tries 3
+  node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
         `);
     }
 
@@ -777,7 +777,7 @@ Examples:
 }
 
 if (process.argv[1] === __filename) {
-    ProcessManager.parseArguments();
+    SyPM.parseArguments();
 }
 
-export default ProcessManager;
+export default SyPM;
