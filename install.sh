@@ -31,6 +31,16 @@ declare -A NODE_ENTRY_POINTS=(
   # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
 )
 
+# COMMAND WORKING DIRECTORY CONFIGURATION
+# Set to "caller" to use the directory where command was called from
+# Set to "global" to use the installation directory (default)
+declare -A COMMAND_WORKING_DIR=(
+  # Format: ["command-name"]="caller|global"
+  # Default behavior is "global" if not specified
+  ["sy"]="global"           # Uses installation directory
+  ["sypm"]="caller"         # Uses caller's current directory
+)
+
 # PRESERVATION WHITELIST (OPTIONAL - files to keep during updates)
 declare -a PRESERVATION_WHITELIST=(
   # Add files/directories to preserve during updates:
@@ -74,6 +84,11 @@ show_help() {
   echo "Commands will be created for:"
   for dest in "${NODE_ENTRY_POINTS[@]}"; do
     echo "  $dest"
+  done
+  echo
+  echo "Working directory configuration:"
+  for command in "${!COMMAND_WORKING_DIR[@]}"; do
+    echo "  $command: ${COMMAND_WORKING_DIR[$command]}"
   done
   exit 0
 }
@@ -199,6 +214,7 @@ create_command_links() {
     local src_path="$install_dir/$src"
     local command_name="${NODE_ENTRY_POINTS[$src]}"
     local dest_path="$BIN_DIR/$command_name"
+    local working_dir="${COMMAND_WORKING_DIR[$command_name]:-global}"
     
     [[ ! -f "$src_path" ]] && continue
     chmod +x "$src_path" 2>/dev/null || true
@@ -210,15 +226,28 @@ create_command_links() {
       local wrapper_path="$install_dir/wrappers/$command_name"
       mkdir -p "$(dirname "$wrapper_path")"
       
-      cat > "$wrapper_path" <<EOF
+      # Create wrapper based on working directory configuration
+      if [[ "$working_dir" == "caller" ]]; then
+        # Use caller's current directory
+        cat > "$wrapper_path" <<EOF
+#!/bin/bash
+# Working directory: caller's current directory
+exec node "$src_path" "\$@"
+EOF
+      else
+        # Use global installation directory (default)
+        cat > "$wrapper_path" <<EOF
 #!/bin/bash
 cd "$install_dir" || exit 1
 exec node "$src_path" "\$@"
 EOF
+      fi
       
       chmod +x "$wrapper_path"
       [[ -L "$dest_path" ]] && rm -f "$dest_path"
       ln -sf "$wrapper_path" "$dest_path"
+      
+      log_message "Created command '$command_name' with working directory: $working_dir"
     fi
   done
 }
@@ -284,9 +313,16 @@ for command in "${NODE_ENTRY_POINTS[@]}"; do
 done
 
 echo
+echo "Working directory configuration:"
+for command in "${NODE_ENTRY_POINTS[@]}"; do
+  local working_dir="${COMMAND_WORKING_DIR[$command]:-global}"
+  echo "  $command: $working_dir"
+done
+
+echo
 if [[ "$LOCAL_DIR_MODE" == true ]]; then
   echo "Commands run from current directory"
 else
-  echo "Commands run from: $INSTALL_DIR"
-  echo "Node.js processes start in: $INSTALL_DIR"
+  echo "Installation directory: $INSTALL_DIR"
+  echo "Node.js processes start in configured working directories (see above)"
 fi
