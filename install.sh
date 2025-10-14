@@ -27,7 +27,7 @@ declare -A NODE_ENTRY_POINTS=(
   # Example: ["src/cli/main.js"]="myapp"
   # Add your specific entry points below:
   ["core/HUD/HUD.js"]="sy"
-  # ["src/cli/tool.js"]="mytool"
+  ["core/SyPM.js"]="sypm"
   # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
 )
 
