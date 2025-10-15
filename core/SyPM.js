@@ -7,17 +7,33 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 
-const PROCESS_REGISTRY = path.resolve('./processes.json');
-const LOG_DIR = path.resolve('./logs');
+// Global paths - fixed system locations
+const GLOBAL_BASE_DIR = path.join(os.homedir(), '.sypm');
+const PROCESS_REGISTRY = path.join(GLOBAL_BASE_DIR, 'processes.json');
+const LOG_DIR = path.join(GLOBAL_BASE_DIR, 'logs');
 
-// Ensure directories exist
-if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
-if (!fs.existsSync(PROCESS_REGISTRY)) fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
+// Ensure global directories exist
+if (!fs.existsSync(GLOBAL_BASE_DIR)) {
+    fs.mkdirSync(GLOBAL_BASE_DIR, { recursive: true });
+}
+if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+if (!fs.existsSync(PROCESS_REGISTRY)) {
+    fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
+}
 
 class SyPM {
     static _loadRegistry() {
-        const raw = fs.readFileSync(PROCESS_REGISTRY, 'utf-8');
-        return JSON.parse(raw);
+        try {
+            const raw = fs.readFileSync(PROCESS_REGISTRY, 'utf-8');
+            return JSON.parse(raw);
+        } catch (error) {
+            // If registry is corrupted, reset it
+            console.warn('Registry corrupted, resetting...');
+            fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
+            return [];
+        }
     }
 
     static _saveRegistry(data) {
@@ -104,13 +120,19 @@ class SyPM {
     }
 
     static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries) {
+        // Escape paths for use in bash script
+        const escapedRegistryPath = PROCESS_REGISTRY.replace(/'/g, "'\\''");
+        const escapedFilePath = filePath.replace(/'/g, "'\\''");
+        const escapedLogPath = logPath.replace(/'/g, "'\\''");
+        
         const scriptContent = `#!/usr/bin/env bash
-PROCESS_ID="${processId}"
-FILE_PATH="${filePath}"
-PROCESS_NAME="${processName}"
-LOG_PATH="${logPath}"
-AUTO_RESTART="${autoRestart}"
-RESTART_TRIES="${restartTries}"
+PROCESS_ID='${processId}'
+FILE_PATH='${escapedFilePath}'
+PROCESS_NAME='${processName}'
+LOG_PATH='${escapedLogPath}'
+AUTO_RESTART='${autoRestart}'
+RESTART_TRIES='${restartTries}'
+REGISTRY_PATH='${escapedRegistryPath}'
 CURRENT_TRIES=0
 MAX_RETRIES=${restartTries > 0 ? restartTries : 999999}
 
@@ -118,34 +140,33 @@ echo "=== PROCESS MONITOR STARTED ===" >> "$LOG_PATH"
 echo "Process: $PROCESS_NAME (ID: $PROCESS_ID)" >> "$LOG_PATH"
 echo "Auto-restart: $AUTO_RESTART" >> "$LOG_PATH"
 echo "Max restarts: $MAX_RETRIES" >> "$LOG_PATH"
-echo "Started at: $(date)" >> "$LOG_PATH"
+echo "Started at: \$(date)" >> "$LOG_PATH"
+echo "Registry: $REGISTRY_PATH" >> "$LOG_PATH"
 echo "=================================" >> "$LOG_PATH"
 
 # Function to update registry
 update_registry() {
-    local status="$1"
-    local node_pid="$2"
-    local current_tries="$3"
+    local status="\$1"
+    local node_pid="\$2"
+    local current_tries="\$3"
     
     # Create a temporary Node.js script to update the registry
     cat > /tmp/update_registry_$$.js << EOF
 const fs = require('fs');
-const path = require('path');
 try {
-    const registryPath = '${PROCESS_REGISTRY}';
+    const registryPath = '${escapedRegistryPath}';
     if (fs.existsSync(registryPath)) {
         const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
         const processIndex = registry.findIndex(p => p.id === '${processId}');
         if (processIndex !== -1) {
-            registry[processIndex].status = '$status';
-            if ('$node_pid' && '$node_pid' !== 'null') {
-                registry[processIndex].pid = parseInt('$node_pid');
+            registry[processIndex].status = '\$status';
+            if ('\$node_pid' && '\$node_pid' !== 'null') {
+                registry[processIndex].pid = parseInt('\$node_pid');
             }
             registry[processIndex].monitorPid = $$;
-            registry[processIndex].config.currentTries = $current_tries;
+            registry[processIndex].config.currentTries = parseInt('\$current_tries');
             registry[processIndex].lastUpdate = new Date().toISOString();
             fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
-            console.log('Registry updated successfully');
         }
     }
 } catch (error) {
@@ -162,9 +183,8 @@ should_continue() {
     # Create a temporary Node.js script to check registry
     cat > /tmp/check_registry_$$.js << EOF
 const fs = require('fs');
-const path = require('path');
 try {
-    const registryPath = '${PROCESS_REGISTRY}';
+    const registryPath = '${escapedRegistryPath}';
     if (fs.existsSync(registryPath)) {
         const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
         const process = registry.find(p => p.id === '${processId}');
@@ -181,32 +201,32 @@ try {
 EOF
     
     node /tmp/check_registry_$$.js 2>/dev/null
-    local result=$?
+    local result=\$?
     rm -f /tmp/check_registry_$$.js
-    return $result
+    return \$result
 }
 
 # Function to start and monitor the Node.js process
 start_and_monitor() {
-    local attempt=$1
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting process - Attempt: $((attempt + 1))/$MAX_RETRIES" >> "$LOG_PATH"
+    local attempt=\$1
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Starting process - Attempt: \$((attempt + 1))/\$MAX_RETRIES" >> "\$LOG_PATH"
     
     # Start the Node.js process
-    node "$FILE_PATH" >> "$LOG_PATH" 2>&1 &
-    local NODE_PID=$!
+    node "\$FILE_PATH" >> "\$LOG_PATH" 2>&1 &
+    local NODE_PID=\$!
     
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Process started with PID: $NODE_PID" >> "$LOG_PATH"
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Process started with PID: \$NODE_PID" >> "\$LOG_PATH"
     
     # Update registry with running status
-    update_registry "running" "$NODE_PID" "$attempt"
+    update_registry "running" "\$NODE_PID" "\$attempt"
     
     # Wait for the process to exit
-    wait $NODE_PID
-    local exit_code=$?
+    wait \$NODE_PID
+    local exit_code=\$?
     
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Process exited with code: $exit_code" >> "$LOG_PATH"
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Process exited with code: \$exit_code" >> "\$LOG_PATH"
     
-    return $exit_code
+    return \$exit_code
 }
 
 # Main monitor function
@@ -214,29 +234,29 @@ main() {
     while true; do
         # Check if we should continue monitoring
         if ! should_continue; then
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry" >> "$LOG_PATH"
-            update_registry "dead" "null" "$CURRENT_TRIES"
+            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry" >> "\$LOG_PATH"
+            update_registry "dead" "null" "\$CURRENT_TRIES"
             break
         fi
         
         # Start and monitor the process
-        start_and_monitor $CURRENT_TRIES
-        local exit_code=$?
+        start_and_monitor \$CURRENT_TRIES
+        local exit_code=\$?
         
         # Check if auto-restart is enabled and we have tries left
-        if [[ "$AUTO_RESTART" == "true" && $CURRENT_TRIES -lt $((MAX_RETRIES - 1)) ]]; then
-            CURRENT_TRIES=$((CURRENT_TRIES + 1))
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Auto-restarting... Attempt: $CURRENT_TRIES/$MAX_RETRIES" >> "$LOG_PATH"
-            update_registry "restarting" "null" "$CURRENT_TRIES"
+        if [[ "\$AUTO_RESTART" == "true" && \$CURRENT_TRIES -lt \$((MAX_RETRIES - 1)) ]]; then
+            CURRENT_TRIES=\$((CURRENT_TRIES + 1))
+            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Auto-restarting... Attempt: \$CURRENT_TRIES/\$MAX_RETRIES" >> "\$LOG_PATH"
+            update_registry "restarting" "null" "\$CURRENT_TRIES"
             sleep 2
         else
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No more restart attempts" >> "$LOG_PATH"
-            update_registry "dead" "null" "$CURRENT_TRIES"
+            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] No more restart attempts" >> "\$LOG_PATH"
+            update_registry "dead" "null" "\$CURRENT_TRIES"
             break
         fi
     done
     
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped for process: $PROCESS_NAME" >> "$LOG_PATH"
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped for process: \$PROCESS_NAME" >> "\$LOG_PATH"
 }
 
 # Start the main function
@@ -313,7 +333,8 @@ main
                 currentTries: 0
             },
             isAutoRestart: !!(config.autoRestart || config.restartTries),
-            monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null
+            monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null,
+            lastUpdate: new Date().toISOString()
         };
 
         const registry = this._loadRegistry();
@@ -328,17 +349,18 @@ main
         const processList = [];
 
         for (const proc of registry) {
+            // For auto-restart processes, trust the registry status completely
+            // Don't overwrite with process alive checks
             let status = proc.status;
-           
-            // For auto-restart processes, check if monitor is alive
+            let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
+            
+            // Only check if process is alive for status verification, but don't auto-update status
             let isAlive = false;
             try {
                 if (proc.isAutoRestart && proc.monitorPid) {
-                    // Check if monitor process is alive
                     process.kill(proc.monitorPid, 0);
                     isAlive = true;
                 } else {
-                    // Check if regular process is alive
                     process.kill(proc.pid, 0);
                     isAlive = true;
                 }
@@ -346,19 +368,19 @@ main
                 isAlive = false;
             }
 
-            // Update status based on actual process state
+            // If the monitor says it's running/restarting but process is dead, update status
             if (!isAlive && (proc.status === 'running' || proc.status === 'restarting')) {
-                status = 'stopped';
+                status = 'dead';
                 proc.status = status;
-            } else if (isAlive && proc.status === 'stopped') {
+                displayStatus = 'Dead';
+                this._saveRegistry(registry);
+            }
+            // If monitor says it's stopped but process is alive, update to running
+            else if (isAlive && proc.status === 'stopped') {
                 status = 'running';
                 proc.status = status;
-            }
-
-            // Format display status
-            let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
-            if (status === 'restarting' && proc.isAutoRestart) {
-                displayStatus = 'Restarting';
+                displayStatus = 'Running';
+                this._saveRegistry(registry);
             }
 
             processList.push({
@@ -368,12 +390,10 @@ main
                 pid: proc.pid,
                 monitorPid: proc.monitorPid || 'N/A',
                 tries: proc.config?.currentTries || 0,
-                autoRestart: proc.isAutoRestart ? 'Yes' : 'No'
+                autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
+                path: proc.path
             });
         }
-
-        // Save any status updates
-        this._saveRegistry(registry);
 
         return processList;
     }
@@ -609,6 +629,15 @@ main
                 aliveProcesses.push(proc);
             } else {
                 console.log(`Cleaning up dead process: ${proc.name} (ID: ${proc.id})`);
+                // Also try to remove the monitor script if it exists
+                try {
+                    const monitorScript = path.join(LOG_DIR, `monitor_${proc.id}.sh`);
+                    if (fs.existsSync(monitorScript)) {
+                        fs.unlinkSync(monitorScript);
+                    }
+                } catch (error) {
+                    // Ignore cleanup errors
+                }
             }
         }
        
@@ -620,20 +649,32 @@ main
         }
     }
 
+    static info() {
+        console.log(`SyPM Global Information:`);
+        console.log(`Base Directory: ${GLOBAL_BASE_DIR}`);
+        console.log(`Registry File: ${PROCESS_REGISTRY}`);
+        console.log(`Log Directory: ${LOG_DIR}`);
+        
+        const registry = this._loadRegistry();
+        console.log(`Total Processes: ${registry.length}`);
+        console.log(`Active Processes: ${registry.filter(p => this.isAlive(p.id)).length}`);
+    }
+
     static displayHelp() {
         console.log(`
-Process Manager CLI Usage:
+Process Manager CLI Usage (Global):
   node SyPM [command] [options]
 
 Commands:
   --run <file>          Run a Node.js script as a background process
-  --list                List all managed processes
+  --list                List all managed processes (global)
   --kill <pid|id>       Kill a process by PID or ID
   --kill-all            Stop all managed processes and remove from registry
   --restart <pid|id>    Restart a process by PID or ID
   --alive <pid|id>      Check if a process is alive
   --log <pid|id>        Follow logs of a process (real-time)
   --cleanup             Remove dead processes from registry
+  --info                Show global SyPM information
   --help                Display this help message
 
 Options for --run:
@@ -641,11 +682,18 @@ Options for --run:
   --auto-restart        Auto-restart the process if it crashes
   --restart-tries <n>   Number of restart attempts (implies auto-restart)
 
+Global Features:
+  • Processes are managed system-wide from: ${GLOBAL_BASE_DIR}
+  • Access process list from any directory
+  • Persistent registry across terminal sessions
+  • Real-time status updates for auto-restart processes
+
 Examples:
   node SyPM --run app.js --name my-app
   node SyPM --run app.js --auto-restart
   node SyPM --run app.js --restart-tries 3
   node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
+  node SyPM --list      # Shows all processes regardless of current directory
         `);
     }
 
@@ -657,9 +705,14 @@ Examples:
             return;
         }
 
+        if (args.includes('--info')) {
+            this.info();
+            return;
+        }
+
         if (args.includes('--list')) {
             const processes = this.list();
-            console.log('Managed Processes:');
+            console.log('Managed Processes (Global):');
             if (processes.length === 0) {
                 console.log('No processes found.');
             } else {
@@ -703,6 +756,7 @@ Examples:
             try {
                 const result = this.run(filePath, config);
                 console.log(`✓ Started process: ${result.name} (PID: ${result.pid}, ID: ${result.id})`);
+                console.log(`✓ Global registry: ${PROCESS_REGISTRY}`);
                 if (config.autoRestart) {
                     console.log(`✓ Auto-restart enabled${config.restartTries ? ` with ${config.restartTries} tries` : ''}`);
                 }
