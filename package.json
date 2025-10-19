@@ -2,6 +2,7 @@
   "version": "0.0.4",
   "type": "module",
   "scripts": {
-    "sy": "node ./core/HUD/HUD.js"
+    "sy": "node ./core/HUD/HUD.js",
+    "sypm" :"node ./core/SyPM.js"	
   }
 }
