@@ -732,6 +732,116 @@ int instance_insert(const char *database_name, const char *collection_name, char
     return 0;
 }
 
+// Helper function to merge JSON objects properly
+char* merge_json_objects(const char *original_json, const char *update_json) {
+    // Extract the update fields and values
+    char update_copy[MAX_LINE_LENGTH];
+    strncpy(update_copy, update_json, sizeof(update_copy) - 1);
+    update_copy[sizeof(update_copy) - 1] = '\0';
+    
+    // Remove the outer braces from update JSON
+    if (update_copy[0] == '{') {
+        memmove(update_copy, update_copy + 1, strlen(update_copy));
+    }
+    if (update_copy[strlen(update_copy)-1] == '}') {
+        update_copy[strlen(update_copy)-1] = '\0';
+    }
+    
+    // Parse update fields into a temporary structure
+    char *update_fields[MAX_FIELDS];
+    char *update_values[MAX_FIELDS];
+    int update_count = 0;
+    
+    char *token = strtok(update_copy, ",");
+    while (token && update_count < MAX_FIELDS) {
+        char *colon = strchr(token, ':');
+        if (colon) {
+            *colon = '\0';
+            // Remove quotes from field name if present
+            char *field_name = token;
+            if (field_name[0] == '"') field_name++;
+            if (field_name[strlen(field_name)-1] == '"') field_name[strlen(field_name)-1] = '\0';
+            
+            char *field_value = colon + 1;
+            
+            update_fields[update_count] = strdup(field_name);
+            update_values[update_count] = strdup(field_value);
+            update_count++;
+        }
+        token = strtok(NULL, ",");
+    }
+    
+    // Build the merged JSON
+    char *merged_json = malloc(MAX_LINE_LENGTH);
+    if (!merged_json) return NULL;
+    
+    strcpy(merged_json, "{");
+    
+    // First add all fields from original JSON that are not in update
+    char original_copy[MAX_LINE_LENGTH];
+    strncpy(original_copy, original_json, sizeof(original_copy) - 1);
+    original_copy[sizeof(original_copy) - 1] = '\0';
+    
+    // Remove outer braces
+    if (original_copy[0] == '{') {
+        memmove(original_copy, original_copy + 1, strlen(original_copy));
+    }
+    if (original_copy[strlen(original_copy)-1] == '}') {
+        original_copy[strlen(original_copy)-1] = '\0';
+    }
+    
+    char *original_token = strtok(original_copy, ",");
+    int field_added = 0;
+    
+    while (original_token) {
+        char *colon = strchr(original_token, ':');
+        if (colon) {
+            *colon = '\0';
+            char *field_name = original_token;
+            if (field_name[0] == '"') field_name++;
+            if (field_name[strlen(field_name)-1] == '"') field_name[strlen(field_name)-1] = '\0';
+            
+            char *field_value = colon + 1;
+            
+            // Check if this field is being updated
+            bool is_updated = false;
+            for (int i = 0; i < update_count; i++) {
+                if (strcmp(field_name, update_fields[i]) == 0) {
+                    is_updated = true;
+                    break;
+                }
+            }
+            
+            if (!is_updated) {
+                if (field_added > 0) strcat(merged_json, ",");
+                // Preserve the original field formatting
+                char *value_start = strstr(original_token, ":");
+                if (value_start) {
+                    char field_entry[512];
+                    snprintf(field_entry, sizeof(field_entry), "%s%s", original_token, value_start);
+                    strcat(merged_json, field_entry);
+                    field_added++;
+                }
+            }
+        }
+        original_token = strtok(NULL, ",");
+    }
+    
+    // Now add all updated fields
+    for (int i = 0; i < update_count; i++) {
+        if (field_added > 0) strcat(merged_json, ",");
+        snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
+                "\"%s\":%s", update_fields[i], update_values[i]);
+        field_added++;
+        
+        free(update_fields[i]);
+        free(update_values[i]);
+    }
+    
+    strcat(merged_json, "}");
+    return merged_json;
+}
+
 int instance_update(const char *database_name, const char *collection_name, 
                    const char *query, char *update_json) {
     if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
@@ -785,25 +895,16 @@ int instance_update(const char *database_name, const char *collection_name,
         line_buffer[strcspn(line_buffer, "\n")] = '\0';
         
         if (json_matches_query(line_buffer, query)) {
-            // Merge update with existing data
-            char *update_data = update_json + 1;
-            update_data[strlen(update_data)-1] = '\0';
-            
-            char *insert_position = strchr(line_buffer, ',');
-            if (insert_position) {
-                insert_position++;
-                
-                char new_line[MAX_LINE_LENGTH];
-                strncpy(new_line, line_buffer, insert_position - line_buffer);
-                new_line[insert_position - line_buffer] = '\0';
-                strcat(new_line, update_data);
-                strcat(new_line, "}");
-                
-                fprintf(temporary_file_pointer, "%s\n", new_line);
+            // Use the new merge function to properly merge JSON objects
+            char *merged_json = merge_json_objects(line_buffer, update_json);
+            if (merged_json) {
+                fprintf(temporary_file_pointer, "%s\n", merged_json);
+                free(merged_json);
+                updated_count++;
             } else {
+                // Fallback: write original line if merge fails
                 fprintf(temporary_file_pointer, "%s\n", line_buffer);
             }
-            updated_count++;
         } else {
             fprintf(temporary_file_pointer, "%s\n", line_buffer);
         }
