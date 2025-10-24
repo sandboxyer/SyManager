@@ -57,7 +57,7 @@ typedef struct {
     uint64_t file_size;
     uint64_t free_offset;
     uint32_t schema_crc;
-    uint8_t reserved[100]; // For future expansion
+    uint8_t reserved[100];
 } file_header_t;
 
 // Binary record header
@@ -67,7 +67,7 @@ typedef struct {
     uint32_t flags;
     uint32_t data_crc;
     char uuid[UUID_SIZE];
-    uint8_t reserved[28]; // For future expansion
+    uint8_t reserved[28];
 } record_header_t;
 
 // ==================== UTILITY FUNCTIONS ====================
@@ -77,12 +77,14 @@ void generate_uuid(char *uuid) {
     int segments[] = {8, 4, 4, 4, 12};
     int pos = 0;
     
-    srand(time(NULL) + getpid() + rand());
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    unsigned int seed = (unsigned int)(ts.tv_nsec ^ ts.tv_sec ^ getpid());
     
     for (int i = 0; i < 5; i++) {
         if (i > 0) uuid[pos++] = '-';
         for (int j = 0; j < segments[i]; j++) {
-            uuid[pos++] = chars[rand() % 16];
+            uuid[pos++] = chars[rand_r(&seed) % 16];
         }
     }
     uuid[pos] = '\0';
@@ -91,8 +93,30 @@ void generate_uuid(char *uuid) {
 int create_directory(const char *path) {
     struct stat st;
     if (stat(path, &st) == -1) {
-        if (mkdir(path, 0755) == -1) {
-            fprintf(stderr, "Error creating directory %s: %s\n", path, strerror(errno));
+        // Create parent directories recursively
+        char tmp[MAX_PATH_LENGTH];
+        char *p = NULL;
+        size_t len;
+        
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        len = strlen(tmp);
+        if (tmp[len - 1] == '/') {
+            tmp[len - 1] = 0;
+        }
+        
+        for (p = tmp + 1; *p; p++) {
+            if (*p == '/') {
+                *p = 0;
+                if (mkdir(tmp, 0755) == -1 && errno != EEXIST) {
+                    fprintf(stderr, "Error creating directory %s: %s\n", tmp, strerror(errno));
+                    return -1;
+                }
+                *p = '/';
+            }
+        }
+        
+        if (mkdir(tmp, 0755) == -1 && errno != EEXIST) {
+            fprintf(stderr, "Error creating directory %s: %s\n", tmp, strerror(errno));
             return -1;
         }
     }
@@ -165,7 +189,6 @@ FILE* open_data_file(const char *database_name, const char *collection_name, con
     
     FILE *file = fopen(path, mode);
     if (!file && strcmp(mode, "r+b") == 0) {
-        // Try to create file if it doesn't exist in read-write mode
         file = fopen(path, "w+b");
     }
     return file;
@@ -192,7 +215,7 @@ int read_file_header(FILE *file, file_header_t *header) {
     if (fread(header, sizeof(file_header_t), 1, file) != 1) return -1;
     
     if (header->magic != FILE_MAGIC) {
-        return -1; // Not a valid SYDB file
+        return -1;
     }
     
     return 0;
@@ -212,15 +235,13 @@ int append_record(FILE *file, const char *uuid, const char *json_data) {
     }
     
     size_t data_len = strlen(json_data);
-    size_t total_size = sizeof(record_header_t) + data_len + 1; // +1 for null terminator
+    size_t total_size = sizeof(record_header_t) + data_len + 1;
     
-    // Check if we need to expand file
     if (header.free_offset + total_size > header.file_size) {
-        header.file_size = header.free_offset + total_size + 1024; // Add some padding
+        header.file_size = header.free_offset + total_size + 1024;
         if (write_file_header(file, &header) == -1) return -1;
     }
     
-    // Write record
     if (fseek(file, header.free_offset, SEEK_SET) != 0) return -1;
     
     record_header_t rec_header = {
@@ -234,9 +255,8 @@ int append_record(FILE *file, const char *uuid, const char *json_data) {
     memset(rec_header.reserved, 0, sizeof(rec_header.reserved));
     
     if (fwrite(&rec_header, sizeof(record_header_t), 1, file) != 1) return -1;
-    if (fwrite(json_data, data_len + 1, 1, file) != 1) return -1; // Include null terminator
+    if (fwrite(json_data, data_len + 1, 1, file) != 1) return -1;
     
-    // Update file header
     header.record_count++;
     header.free_offset += total_size;
     
@@ -273,7 +293,7 @@ int read_next_record(record_iterator_t *iter, record_header_t *header, char **js
     file_header_t file_header;
     if (read_file_header(iter->file, &file_header) == -1) return -1;
     
-    if (iter->records_processed >= file_header.record_count) return 0; // No more records
+    if (iter->records_processed >= file_header.record_count) return 0;
     
     if (fseek(iter->file, iter->current_offset, SEEK_SET) != 0) return -1;
     
@@ -287,7 +307,6 @@ int read_next_record(record_iterator_t *iter, record_header_t *header, char **js
         return -1;
     }
     
-    // Verify CRC
     uint32_t computed_crc = compute_crc32(*json_data, header->data_size);
     if (computed_crc != header->data_crc) {
         free(*json_data);
@@ -300,7 +319,7 @@ int read_next_record(record_iterator_t *iter, record_header_t *header, char **js
     return 1;
 }
 
-// ==================== JSON-LIKE PARSING (Same as original) ====================
+// ==================== JSON-LIKE PARSING ====================
 
 char* json_get_string(const char *json, const char *key) {
     char pattern[256];
@@ -382,7 +401,7 @@ bool json_matches_query(const char *json, const char *query) {
     return true;
 }
 
-// ==================== SCHEMA PARSING AND VALIDATION (Same as original) ====================
+// ==================== SCHEMA PARSING AND VALIDATION ====================
 
 field_type_t parse_field_type(const char *type_string) {
     if (strcmp(type_string, "string") == 0) return TYPE_STRING;
@@ -499,7 +518,7 @@ int load_schema(const char *database_name, const char *collection_name,
 
 bool validate_field_value(const char *field_name, const char *value, field_type_t type) {
     if (!value || strlen(value) == 0) {
-        return true; // Empty values are allowed for optional fields
+        return true;
     }
     
     switch (type) {
@@ -515,7 +534,7 @@ bool validate_field_value(const char *field_name, const char *value, field_type_
         }
         case TYPE_FLOAT: {
             char *end_ptr;
-            double float_value = strtod(value, &end_ptr); // Fixed: removed base parameter
+            double float_value = strtod(value, &end_ptr);
             if (*end_ptr != '\0') {
                 fprintf(stderr, "Validation error: Field '%s' should be float but got '%s'\n", 
                         field_name, value);
@@ -537,7 +556,7 @@ bool validate_field_value(const char *field_name, const char *value, field_type_
         case TYPE_OBJECT:
         case TYPE_NULL:
         default:
-            return true; // No strict validation for these types yet
+            return true;
     }
 }
 
@@ -558,12 +577,6 @@ int validate_instance_against_schema(const char *instance_json,
                     return -1;
                 }
                 free(value);
-            } else {
-                // For numeric fields that are not stored as strings
-                int int_value = json_get_int(instance_json, fields[i].name);
-                if (fields[i].type == TYPE_INT) {
-                    // This is already validated by the JSON parsing
-                }
             }
         }
     }
@@ -591,7 +604,7 @@ void print_schema(const char *database_name, const char *collection_name) {
     }
 }
 
-// ==================== DATABASE OPERATIONS (Same as original) ====================
+// ==================== DATABASE OPERATIONS ====================
 
 int database_create(const char *database_name) {
     char base_dir[MAX_PATH_LENGTH];
@@ -681,7 +694,7 @@ char** database_list(int *count) {
     return dbs;
 }
 
-// ==================== COLLECTION OPERATIONS (Same as original) ====================
+// ==================== COLLECTION OPERATIONS ====================
 
 int collection_create(const char *database_name, const char *collection_name, 
                      field_schema_t *fields, int field_count) {
@@ -701,7 +714,6 @@ int collection_create(const char *database_name, const char *collection_name,
         return -1;
     }
     
-    // Create schema file
     char schema_path[MAX_PATH_LENGTH];
     snprintf(schema_path, MAX_PATH_LENGTH, "%s/schema.txt", coll_path);
     
@@ -729,7 +741,6 @@ int collection_create(const char *database_name, const char *collection_name,
     fclose(file);
     release_lock(lock_fd, lock_path);
     
-    // Create data file with binary format
     char data_path[MAX_PATH_LENGTH];
     snprintf(data_path, MAX_PATH_LENGTH, "%s/data%s", coll_path, DATA_FILE_EXTENSION);
     FILE *data_file = fopen(data_path, "w+b");
@@ -811,7 +822,7 @@ char** collection_list(const char *database_name, int *count) {
     return collections;
 }
 
-// ==================== INSTANCE OPERATIONS (Modified for binary storage) ====================
+// ==================== INSTANCE OPERATIONS ====================
 
 char* build_instance_json(char **fields, char **values, int count) {
     char *json = malloc(MAX_LINE_LENGTH);
@@ -904,12 +915,10 @@ int instance_insert(const char *database_name, const char *collection_name, char
 }
 
 char* merge_json_objects(const char *original_json, const char *update_json) {
-    // Parse update JSON into field-value pairs
     char update_copy[MAX_LINE_LENGTH];
     strncpy(update_copy, update_json, sizeof(update_copy) - 1);
     update_copy[sizeof(update_copy) - 1] = '\0';
     
-    // Remove outer braces if present
     if (update_copy[0] == '{') {
         memmove(update_copy, update_copy + 1, strlen(update_copy));
     }
@@ -927,7 +936,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
         if (colon) {
             *colon = '\0';
             char *field_name = token;
-            // Remove quotes and trim spaces from field name
             while (*field_name == ' ' || *field_name == '"') field_name++;
             char *field_name_end = field_name + strlen(field_name) - 1;
             while (field_name_end > field_name && (*field_name_end == ' ' || *field_name_end == '"')) {
@@ -936,7 +944,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
             }
             
             char *field_value = colon + 1;
-            // Trim spaces from field value
             while (*field_value == ' ') field_value++;
             
             update_fields[update_count] = strdup(field_name);
@@ -946,12 +953,10 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
         token = strtok(NULL, ",");
     }
     
-    // Parse original JSON into field-value pairs
     char original_copy[MAX_LINE_LENGTH];
     strncpy(original_copy, original_json, sizeof(original_copy) - 1);
     original_copy[sizeof(original_copy) - 1] = '\0';
     
-    // Remove outer braces if present
     if (original_copy[0] == '{') {
         memmove(original_copy, original_copy + 1, strlen(original_copy));
     }
@@ -969,7 +974,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
         if (colon) {
             *colon = '\0';
             char *field_name = orig_token;
-            // Remove quotes and trim spaces from field name
             while (*field_name == ' ' || *field_name == '"') field_name++;
             char *field_name_end = field_name + strlen(field_name) - 1;
             while (field_name_end > field_name && (*field_name_end == ' ' || *field_name_end == '"')) {
@@ -978,7 +982,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
             }
             
             char *field_value = colon + 1;
-            // Trim spaces from field value
             while (*field_value == ' ') field_value++;
             
             original_fields[original_count] = strdup(field_name);
@@ -988,10 +991,8 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
         orig_token = strtok(NULL, ",");
     }
     
-    // Create merged JSON
     char *merged_json = malloc(MAX_LINE_LENGTH);
     if (!merged_json) {
-        // Cleanup
         for (int i = 0; i < update_count; i++) {
             free(update_fields[i]);
             free(update_values[i]);
@@ -1006,7 +1007,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
     strcpy(merged_json, "{");
     int fields_added = 0;
     
-    // First add all original fields that are NOT being updated
     for (int i = 0; i < original_count; i++) {
         bool is_updated = false;
         for (int j = 0; j < update_count; j++) {
@@ -1021,22 +1021,17 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
                 strcat(merged_json, ",");
             }
             
-            // Check if the value is a string (needs quotes) or number (no quotes)
             char *value = original_values[i];
             if (value[0] == '"' && value[strlen(value)-1] == '"') {
-                // It's already a quoted string
                 snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                         "\"%s\":%s", original_fields[i], value);
             } else {
-                // Check if it's a number
                 char *end_ptr;
                 strtol(value, &end_ptr, 10);
                 if (*end_ptr == '\0') {
-                    // It's a number
                     snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                             "\"%s\":%s", original_fields[i], value);
                 } else {
-                    // It's a string that needs quotes
                     snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                             "\"%s\":\"%s\"", original_fields[i], value);
                 }
@@ -1045,28 +1040,22 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
         }
     }
     
-    // Then add all updated fields
     for (int i = 0; i < update_count; i++) {
         if (fields_added > 0) {
             strcat(merged_json, ",");
         }
         
-        // Check if the value is a string (needs quotes) or number (no quotes)
         char *value = update_values[i];
         if (value[0] == '"' && value[strlen(value)-1] == '"') {
-            // It's already a quoted string
             snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                     "\"%s\":%s", update_fields[i], value);
         } else {
-            // Check if it's a number
             char *end_ptr;
             strtol(value, &end_ptr, 10);
             if (*end_ptr == '\0') {
-                // It's a number
                 snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                         "\"%s\":%s", update_fields[i], value);
             } else {
-                // It's a string that needs quotes
                 snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
                         "\"%s\":\"%s\"", update_fields[i], value);
             }
@@ -1076,7 +1065,6 @@ char* merge_json_objects(const char *original_json, const char *update_json) {
     
     strcat(merged_json, "}");
     
-    // Cleanup
     for (int i = 0; i < update_count; i++) {
         free(update_fields[i]);
         free(update_values[i]);
@@ -1099,12 +1087,10 @@ int instance_update(const char *database_name, const char *collection_name,
     field_schema_t fields[MAX_FIELDS];
     int field_count = 0;
     if (load_schema(database_name, collection_name, fields, &field_count) == 0) {
-        // Extract the fields being updated from update_json
         char update_copy[MAX_LINE_LENGTH];
         strncpy(update_copy, update_json, sizeof(update_copy) - 1);
         update_copy[sizeof(update_copy) - 1] = '\0';
         
-        // Remove outer braces if present
         if (update_copy[0] == '{') {
             memmove(update_copy, update_copy + 1, strlen(update_copy));
         }
@@ -1112,7 +1098,6 @@ int instance_update(const char *database_name, const char *collection_name,
             update_copy[strlen(update_copy)-1] = '\0';
         }
         
-        // Parse update fields to validate only the ones being updated
         char *update_fields[MAX_FIELDS];
         char *update_values[MAX_FIELDS];
         int update_field_count = 0;
@@ -1123,7 +1108,6 @@ int instance_update(const char *database_name, const char *collection_name,
             if (colon) {
                 *colon = '\0';
                 char *field_name = token;
-                // Remove quotes from field name if present
                 if (field_name[0] == '"') field_name++;
                 if (field_name[strlen(field_name)-1] == '"') field_name[strlen(field_name)-1] = '\0';
                 
@@ -1136,14 +1120,10 @@ int instance_update(const char *database_name, const char *collection_name,
             token = strtok(NULL, ",");
         }
         
-        // Validate only the fields being updated
         for (int i = 0; i < update_field_count; i++) {
-            // Find this field in the schema
             for (int j = 0; j < field_count; j++) {
                 if (strcmp(update_fields[i], fields[j].name) == 0) {
-                    // Validate this specific field
                     if (!validate_field_value(fields[j].name, update_values[i], fields[j].type)) {
-                        // Cleanup
                         for (int k = 0; k < update_field_count; k++) {
                             free(update_fields[k]);
                             free(update_values[k]);
@@ -1183,8 +1163,6 @@ int instance_update(const char *database_name, const char *collection_name,
         release_lock(lock_fd, lock_path);
         return -1;
     }
-    
-    initialize_data_file(temp_file);
     
     record_iterator_t *iter = create_record_iterator(source_file);
     if (!iter) {
@@ -1266,8 +1244,6 @@ int instance_delete(const char *database_name, const char *collection_name, cons
         return -1;
     }
     
-    initialize_data_file(temp_file);
-    
     record_iterator_t *iter = create_record_iterator(source_file);
     if (!iter) {
         fclose(source_file);
@@ -1329,7 +1305,6 @@ char** instance_find(const char *database_name, const char *collection_name, con
         return NULL;
     }
     
-    // First pass: count matching instances
     record_header_t header;
     char *json_data;
     int match_count = 0;
@@ -1349,7 +1324,6 @@ char** instance_find(const char *database_name, const char *collection_name, con
         return NULL;
     }
     
-    // Second pass: collect matching instances
     iter = create_record_iterator(data_file);
     char **results = malloc(match_count * sizeof(char*));
     if (!results) {
@@ -1445,7 +1419,7 @@ char** instance_list(const char *database_name, const char *collection_name, int
     return instances;
 }
 
-// ==================== COMMAND LINE INTERFACE (Same as original) ====================
+// ==================== COMMAND LINE INTERFACE ====================
 
 void print_usage() {
     printf("Usage:\n");
