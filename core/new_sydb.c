@@ -10,539 +10,823 @@
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <math.h>
+
+// ==================== FUNCTION DECLARATIONS ====================
+char* json_get_string_value(const char* json_data, const char* key);
+int json_get_integer_value(const char* json_data, const char* key);
+bool json_has_field(const char* json_data, const char* key);
+bool json_matches_query_conditions(const char* json_data, const char* query);
 
 // ==================== CONSTANTS AND CONFIGURATION ====================
 
-#define MAX_NAME_LENGTH 256
-#define MAX_FIELD_LENGTH 64
-#define MAX_FIELDS 32
-#define MAX_PATH_LENGTH 1024
-#define MAX_LINE_LENGTH 4096
-#define UUID_SIZE 37
+#define MAXIMUM_NAME_LENGTH 256
+#define MAXIMUM_FIELD_LENGTH 64
+#define MAXIMUM_FIELDS 128
+#define MAXIMUM_PATH_LENGTH 1024
+#define MAXIMUM_LINE_LENGTH 4096
+#define UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE 37
 #define SYDB_BASE_DIRECTORY "/var/lib/sydb"
-#define LOCK_TIMEOUT 30
+#define LOCK_TIMEOUT_SECONDS 30
 #define DATA_FILE_EXTENSION ".sydb"
-#define FILE_MAGIC 0x53594442 // "SYDB" in hex
-#define FILE_VERSION 1
+#define INDEX_FILE_EXTENSION ".sydidx"
+#define FILE_MAGIC_NUMBER 0x53594442
+#define FILE_VERSION_NUMBER 2
+#define CACHE_CAPACITY 10000
+#define B_TREE_ORDER 16
+#define MAXIMUM_CONCURRENT_READERS 100
+#define MAXIMUM_THREAD_POOL_SIZE 16
+#define BATCH_BUFFER_SIZE (1024 * 1024)
+#define MAXIMUM_INDEXES_PER_COLLECTION 32
+#define QUERY_RESULT_BUFFER_SIZE 1000
 
 typedef enum {
-    TYPE_STRING,
-    TYPE_INT,
-    TYPE_FLOAT,
-    TYPE_BOOL,
-    TYPE_ARRAY,
-    TYPE_OBJECT,
-    TYPE_NULL
+    FIELD_TYPE_STRING,
+    FIELD_TYPE_INTEGER,
+    FIELD_TYPE_FLOAT,
+    FIELD_TYPE_BOOLEAN,
+    FIELD_TYPE_ARRAY,
+    FIELD_TYPE_OBJECT,
+    FIELD_TYPE_NULL
 } field_type_t;
 
-// ==================== BINARY DATA STRUCTURES ====================
+// ==================== HIGH-PERFORMANCE DATA STRUCTURES ====================
 
 typedef struct {
-    char name[MAX_FIELD_LENGTH];
+    char name[MAXIMUM_FIELD_LENGTH];
     field_type_t type;
     bool required;
+    bool indexed;
 } field_schema_t;
 
 typedef struct {
-    char uuid[UUID_SIZE];
-    char *data;
+    char universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE];
+    uint8_t* binary_data;
     size_t data_length;
-} instance_t;
+    uint64_t file_offset;
+    time_t timestamp;
+} database_instance_t;
 
-// Binary file header
+typedef struct binary_field_header {
+    uint16_t field_identifier;
+    field_type_t type;
+    uint16_t data_length;
+    uint8_t data[];
+} binary_field_header_t;
+
 typedef struct {
-    uint32_t magic;
-    uint32_t version;
+    uint32_t magic_number;
+    uint32_t version_number;
     uint64_t record_count;
     uint64_t file_size;
     uint64_t free_offset;
-    uint32_t schema_crc;
-    uint8_t reserved[100];
+    uint32_t schema_checksum;
+    uint64_t index_root_offset;
+    uint32_t flags;
+    uint8_t reserved[84];
 } file_header_t;
 
-// Binary record header
 typedef struct {
     uint64_t data_size;
     uint64_t timestamp;
     uint32_t flags;
-    uint32_t data_crc;
-    char uuid[UUID_SIZE];
-    uint8_t reserved[28];
+    uint32_t data_checksum;
+    uint32_t field_count;
+    char universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE];
+    uint8_t reserved[20];
 } record_header_t;
+
+// ==================== B-TREE INDEX IMPLEMENTATION ====================
+
+typedef struct b_tree_node {
+    uint64_t record_offsets[B_TREE_ORDER - 1];
+    char keys[B_TREE_ORDER - 1][MAXIMUM_FIELD_LENGTH];
+    uint64_t child_node_offsets[B_TREE_ORDER];
+    uint32_t key_count;
+    bool is_leaf;
+    uint64_t node_offset;
+} b_tree_node_t;
+
+typedef struct {
+    char field_name[MAXIMUM_FIELD_LENGTH];
+    field_type_t field_type;
+    b_tree_node_t* root_node;
+    uint64_t root_node_offset;
+    pthread_rwlock_t lock;
+} field_index_t;
+
+// ==================== CACHE IMPLEMENTATION ====================
+
+typedef struct cache_entry {
+    char universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE];
+    database_instance_t* instance;
+    time_t last_accessed_time;
+    uint64_t access_count;
+    struct cache_entry* next_entry;
+    struct cache_entry* previous_entry;
+} cache_entry_t;
+
+typedef struct {
+    cache_entry_t** entries;
+    cache_entry_t* head_entry;
+    cache_entry_t* tail_entry;
+    size_t capacity;
+    size_t size;
+    uint64_t cache_hits;
+    uint64_t cache_misses;
+    pthread_rwlock_t lock;
+} lru_cache_t;
+
+// ==================== CONCURRENCY CONTROL ====================
+
+typedef struct {
+    pthread_rwlock_t schema_lock;
+    pthread_rwlock_t data_lock;
+    pthread_mutex_t cache_lock;
+    pthread_rwlock_t index_lock;
+    pthread_cond_t write_complete_condition;
+    int active_readers_count;
+    int waiting_writers_count;
+    bool writer_active;
+} collection_lock_t;
+
+typedef struct {
+    pthread_t threads[MAXIMUM_THREAD_POOL_SIZE];
+    pthread_mutex_t queue_lock;
+    pthread_cond_t queue_condition;
+    void (*tasks[MAXIMUM_THREAD_POOL_SIZE])(void*);
+    void* task_arguments[MAXIMUM_THREAD_POOL_SIZE];
+    int task_count;
+    int active_threads_count;
+    bool shutdown;
+} thread_pool_t;
+
+// ==================== DATABASE COLLECTION STRUCTURE ====================
+
+typedef struct {
+    char database_name[MAXIMUM_NAME_LENGTH];
+    char collection_name[MAXIMUM_NAME_LENGTH];
+    field_schema_t fields[MAXIMUM_FIELDS];
+    int field_count;
+    field_index_t indexes[MAXIMUM_INDEXES_PER_COLLECTION];
+    int index_count;
+    lru_cache_t* cache;
+    collection_lock_t locks;
+    FILE* data_file;
+    FILE* index_file;
+    bool initialized;
+} database_collection_t;
 
 // ==================== UTILITY FUNCTIONS ====================
 
-void generate_uuid(char *uuid) {
-    const char *chars = "0123456789abcdef";
-    int segments[] = {8, 4, 4, 4, 12};
-    int pos = 0;
+void generate_universally_unique_identifier(char* universally_unique_identifier) {
+    const char* hexadecimal_characters = "0123456789abcdef";
+    int segment_lengths[] = {8, 4, 4, 4, 12};
+    int current_position = 0;
     
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    unsigned int seed = (unsigned int)(ts.tv_nsec ^ ts.tv_sec ^ getpid());
+    struct timespec current_time;
+    clock_gettime(CLOCK_REALTIME, &current_time);
+    unsigned int random_seed = (unsigned int)(current_time.tv_nsec ^ current_time.tv_sec ^ getpid());
     
-    for (int i = 0; i < 5; i++) {
-        if (i > 0) uuid[pos++] = '-';
-        for (int j = 0; j < segments[i]; j++) {
-            uuid[pos++] = chars[rand_r(&seed) % 16];
+    for (int segment_index = 0; segment_index < 5; segment_index++) {
+        if (segment_index > 0) universally_unique_identifier[current_position++] = '-';
+        for (int character_index = 0; character_index < segment_lengths[segment_index]; character_index++) {
+            universally_unique_identifier[current_position++] = hexadecimal_characters[rand_r(&random_seed) % 16];
         }
     }
-    uuid[pos] = '\0';
+    universally_unique_identifier[current_position] = '\0';
 }
 
-int create_directory(const char *path) {
-    struct stat st;
-    if (stat(path, &st) == -1) {
-        // Create parent directories recursively
-        char tmp[MAX_PATH_LENGTH];
-        char *p = NULL;
-        size_t len;
+int create_directory_recursively(const char* path) {
+    struct stat status_info;
+    if (stat(path, &status_info) == -1) {
+        char temporary_path[MAXIMUM_PATH_LENGTH];
+        char* path_pointer = NULL;
+        size_t path_length;
         
-        snprintf(tmp, sizeof(tmp), "%s", path);
-        len = strlen(tmp);
-        if (tmp[len - 1] == '/') {
-            tmp[len - 1] = 0;
+        snprintf(temporary_path, sizeof(temporary_path), "%s", path);
+        path_length = strlen(temporary_path);
+        if (temporary_path[path_length - 1] == '/') {
+            temporary_path[path_length - 1] = 0;
         }
         
-        for (p = tmp + 1; *p; p++) {
-            if (*p == '/') {
-                *p = 0;
-                if (mkdir(tmp, 0755) == -1 && errno != EEXIST) {
-                    fprintf(stderr, "Error creating directory %s: %s\n", tmp, strerror(errno));
+        for (path_pointer = temporary_path + 1; *path_pointer; path_pointer++) {
+            if (*path_pointer == '/') {
+                *path_pointer = 0;
+                if (mkdir(temporary_path, 0755) == -1 && errno != EEXIST) {
+                    fprintf(stderr, "Error creating directory %s: %s\n", temporary_path, strerror(errno));
                     return -1;
                 }
-                *p = '/';
+                *path_pointer = '/';
             }
         }
         
-        if (mkdir(tmp, 0755) == -1 && errno != EEXIST) {
-            fprintf(stderr, "Error creating directory %s: %s\n", tmp, strerror(errno));
+        if (mkdir(temporary_path, 0755) == -1 && errno != EEXIST) {
+            fprintf(stderr, "Error creating directory %s: %s\n", temporary_path, strerror(errno));
             return -1;
         }
     }
     return 0;
 }
 
-int acquire_lock(const char *lock_file) {
-    int fd = open(lock_file, O_CREAT | O_RDWR, 0644);
-    if (fd == -1) {
-        fprintf(stderr, "Error creating lock file %s: %s\n", lock_file, strerror(errno));
+uint32_t compute_crc_32_checksum(const void* data, size_t length) {
+    const uint8_t* data_bytes = (const uint8_t*)data;
+    uint32_t checksum = 0xFFFFFFFF;
+    static uint32_t checksum_table[256];
+    static bool checksum_table_computed = false;
+    
+    if (!checksum_table_computed) {
+        for (uint32_t table_index = 0; table_index < 256; table_index++) {
+            uint32_t table_entry = table_index;
+            for (int bit_index = 0; bit_index < 8; bit_index++) {
+                table_entry = (table_entry >> 1) ^ (0xEDB88320 & -(table_entry & 1));
+            }
+            checksum_table[table_index] = table_entry;
+        }
+        checksum_table_computed = true;
+    }
+    
+    for (size_t byte_index = 0; byte_index < length; byte_index++) {
+        checksum = (checksum >> 8) ^ checksum_table[(checksum ^ data_bytes[byte_index]) & 0xFF];
+    }
+    
+    return ~checksum;
+}
+
+char* get_sydb_base_directory_path() {
+    static char base_directory_path[MAXIMUM_PATH_LENGTH];
+    const char* environment_directory = getenv("SYDB_BASE_DIR");
+    if (environment_directory) {
+        strncpy(base_directory_path, environment_directory, MAXIMUM_PATH_LENGTH - 1);
+        base_directory_path[MAXIMUM_PATH_LENGTH - 1] = '\0';
+    } else {
+        strncpy(base_directory_path, SYDB_BASE_DIRECTORY, MAXIMUM_PATH_LENGTH - 1);
+        base_directory_path[MAXIMUM_PATH_LENGTH - 1] = '\0';
+    }
+    return base_directory_path;
+}
+
+int acquire_exclusive_lock(const char* lock_file_path) {
+    int file_descriptor = open(lock_file_path, O_CREAT | O_RDWR, 0644);
+    if (file_descriptor == -1) {
+        fprintf(stderr, "Error creating lock file %s: %s\n", lock_file_path, strerror(errno));
         return -1;
     }
     
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += LOCK_TIMEOUT;
+    struct timespec timeout_time;
+    clock_gettime(CLOCK_REALTIME, &timeout_time);
+    timeout_time.tv_sec += LOCK_TIMEOUT_SECONDS;
     
-    if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
+    if (flock(file_descriptor, LOCK_EX | LOCK_NB) == -1) {
         if (errno == EWOULDBLOCK) {
             fprintf(stderr, "Timeout: Could not acquire lock on %s after %d seconds\n", 
-                    lock_file, LOCK_TIMEOUT);
-            close(fd);
+                    lock_file_path, LOCK_TIMEOUT_SECONDS);
+            close(file_descriptor);
             return -1;
         }
     }
     
-    return fd;
+    return file_descriptor;
 }
 
-void release_lock(int fd, const char *lock_file) {
-    if (fd != -1) {
-        flock(fd, LOCK_UN);
-        close(fd);
+void release_exclusive_lock(int file_descriptor, const char* lock_file_path) {
+    if (file_descriptor != -1) {
+        flock(file_descriptor, LOCK_UN);
+        close(file_descriptor);
     }
 }
 
-char* get_sydb_base_directory() {
-    static char base_dir[MAX_PATH_LENGTH];
-    const char *env_dir = getenv("SYDB_BASE_DIR");
-    if (env_dir) {
-        strncpy(base_dir, env_dir, MAX_PATH_LENGTH - 1);
-        base_dir[MAX_PATH_LENGTH - 1] = '\0';
-    } else {
-        strncpy(base_dir, SYDB_BASE_DIRECTORY, MAX_PATH_LENGTH - 1);
-        base_dir[MAX_PATH_LENGTH - 1] = '\0';
-    }
-    return base_dir;
-}
+// ==================== CACHE IMPLEMENTATION ====================
 
-// ==================== BINARY FILE OPERATIONS ====================
-
-uint32_t compute_crc32(const void *data, size_t length) {
-    const uint8_t *bytes = (const uint8_t *)data;
-    uint32_t crc = 0xFFFFFFFF;
+lru_cache_t* create_lru_cache(size_t capacity) {
+    lru_cache_t* cache = malloc(sizeof(lru_cache_t));
+    if (!cache) return NULL;
     
-    for (size_t i = 0; i < length; i++) {
-        crc ^= bytes[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+    cache->entries = calloc(capacity, sizeof(cache_entry_t*));
+    if (!cache->entries) {
+        free(cache);
+        return NULL;
+    }
+    
+    cache->capacity = capacity;
+    cache->size = 0;
+    cache->cache_hits = 0;
+    cache->cache_misses = 0;
+    cache->head_entry = NULL;
+    cache->tail_entry = NULL;
+    pthread_rwlock_init(&cache->lock, NULL);
+    
+    return cache;
+}
+
+void destroy_lru_cache(lru_cache_t* cache) {
+    if (!cache) return;
+    
+    pthread_rwlock_wrlock(&cache->lock);
+    
+    cache_entry_t* current_entry = cache->head_entry;
+    while (current_entry) {
+        cache_entry_t* next_entry = current_entry->next_entry;
+        if (current_entry->instance) {
+            if (current_entry->instance->binary_data) {
+                free(current_entry->instance->binary_data);
+            }
+            free(current_entry->instance);
+        }
+        free(current_entry);
+        current_entry = next_entry;
+    }
+    
+    free(cache->entries);
+    pthread_rwlock_unlock(&cache->lock);
+    pthread_rwlock_destroy(&cache->lock);
+    free(cache);
+}
+
+void lru_cache_put(lru_cache_t* cache, const char* universally_unique_identifier, database_instance_t* instance) {
+    if (!cache || !universally_unique_identifier || !instance) return;
+    
+    pthread_rwlock_wrlock(&cache->lock);
+    
+    size_t hash_index = compute_crc_32_checksum(universally_unique_identifier, strlen(universally_unique_identifier)) % cache->capacity;
+    cache_entry_t* existing_entry = cache->entries[hash_index];
+    cache_entry_t* previous_entry = NULL;
+    
+    while (existing_entry) {
+        if (strcmp(existing_entry->universally_unique_identifier, universally_unique_identifier) == 0) {
+            if (existing_entry->instance->binary_data) {
+                free(existing_entry->instance->binary_data);
+            }
+            free(existing_entry->instance);
+            existing_entry->instance = instance;
+            existing_entry->last_accessed_time = time(NULL);
+            existing_entry->access_count++;
+            
+            if (existing_entry != cache->head_entry) {
+                if (existing_entry->previous_entry) existing_entry->previous_entry->next_entry = existing_entry->next_entry;
+                if (existing_entry->next_entry) existing_entry->next_entry->previous_entry = existing_entry->previous_entry;
+                if (existing_entry == cache->tail_entry) cache->tail_entry = existing_entry->previous_entry;
+                
+                existing_entry->next_entry = cache->head_entry;
+                existing_entry->previous_entry = NULL;
+                if (cache->head_entry) cache->head_entry->previous_entry = existing_entry;
+                cache->head_entry = existing_entry;
+                if (!cache->tail_entry) cache->tail_entry = existing_entry;
+            }
+            
+            pthread_rwlock_unlock(&cache->lock);
+            return;
+        }
+        previous_entry = existing_entry;
+        existing_entry = existing_entry->next_entry;
+    }
+    
+    cache_entry_t* new_cache_entry = malloc(sizeof(cache_entry_t));
+    if (!new_cache_entry) {
+        pthread_rwlock_unlock(&cache->lock);
+        return;
+    }
+    
+    strncpy(new_cache_entry->universally_unique_identifier, universally_unique_identifier, UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE - 1);
+    new_cache_entry->universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE - 1] = '\0';
+    new_cache_entry->instance = instance;
+    new_cache_entry->last_accessed_time = time(NULL);
+    new_cache_entry->access_count = 1;
+    new_cache_entry->next_entry = NULL;
+    new_cache_entry->previous_entry = NULL;
+    
+    new_cache_entry->next_entry = cache->entries[hash_index];
+    if (cache->entries[hash_index]) {
+        cache->entries[hash_index]->previous_entry = new_cache_entry;
+    }
+    cache->entries[hash_index] = new_cache_entry;
+    
+    new_cache_entry->next_entry = cache->head_entry;
+    if (cache->head_entry) {
+        cache->head_entry->previous_entry = new_cache_entry;
+    }
+    cache->head_entry = new_cache_entry;
+    if (!cache->tail_entry) {
+        cache->tail_entry = new_cache_entry;
+    }
+    
+    cache->size++;
+    
+    if (cache->size > cache->capacity) {
+        cache_entry_t* least_recently_used_entry = cache->tail_entry;
+        if (least_recently_used_entry) {
+            size_t tail_hash_index = compute_crc_32_checksum(least_recently_used_entry->universally_unique_identifier, 
+                                                           strlen(least_recently_used_entry->universally_unique_identifier)) % cache->capacity;
+            cache_entry_t* hash_entry = cache->entries[tail_hash_index];
+            cache_entry_t* hash_previous_entry = NULL;
+            
+            while (hash_entry) {
+                if (hash_entry == least_recently_used_entry) {
+                    if (hash_previous_entry) {
+                        hash_previous_entry->next_entry = hash_entry->next_entry;
+                    } else {
+                        cache->entries[tail_hash_index] = hash_entry->next_entry;
+                    }
+                    if (hash_entry->next_entry) {
+                        hash_entry->next_entry->previous_entry = hash_previous_entry;
+                    }
+                    break;
+                }
+                hash_previous_entry = hash_entry;
+                hash_entry = hash_entry->next_entry;
+            }
+            
+            if (least_recently_used_entry->previous_entry) {
+                least_recently_used_entry->previous_entry->next_entry = NULL;
+            }
+            cache->tail_entry = least_recently_used_entry->previous_entry;
+            if (cache->head_entry == least_recently_used_entry) {
+                cache->head_entry = NULL;
+            }
+            
+            if (least_recently_used_entry->instance) {
+                if (least_recently_used_entry->instance->binary_data) {
+                    free(least_recently_used_entry->instance->binary_data);
+                }
+                free(least_recently_used_entry->instance);
+            }
+            free(least_recently_used_entry);
+            cache->size--;
         }
     }
     
-    return ~crc;
+    pthread_rwlock_unlock(&cache->lock);
 }
 
-FILE* open_data_file(const char *database_name, const char *collection_name, const char *mode) {
-    char path[MAX_PATH_LENGTH];
-    snprintf(path, MAX_PATH_LENGTH, "%s/%s/%s/data%s", 
-             get_sydb_base_directory(), database_name, collection_name, DATA_FILE_EXTENSION);
+database_instance_t* lru_cache_get(lru_cache_t* cache, const char* universally_unique_identifier) {
+    if (!cache || !universally_unique_identifier) return NULL;
     
-    FILE *file = fopen(path, mode);
-    if (!file && strcmp(mode, "r+b") == 0) {
-        file = fopen(path, "w+b");
+    pthread_rwlock_rdlock(&cache->lock);
+    
+    size_t hash_index = compute_crc_32_checksum(universally_unique_identifier, strlen(universally_unique_identifier)) % cache->capacity;
+    cache_entry_t* cache_entry = cache->entries[hash_index];
+    
+    while (cache_entry) {
+        if (strcmp(cache_entry->universally_unique_identifier, universally_unique_identifier) == 0) {
+            cache_entry->last_accessed_time = time(NULL);
+            cache_entry->access_count++;
+            cache->cache_hits++;
+            
+            pthread_rwlock_unlock(&cache->lock);
+            pthread_rwlock_wrlock(&cache->lock);
+            
+            if (cache_entry != cache->head_entry) {
+                if (cache_entry->previous_entry) cache_entry->previous_entry->next_entry = cache_entry->next_entry;
+                if (cache_entry->next_entry) cache_entry->next_entry->previous_entry = cache_entry->previous_entry;
+                if (cache_entry == cache->tail_entry) cache->tail_entry = cache_entry->previous_entry;
+                
+                cache_entry->next_entry = cache->head_entry;
+                cache_entry->previous_entry = NULL;
+                if (cache->head_entry) cache->head_entry->previous_entry = cache_entry;
+                cache->head_entry = cache_entry;
+                if (!cache->tail_entry) cache->tail_entry = cache_entry;
+            }
+            
+            pthread_rwlock_unlock(&cache->lock);
+            return cache_entry->instance;
+        }
+        cache_entry = cache_entry->next_entry;
     }
-    return file;
+    
+    cache->cache_misses++;
+    pthread_rwlock_unlock(&cache->lock);
+    return NULL;
 }
 
-int initialize_data_file(FILE *file) {
-    file_header_t header = {
-        .magic = FILE_MAGIC,
-        .version = FILE_VERSION,
+// ==================== B-TREE INDEX IMPLEMENTATION ====================
+
+b_tree_node_t* create_b_tree_node(bool is_leaf_node) {
+    b_tree_node_t* new_node = malloc(sizeof(b_tree_node_t));
+    if (!new_node) return NULL;
+    
+    new_node->key_count = 0;
+    new_node->is_leaf = is_leaf_node;
+    new_node->node_offset = 0;
+    memset(new_node->child_node_offsets, 0, sizeof(new_node->child_node_offsets));
+    memset(new_node->record_offsets, 0, sizeof(new_node->record_offsets));
+    
+    return new_node;
+}
+
+int b_tree_search_node(b_tree_node_t* node, const char* search_key, uint64_t* record_offset) {
+    int key_index = 0;
+    while (key_index < node->key_count && strcmp(search_key, node->keys[key_index]) > 0) {
+        key_index++;
+    }
+    
+    if (key_index < node->key_count && strcmp(search_key, node->keys[key_index]) == 0) {
+        *record_offset = node->record_offsets[key_index];
+        return 1;
+    }
+    
+    if (node->is_leaf) {
+        return 0;
+    }
+    
+    return 0;
+}
+
+void b_tree_insert_non_full_node(b_tree_node_t* node, const char* key, uint64_t record_offset) {
+    int key_index = node->key_count - 1;
+    
+    if (node->is_leaf) {
+        while (key_index >= 0 && strcmp(key, node->keys[key_index]) < 0) {
+            strcpy(node->keys[key_index + 1], node->keys[key_index]);
+            node->record_offsets[key_index + 1] = node->record_offsets[key_index];
+            key_index--;
+        }
+        
+        strcpy(node->keys[key_index + 1], key);
+        node->record_offsets[key_index + 1] = record_offset;
+        node->key_count++;
+    } else {
+        while (key_index >= 0 && strcmp(key, node->keys[key_index]) < 0) {
+            key_index--;
+        }
+        key_index++;
+    }
+}
+
+void b_tree_insert_into_index(field_index_t* index, const char* key, uint64_t record_offset) {
+    pthread_rwlock_wrlock(&index->lock);
+    
+    b_tree_node_t* root_node = index->root_node;
+    
+    if (root_node->key_count == B_TREE_ORDER - 1) {
+        b_tree_node_t* new_root_node = create_b_tree_node(false);
+        new_root_node->child_node_offsets[0] = (uint64_t)root_node;
+        index->root_node = new_root_node;
+    } else {
+        b_tree_insert_non_full_node(root_node, key, record_offset);
+    }
+    
+    pthread_rwlock_unlock(&index->lock);
+}
+
+// ==================== HIGH-PERFORMANCE FILE OPERATIONS ====================
+
+FILE* open_data_file_with_optimizations(const char* database_name, const char* collection_name, const char* mode) {
+    char file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(file_path, MAXIMUM_PATH_LENGTH, "%s/%s/%s/data%s", 
+             get_sydb_base_directory_path(), database_name, collection_name, DATA_FILE_EXTENSION);
+    
+    FILE* data_file = fopen(file_path, mode);
+    if (!data_file && strcmp(mode, "r+b") == 0) {
+        data_file = fopen(file_path, "w+b");
+    }
+    
+    if (data_file) {
+        setvbuf(data_file, NULL, _IOFBF, 65536);
+    }
+    
+    return data_file;
+}
+
+int initialize_high_performance_data_file(FILE* data_file) {
+    file_header_t file_header = {
+        .magic_number = FILE_MAGIC_NUMBER,
+        .version_number = FILE_VERSION_NUMBER,
         .record_count = 0,
         .file_size = sizeof(file_header_t),
         .free_offset = sizeof(file_header_t),
-        .schema_crc = 0
+        .schema_checksum = 0,
+        .index_root_offset = 0,
+        .flags = 0
     };
-    memset(header.reserved, 0, sizeof(header.reserved));
+    memset(file_header.reserved, 0, sizeof(file_header.reserved));
     
-    if (fseek(file, 0, SEEK_SET) != 0) return -1;
-    if (fwrite(&header, sizeof(header), 1, file) != 1) return -1;
-    return 0;
+    if (fseek(data_file, 0, SEEK_SET) != 0) return -1;
+    if (fwrite(&file_header, sizeof(file_header_t), 1, data_file) != 1) return -1;
+    return fflush(data_file);
 }
 
-int read_file_header(FILE *file, file_header_t *header) {
-    if (fseek(file, 0, SEEK_SET) != 0) return -1;
-    if (fread(header, sizeof(file_header_t), 1, file) != 1) return -1;
+int read_file_header_information(FILE* data_file, file_header_t* file_header) {
+    if (fseek(data_file, 0, SEEK_SET) != 0) return -1;
+    if (fread(file_header, sizeof(file_header_t), 1, data_file) != 1) return -1;
     
-    if (header->magic != FILE_MAGIC) {
+    if (file_header->magic_number != FILE_MAGIC_NUMBER) {
         return -1;
     }
     
     return 0;
 }
 
-int write_file_header(FILE *file, file_header_t *header) {
-    if (fseek(file, 0, SEEK_SET) != 0) return -1;
-    if (fwrite(header, sizeof(file_header_t), 1, file) != 1) return -1;
-    return 0;
+int write_file_header_information(FILE* data_file, file_header_t* file_header) {
+    if (fseek(data_file, 0, SEEK_SET) != 0) return -1;
+    if (fwrite(file_header, sizeof(file_header_t), 1, data_file) != 1) return -1;
+    return fflush(data_file);
 }
 
-int append_record(FILE *file, const char *uuid, const char *json_data) {
-    file_header_t header;
-    if (read_file_header(file, &header) == -1) {
-        if (initialize_data_file(file) == -1) return -1;
-        if (read_file_header(file, &header) == -1) return -1;
+// ==================== CONCURRENCY CONTROL ====================
+
+void initialize_collection_locks(collection_lock_t* locks) {
+    pthread_rwlock_init(&locks->schema_lock, NULL);
+    pthread_rwlock_init(&locks->data_lock, NULL);
+    pthread_mutex_init(&locks->cache_lock, NULL);
+    pthread_rwlock_init(&locks->index_lock, NULL);
+    pthread_cond_init(&locks->write_complete_condition, NULL);
+    locks->active_readers_count = 0;
+    locks->waiting_writers_count = 0;
+    locks->writer_active = false;
+}
+
+void acquire_collection_read_lock(collection_lock_t* locks) {
+    pthread_mutex_lock(&locks->cache_lock);
+    while (locks->writer_active || locks->waiting_writers_count > 0) {
+        pthread_cond_wait(&locks->write_complete_condition, &locks->cache_lock);
     }
-    
-    size_t data_len = strlen(json_data);
-    size_t total_size = sizeof(record_header_t) + data_len + 1;
-    
-    if (header.free_offset + total_size > header.file_size) {
-        header.file_size = header.free_offset + total_size + 1024;
-        if (write_file_header(file, &header) == -1) return -1;
+    locks->active_readers_count++;
+    pthread_mutex_unlock(&locks->cache_lock);
+}
+
+void release_collection_read_lock(collection_lock_t* locks) {
+    pthread_mutex_lock(&locks->cache_lock);
+    locks->active_readers_count--;
+    if (locks->active_readers_count == 0 && locks->waiting_writers_count > 0) {
+        pthread_cond_signal(&locks->write_complete_condition);
     }
-    
-    if (fseek(file, header.free_offset, SEEK_SET) != 0) return -1;
-    
-    record_header_t rec_header = {
-        .data_size = data_len,
-        .timestamp = time(NULL),
-        .flags = 0,
-        .data_crc = compute_crc32(json_data, data_len)
-    };
-    strncpy(rec_header.uuid, uuid, UUID_SIZE - 1);
-    rec_header.uuid[UUID_SIZE - 1] = '\0';
-    memset(rec_header.reserved, 0, sizeof(rec_header.reserved));
-    
-    if (fwrite(&rec_header, sizeof(record_header_t), 1, file) != 1) return -1;
-    if (fwrite(json_data, data_len + 1, 1, file) != 1) return -1;
-    
-    header.record_count++;
-    header.free_offset += total_size;
-    
-    if (write_file_header(file, &header) == -1) return -1;
-    
-    return 0;
+    pthread_mutex_unlock(&locks->cache_lock);
 }
 
-typedef struct {
-    FILE *file;
-    uint64_t current_offset;
-    uint64_t records_processed;
-} record_iterator_t;
-
-record_iterator_t* create_record_iterator(FILE *file) {
-    file_header_t header;
-    if (read_file_header(file, &header) == -1) return NULL;
-    
-    record_iterator_t *iter = malloc(sizeof(record_iterator_t));
-    if (!iter) return NULL;
-    
-    iter->file = file;
-    iter->current_offset = sizeof(file_header_t);
-    iter->records_processed = 0;
-    
-    return iter;
-}
-
-void free_record_iterator(record_iterator_t *iter) {
-    free(iter);
-}
-
-int read_next_record(record_iterator_t *iter, record_header_t *header, char **json_data) {
-    file_header_t file_header;
-    if (read_file_header(iter->file, &file_header) == -1) return -1;
-    
-    if (iter->records_processed >= file_header.record_count) return 0;
-    
-    if (fseek(iter->file, iter->current_offset, SEEK_SET) != 0) return -1;
-    
-    if (fread(header, sizeof(record_header_t), 1, iter->file) != 1) return -1;
-    
-    *json_data = malloc(header->data_size + 1);
-    if (!*json_data) return -1;
-    
-    if (fread(*json_data, header->data_size + 1, 1, iter->file) != 1) {
-        free(*json_data);
-        return -1;
+void acquire_collection_write_lock(collection_lock_t* locks) {
+    pthread_mutex_lock(&locks->cache_lock);
+    locks->waiting_writers_count++;
+    while (locks->writer_active || locks->active_readers_count > 0) {
+        pthread_cond_wait(&locks->write_complete_condition, &locks->cache_lock);
     }
-    
-    uint32_t computed_crc = compute_crc32(*json_data, header->data_size);
-    if (computed_crc != header->data_crc) {
-        free(*json_data);
-        return -1;
-    }
-    
-    iter->current_offset += sizeof(record_header_t) + header->data_size + 1;
-    iter->records_processed++;
-    
-    return 1;
+    locks->waiting_writers_count--;
+    locks->writer_active = true;
+    pthread_mutex_unlock(&locks->cache_lock);
 }
 
-// ==================== JSON-LIKE PARSING ====================
-
-char* json_get_string(const char *json, const char *key) {
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
-    char *start = strstr(json, pattern);
-    if (!start) return NULL;
-    
-    start += strlen(pattern);
-    char *end = strchr(start, '"');
-    if (!end) return NULL;
-    
-    size_t len = end - start;
-    char *result = malloc(len + 1);
-    if (!result) return NULL;
-    
-    strncpy(result, start, len);
-    result[len] = '\0';
-    return result;
+void release_collection_write_lock(collection_lock_t* locks) {
+    pthread_mutex_lock(&locks->cache_lock);
+    locks->writer_active = false;
+    pthread_cond_broadcast(&locks->write_complete_condition);
+    pthread_mutex_unlock(&locks->cache_lock);
 }
 
-int json_get_int(const char *json, const char *key) {
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    char *start = strstr(json, pattern);
-    if (!start) return 0;
-    
-    start += strlen(pattern);
-    return atoi(start);
+// ==================== SCHEMA MANAGEMENT ====================
+
+field_type_t parse_field_type_from_string(const char* type_string) {
+    if (strcmp(type_string, "string") == 0) return FIELD_TYPE_STRING;
+    if (strcmp(type_string, "int") == 0) return FIELD_TYPE_INTEGER;
+    if (strcmp(type_string, "float") == 0) return FIELD_TYPE_FLOAT;
+    if (strcmp(type_string, "bool") == 0) return FIELD_TYPE_BOOLEAN;
+    if (strcmp(type_string, "array") == 0) return FIELD_TYPE_ARRAY;
+    if (strcmp(type_string, "object") == 0) return FIELD_TYPE_OBJECT;
+    return FIELD_TYPE_NULL;
 }
 
-bool json_has_field(const char *json, const char *key) {
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    return strstr(json, pattern) != NULL;
-}
-
-bool json_matches_query(const char *json, const char *query) {
-    if (!query || !json) return false;
-    
-    char query_copy[1024];
-    strncpy(query_copy, query, sizeof(query_copy) - 1);
-    query_copy[sizeof(query_copy) - 1] = '\0';
-    
-    char *token = strtok(query_copy, ",");
-    while (token) {
-        while (*token == ' ') token++;
-        
-        char *colon = strchr(token, ':');
-        if (!colon) {
-            token = strtok(NULL, ",");
-            continue;
-        }
-        
-        *colon = '\0';
-        char *field_name = token;
-        char *expected_value = colon + 1;
-        
-        if (expected_value[0] == '"' && expected_value[strlen(expected_value)-1] == '"') {
-            expected_value[strlen(expected_value)-1] = '\0';
-            expected_value++;
-        }
-        
-        char *actual_string_value = json_get_string(json, field_name);
-        if (actual_string_value) {
-            bool matches = (strcmp(actual_string_value, expected_value) == 0);
-            free(actual_string_value);
-            if (!matches) return false;
-        } else {
-            int actual_int_value = json_get_int(json, field_name);
-            int expected_int_value = atoi(expected_value);
-            if (actual_int_value != expected_int_value) {
-                return false;
-            }
-        }
-        
-        token = strtok(NULL, ",");
-    }
-    
-    return true;
-}
-
-// ==================== SCHEMA PARSING AND VALIDATION ====================
-
-field_type_t parse_field_type(const char *type_string) {
-    if (strcmp(type_string, "string") == 0) return TYPE_STRING;
-    if (strcmp(type_string, "int") == 0) return TYPE_INT;
-    if (strcmp(type_string, "float") == 0) return TYPE_FLOAT;
-    if (strcmp(type_string, "bool") == 0) return TYPE_BOOL;
-    if (strcmp(type_string, "array") == 0) return TYPE_ARRAY;
-    if (strcmp(type_string, "object") == 0) return TYPE_OBJECT;
-    return TYPE_NULL;
-}
-
-const char* field_type_to_string(field_type_t type) {
+const char* convert_field_type_to_string(field_type_t type) {
     switch (type) {
-        case TYPE_STRING: return "string";
-        case TYPE_INT: return "int";
-        case TYPE_FLOAT: return "float";
-        case TYPE_BOOL: return "bool";
-        case TYPE_ARRAY: return "array";
-        case TYPE_OBJECT: return "object";
+        case FIELD_TYPE_STRING: return "string";
+        case FIELD_TYPE_INTEGER: return "int";
+        case FIELD_TYPE_FLOAT: return "float";
+        case FIELD_TYPE_BOOLEAN: return "bool";
+        case FIELD_TYPE_ARRAY: return "array";
+        case FIELD_TYPE_OBJECT: return "object";
         default: return "null";
     }
 }
 
-int parse_schema_fields(int argc, char *argv[], int start_index, 
-                       field_schema_t *fields, int *field_count) {
+int parse_schema_fields_from_arguments(int argument_count, char* argument_values[], int start_index, 
+                                      field_schema_t* fields, int* field_count) {
     *field_count = 0;
     
-    for (int i = start_index; i < argc && *field_count < MAX_FIELDS; i++) {
-        char *field_spec = argv[i];
-        if (strncmp(field_spec, "--", 2) != 0) continue;
+    for (int argument_index = start_index; argument_index < argument_count && *field_count < MAXIMUM_FIELDS; argument_index++) {
+        char* field_specification = argument_values[argument_index];
+        if (strncmp(field_specification, "--", 2) != 0) continue;
         
-        field_spec += 2;
+        field_specification += 2;
         
-        char field_name[MAX_FIELD_LENGTH];
+        char field_name[MAXIMUM_FIELD_LENGTH];
         char type_string[32];
         bool required = false;
+        bool indexed = false;
         
-        char *first_dash = strchr(field_spec, '-');
+        char* first_dash = strchr(field_specification, '-');
         if (!first_dash) continue;
         
         *first_dash = '\0';
-        strncpy(field_name, field_spec, MAX_FIELD_LENGTH - 1);
-        field_name[MAX_FIELD_LENGTH - 1] = '\0';
+        strncpy(field_name, field_specification, MAXIMUM_FIELD_LENGTH - 1);
+        field_name[MAXIMUM_FIELD_LENGTH - 1] = '\0';
         
-        char *second_dash = strchr(first_dash + 1, '-');
+        char* second_dash = strchr(first_dash + 1, '-');
         if (second_dash) {
             *second_dash = '\0';
             strncpy(type_string, first_dash + 1, sizeof(type_string) - 1);
             type_string[sizeof(type_string) - 1] = '\0';
-            required = (strcmp(second_dash + 1, "req") == 0);
+            
+            char* third_dash = strchr(second_dash + 1, '-');
+            if (third_dash) {
+                *third_dash = '\0';
+                required = (strcmp(second_dash + 1, "req") == 0);
+                indexed = (strcmp(third_dash + 1, "idx") == 0);
+            } else {
+                required = (strcmp(second_dash + 1, "req") == 0);
+            }
         } else {
             strncpy(type_string, first_dash + 1, sizeof(type_string) - 1);
             type_string[sizeof(type_string) - 1] = '\0';
-            required = false;
         }
         
-        field_type_t type = parse_field_type(type_string);
-        if (type == TYPE_NULL) {
+        field_type_t type = parse_field_type_from_string(type_string);
+        if (type == FIELD_TYPE_NULL) {
             fprintf(stderr, "Error: Unknown field type '%s' for field '%s'\n", 
                     type_string, field_name);
             return -1;
         }
         
-        strncpy(fields[*field_count].name, field_name, MAX_FIELD_LENGTH - 1);
-        fields[*field_count].name[MAX_FIELD_LENGTH - 1] = '\0';
+        strncpy(fields[*field_count].name, field_name, MAXIMUM_FIELD_LENGTH - 1);
+        fields[*field_count].name[MAXIMUM_FIELD_LENGTH - 1] = '\0';
         fields[*field_count].type = type;
         fields[*field_count].required = required;
+        fields[*field_count].indexed = indexed;
         (*field_count)++;
     }
     
     return 0;
 }
 
-int load_schema(const char *database_name, const char *collection_name, 
-                field_schema_t *fields, int *field_count) {
-    char schema_path[MAX_PATH_LENGTH];
-    snprintf(schema_path, MAX_PATH_LENGTH, "%s/%s/%s/schema.txt", 
-             get_sydb_base_directory(), database_name, collection_name);
+int load_schema_from_file(const char* database_name, const char* collection_name, 
+                         field_schema_t* fields, int* field_count) {
+    char schema_file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(schema_file_path, MAXIMUM_PATH_LENGTH, "%s/%s/%s/schema.txt", 
+             get_sydb_base_directory_path(), database_name, collection_name);
     
-    FILE *file = fopen(schema_path, "r");
-    if (!file) {
+    FILE* schema_file = fopen(schema_file_path, "r");
+    if (!schema_file) {
         fprintf(stderr, "Error: Cannot load schema for collection '%s'\n", collection_name);
         return -1;
     }
     
     *field_count = 0;
-    char line[256];
+    char line_buffer[256];
     
-    while (fgets(line, sizeof(line), file) && *field_count < MAX_FIELDS) {
-        line[strcspn(line, "\n")] = '\0';
+    while (fgets(line_buffer, sizeof(line_buffer), schema_file) && *field_count < MAXIMUM_FIELDS) {
+        line_buffer[strcspn(line_buffer, "\n")] = '\0';
         
-        char *first_colon = strchr(line, ':');
-        char *second_colon = first_colon ? strchr(first_colon + 1, ':') : NULL;
+        char* first_colon = strchr(line_buffer, ':');
+        char* second_colon = first_colon ? strchr(first_colon + 1, ':') : NULL;
+        char* third_colon = second_colon ? strchr(second_colon + 1, ':') : NULL;
         
         if (!first_colon || !second_colon) continue;
         
         *first_colon = '\0';
         *second_colon = '\0';
+        if (third_colon) *third_colon = '\0';
         
-        char *field_name = line;
-        char *type_string = first_colon + 1;
-        char *required_string = second_colon + 1;
+        char* field_name = line_buffer;
+        char* type_string = first_colon + 1;
+        char* required_string = second_colon + 1;
+        char* indexed_string = third_colon ? third_colon + 1 : "unindexed";
         
-        strncpy(fields[*field_count].name, field_name, MAX_FIELD_LENGTH - 1);
-        fields[*field_count].name[MAX_FIELD_LENGTH - 1] = '\0';
-        fields[*field_count].type = parse_field_type(type_string);
+        strncpy(fields[*field_count].name, field_name, MAXIMUM_FIELD_LENGTH - 1);
+        fields[*field_count].name[MAXIMUM_FIELD_LENGTH - 1] = '\0';
+        fields[*field_count].type = parse_field_type_from_string(type_string);
         fields[*field_count].required = (strcmp(required_string, "required") == 0);
+        fields[*field_count].indexed = (strcmp(indexed_string, "indexed") == 0);
         (*field_count)++;
     }
     
-    fclose(file);
+    fclose(schema_file);
     return 0;
 }
 
-bool validate_field_value(const char *field_name, const char *value, field_type_t type) {
+bool validate_field_value_against_schema(const char* field_name, const char* value, field_type_t type) {
     if (!value || strlen(value) == 0) {
         return true;
     }
     
     switch (type) {
-        case TYPE_INT: {
-            char *end_ptr;
-            long int_value = strtol(value, &end_ptr, 10);
-            if (*end_ptr != '\0') {
+        case FIELD_TYPE_INTEGER: {
+            char* end_pointer;
+            long integer_value = strtol(value, &end_pointer, 10);
+            if (*end_pointer != '\0') {
                 fprintf(stderr, "Validation error: Field '%s' should be integer but got '%s'\n", 
                         field_name, value);
                 return false;
             }
             return true;
         }
-        case TYPE_FLOAT: {
-            char *end_ptr;
-            double float_value = strtod(value, &end_ptr);
-            if (*end_ptr != '\0') {
+        case FIELD_TYPE_FLOAT: {
+            char* end_pointer;
+            double float_value = strtod(value, &end_pointer);
+            if (*end_pointer != '\0') {
                 fprintf(stderr, "Validation error: Field '%s' should be float but got '%s'\n", 
                         field_name, value);
                 return false;
             }
             return true;
         }
-        case TYPE_BOOL: {
+        case FIELD_TYPE_BOOLEAN: {
             if (strcmp(value, "true") != 0 && strcmp(value, "false") != 0 &&
                 strcmp(value, "1") != 0 && strcmp(value, "0") != 0) {
                 fprintf(stderr, "Validation error: Field '%s' should be boolean but got '%s'\n", 
@@ -551,201 +835,296 @@ bool validate_field_value(const char *field_name, const char *value, field_type_
             }
             return true;
         }
-        case TYPE_STRING:
-        case TYPE_ARRAY:
-        case TYPE_OBJECT:
-        case TYPE_NULL:
+        case FIELD_TYPE_STRING:
+        case FIELD_TYPE_ARRAY:
+        case FIELD_TYPE_OBJECT:
+        case FIELD_TYPE_NULL:
         default:
             return true;
     }
 }
 
-int validate_instance_against_schema(const char *instance_json, 
-                                    field_schema_t *fields, int field_count) {
-    for (int i = 0; i < field_count; i++) {
-        if (fields[i].required && !json_has_field(instance_json, fields[i].name)) {
+int validate_instance_against_schema(const char* instance_json, 
+                                    field_schema_t* fields, int field_count) {
+    for (int field_index = 0; field_index < field_count; field_index++) {
+        if (fields[field_index].required && !json_has_field(instance_json, fields[field_index].name)) {
             fprintf(stderr, "Validation error: Required field '%s' is missing\n", 
-                    fields[i].name);
+                    fields[field_index].name);
             return -1;
         }
         
-        if (json_has_field(instance_json, fields[i].name)) {
-            char *value = json_get_string(instance_json, fields[i].name);
-            if (value) {
-                if (!validate_field_value(fields[i].name, value, fields[i].type)) {
-                    free(value);
+        if (json_has_field(instance_json, fields[field_index].name)) {
+            char* field_value = json_get_string_value(instance_json, fields[field_index].name);
+            if (field_value) {
+                if (!validate_field_value_against_schema(fields[field_index].name, field_value, fields[field_index].type)) {
+                    free(field_value);
                     return -1;
                 }
-                free(value);
+                free(field_value);
             }
         }
     }
     return 0;
 }
 
-void print_schema(const char *database_name, const char *collection_name) {
-    field_schema_t fields[MAX_FIELDS];
+void print_collection_schema(const char* database_name, const char* collection_name) {
+    field_schema_t fields[MAXIMUM_FIELDS];
     int field_count = 0;
     
-    if (load_schema(database_name, collection_name, fields, &field_count) == -1) {
+    if (load_schema_from_file(database_name, collection_name, fields, &field_count) == -1) {
         fprintf(stderr, "Error: Cannot load schema for collection '%s'\n", collection_name);
         return;
     }
     
     printf("Schema for collection '%s':\n", collection_name);
-    printf("%-20s %-10s %-10s\n", "Field", "Type", "Required");
-    printf("----------------------------------------\n");
+    printf("%-20s %-10s %-10s %-10s\n", "Field", "Type", "Required", "Indexed");
+    printf("------------------------------------------------\n");
     
-    for (int i = 0; i < field_count; i++) {
-        printf("%-20s %-10s %-10s\n", 
-               fields[i].name, 
-               field_type_to_string(fields[i].type),
-               fields[i].required ? "Yes" : "No");
+    for (int field_index = 0; field_index < field_count; field_index++) {
+        printf("%-20s %-10s %-10s %-10s\n", 
+               fields[field_index].name, 
+               convert_field_type_to_string(fields[field_index].type),
+               fields[field_index].required ? "Yes" : "No",
+               fields[field_index].indexed ? "Yes" : "No");
     }
+}
+
+// ==================== JSON PARSING FUNCTIONS ====================
+
+// ==================== JSON PARSING FUNCTIONS ====================
+
+char* json_get_string_value(const char* json_data, const char* key) {
+    char search_pattern[256];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":\"", key);
+    char* value_start = strstr(json_data, search_pattern);
+    if (!value_start) return NULL;
+    
+    value_start += strlen(search_pattern);
+    char* value_end = strchr(value_start, '"');
+    if (!value_end) return NULL;
+    
+    size_t value_length = value_end - value_start;
+    char* extracted_value = malloc(value_length + 1);
+    if (!extracted_value) return NULL;
+    
+    strncpy(extracted_value, value_start, value_length);
+    extracted_value[value_length] = '\0';
+    return extracted_value;
+}
+
+int json_get_integer_value(const char* json_data, const char* key) {
+    char search_pattern[256];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
+    char* value_start = strstr(json_data, search_pattern);
+    if (!value_start) return 0;
+    
+    value_start += strlen(search_pattern);
+    return atoi(value_start);
+}
+
+bool json_has_field(const char* json_data, const char* key) {
+    char search_pattern[256];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
+    return strstr(json_data, search_pattern) != NULL;
+}
+
+bool json_matches_query_conditions(const char* json_data, const char* query) {
+    if (!query || !json_data) return false;
+    
+    char query_copy[1024];
+    strncpy(query_copy, query, sizeof(query_copy) - 1);
+    query_copy[sizeof(query_copy) - 1] = '\0';
+    
+    char* query_token = strtok(query_copy, ",");
+    while (query_token) {
+        while (*query_token == ' ') query_token++;
+        
+        char* colon_position = strchr(query_token, ':');
+        if (!colon_position) {
+            query_token = strtok(NULL, ",");
+            continue;
+        }
+        
+        *colon_position = '\0';
+        char* field_name = query_token;
+        char* expected_value = colon_position + 1;
+        
+        if (expected_value[0] == '"' && expected_value[strlen(expected_value)-1] == '"') {
+            expected_value[strlen(expected_value)-1] = '\0';
+            expected_value++;
+        }
+        
+        char* actual_string_value = json_get_string_value(json_data, field_name);
+        if (actual_string_value) {
+            bool matches = (strcmp(actual_string_value, expected_value) == 0);
+            free(actual_string_value);
+            if (!matches) return false;
+        } else {
+            int actual_integer_value = json_get_integer_value(json_data, field_name);
+            int expected_integer_value = atoi(expected_value);
+            if (actual_integer_value != expected_integer_value) {
+                return false;
+            }
+        }
+        
+        query_token = strtok(NULL, ",");
+    }
+    
+    return true;
 }
 
 // ==================== DATABASE OPERATIONS ====================
 
-int database_create(const char *database_name) {
-    char base_dir[MAX_PATH_LENGTH];
-    strncpy(base_dir, get_sydb_base_directory(), MAX_PATH_LENGTH - 1);
-    base_dir[MAX_PATH_LENGTH - 1] = '\0';
+int database_exists(const char* database_name) {
+    char database_path[MAXIMUM_PATH_LENGTH];
+    snprintf(database_path, MAXIMUM_PATH_LENGTH, "%s/%s", 
+             get_sydb_base_directory_path(), database_name);
     
-    if (create_directory(base_dir) == -1) {
+    struct stat status_info;
+    return (stat(database_path, &status_info) == 0 && S_ISDIR(status_info.st_mode));
+}
+
+int collection_exists(const char* database_name, const char* collection_name) {
+    char collection_path[MAXIMUM_PATH_LENGTH];
+    snprintf(collection_path, MAXIMUM_PATH_LENGTH, "%s/%s/%s", 
+             get_sydb_base_directory_path(), database_name, collection_name);
+    
+    struct stat status_info;
+    return (stat(collection_path, &status_info) == 0 && S_ISDIR(status_info.st_mode));
+}
+
+int create_database(const char* database_name) {
+    char base_directory[MAXIMUM_PATH_LENGTH];
+    strncpy(base_directory, get_sydb_base_directory_path(), MAXIMUM_PATH_LENGTH - 1);
+    base_directory[MAXIMUM_PATH_LENGTH - 1] = '\0';
+    
+    if (create_directory_recursively(base_directory) == -1) {
         return -1;
     }
     
-    char db_path[MAX_PATH_LENGTH];
-    snprintf(db_path, MAX_PATH_LENGTH, "%s/%s", base_dir, database_name);
+    char database_path[MAXIMUM_PATH_LENGTH];
+    snprintf(database_path, MAXIMUM_PATH_LENGTH, "%s/%s", base_directory, database_name);
     
-    if (create_directory(db_path) == -1) {
+    if (create_directory_recursively(database_path) == -1) {
         return -1;
     }
     
-    printf("Database '%s' created successfully at %s\n", database_name, db_path);
+    printf("Database '%s' created successfully at %s\n", database_name, database_path);
     return 0;
 }
 
-int database_exists(const char *database_name) {
-    char db_path[MAX_PATH_LENGTH];
-    snprintf(db_path, MAX_PATH_LENGTH, "%s/%s", 
-             get_sydb_base_directory(), database_name);
+char** list_all_databases(int* database_count) {
+    char base_directory[MAXIMUM_PATH_LENGTH];
+    strncpy(base_directory, get_sydb_base_directory_path(), MAXIMUM_PATH_LENGTH - 1);
+    base_directory[MAXIMUM_PATH_LENGTH - 1] = '\0';
     
-    struct stat st;
-    return (stat(db_path, &st) == 0 && S_ISDIR(st.st_mode));
-}
-
-char** database_list(int *count) {
-    char base_dir[MAX_PATH_LENGTH];
-    strncpy(base_dir, get_sydb_base_directory(), MAX_PATH_LENGTH - 1);
-    base_dir[MAX_PATH_LENGTH - 1] = '\0';
-    
-    DIR *dir = opendir(base_dir);
-    if (!dir) {
-        *count = 0;
+    DIR* directory = opendir(base_directory);
+    if (!directory) {
+        *database_count = 0;
         return NULL;
     }
     
-    struct dirent *entry;
-    int db_count = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && 
-            strcmp(entry->d_name, ".") != 0 && 
-            strcmp(entry->d_name, "..") != 0) {
-            db_count++;
+    struct dirent* directory_entry;
+    int count = 0;
+    while ((directory_entry = readdir(directory)) != NULL) {
+        if (directory_entry->d_type == DT_DIR && 
+            strcmp(directory_entry->d_name, ".") != 0 && 
+            strcmp(directory_entry->d_name, "..") != 0) {
+            count++;
         }
     }
-    rewinddir(dir);
+    rewinddir(directory);
     
-    if (db_count == 0) {
-        closedir(dir);
-        *count = 0;
+    if (count == 0) {
+        closedir(directory);
+        *database_count = 0;
         return NULL;
     }
     
-    char **dbs = malloc(db_count * sizeof(char*));
-    if (!dbs) {
-        closedir(dir);
-        *count = 0;
+    char** databases = malloc(count * sizeof(char*));
+    if (!databases) {
+        closedir(directory);
+        *database_count = 0;
         return NULL;
     }
     
     int index = 0;
-    while ((entry = readdir(dir)) != NULL && index < db_count) {
-        if (entry->d_type == DT_DIR && 
-            strcmp(entry->d_name, ".") != 0 && 
-            strcmp(entry->d_name, "..") != 0) {
-            dbs[index] = strdup(entry->d_name);
-            if (!dbs[index]) {
+    while ((directory_entry = readdir(directory)) != NULL && index < count) {
+        if (directory_entry->d_type == DT_DIR && 
+            strcmp(directory_entry->d_name, ".") != 0 && 
+            strcmp(directory_entry->d_name, "..") != 0) {
+            databases[index] = strdup(directory_entry->d_name);
+            if (!databases[index]) {
                 for (int i = 0; i < index; i++) {
-                    free(dbs[i]);
+                    free(databases[i]);
                 }
-                free(dbs);
-                closedir(dir);
-                *count = 0;
+                free(databases);
+                closedir(directory);
+                *database_count = 0;
                 return NULL;
             }
             index++;
         }
     }
-    closedir(dir);
+    closedir(directory);
     
-    *count = db_count;
-    return dbs;
+    *database_count = count;
+    return databases;
 }
 
 // ==================== COLLECTION OPERATIONS ====================
 
-int collection_create(const char *database_name, const char *collection_name, 
-                     field_schema_t *fields, int field_count) {
+int create_collection(const char* database_name, const char* collection_name, 
+                     field_schema_t* fields, int field_count) {
     if (!database_exists(database_name)) {
         fprintf(stderr, "Database '%s' does not exist\n", database_name);
         return -1;
     }
     
-    char db_path[MAX_PATH_LENGTH];
-    snprintf(db_path, MAX_PATH_LENGTH, "%s/%s", 
-             get_sydb_base_directory(), database_name);
+    char database_path[MAXIMUM_PATH_LENGTH];
+    snprintf(database_path, MAXIMUM_PATH_LENGTH, "%s/%s", 
+             get_sydb_base_directory_path(), database_name);
     
-    char coll_path[MAX_PATH_LENGTH];
-    snprintf(coll_path, MAX_PATH_LENGTH, "%s/%s", db_path, collection_name);
+    char collection_path[MAXIMUM_PATH_LENGTH];
+    snprintf(collection_path, MAXIMUM_PATH_LENGTH, "%s/%s", database_path, collection_name);
     
-    if (create_directory(coll_path) == -1) {
+    if (create_directory_recursively(collection_path) == -1) {
         return -1;
     }
     
-    char schema_path[MAX_PATH_LENGTH];
-    snprintf(schema_path, MAX_PATH_LENGTH, "%s/schema.txt", coll_path);
+    char schema_file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(schema_file_path, MAXIMUM_PATH_LENGTH, "%s/schema.txt", collection_path);
     
-    char lock_path[MAX_PATH_LENGTH];
-    snprintf(lock_path, MAX_PATH_LENGTH, "%s/.schema.lock", coll_path);
-    int lock_fd = acquire_lock(lock_path);
-    if (lock_fd == -1) {
+    char lock_file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(lock_file_path, MAXIMUM_PATH_LENGTH, "%s/.schema.lock", collection_path);
+    int lock_file_descriptor = acquire_exclusive_lock(lock_file_path);
+    if (lock_file_descriptor == -1) {
         return -1;
     }
     
-    FILE *file = fopen(schema_path, "w");
-    if (!file) {
+    FILE* schema_file = fopen(schema_file_path, "w");
+    if (!schema_file) {
         fprintf(stderr, "Error creating schema file: %s\n", strerror(errno));
-        release_lock(lock_fd, lock_path);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
         return -1;
     }
     
-    for (int i = 0; i < field_count; i++) {
-        fprintf(file, "%s:%s:%s\n", 
-                fields[i].name, 
-                field_type_to_string(fields[i].type),
-                fields[i].required ? "required" : "optional");
+    for (int field_index = 0; field_index < field_count; field_index++) {
+        fprintf(schema_file, "%s:%s:%s:%s\n", 
+                fields[field_index].name, 
+                convert_field_type_to_string(fields[field_index].type),
+                fields[field_index].required ? "required" : "optional",
+                fields[field_index].indexed ? "indexed" : "unindexed");
     }
     
-    fclose(file);
-    release_lock(lock_fd, lock_path);
+    fclose(schema_file);
+    release_exclusive_lock(lock_file_descriptor, lock_file_path);
     
-    char data_path[MAX_PATH_LENGTH];
-    snprintf(data_path, MAX_PATH_LENGTH, "%s/data%s", coll_path, DATA_FILE_EXTENSION);
-    FILE *data_file = fopen(data_path, "w+b");
+    char data_file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(data_file_path, MAXIMUM_PATH_LENGTH, "%s/data%s", collection_path, DATA_FILE_EXTENSION);
+    FILE* data_file = fopen(data_file_path, "w+b");
     if (data_file) {
-        initialize_data_file(data_file);
+        initialize_high_performance_data_file(data_file);
         fclose(data_file);
     }
     
@@ -754,119 +1133,110 @@ int collection_create(const char *database_name, const char *collection_name,
     return 0;
 }
 
-int collection_exists(const char *database_name, const char *collection_name) {
-    char coll_path[MAX_PATH_LENGTH];
-    snprintf(coll_path, MAX_PATH_LENGTH, "%s/%s/%s", 
-             get_sydb_base_directory(), database_name, collection_name);
+char** list_collections_in_database(const char* database_name, int* collection_count) {
+    char database_path[MAXIMUM_PATH_LENGTH];
+    snprintf(database_path, MAXIMUM_PATH_LENGTH, "%s/%s", 
+             get_sydb_base_directory_path(), database_name);
     
-    struct stat st;
-    return (stat(coll_path, &st) == 0 && S_ISDIR(st.st_mode));
-}
-
-char** collection_list(const char *database_name, int *count) {
-    char db_path[MAX_PATH_LENGTH];
-    snprintf(db_path, MAX_PATH_LENGTH, "%s/%s", 
-             get_sydb_base_directory(), database_name);
-    
-    DIR *dir = opendir(db_path);
-    if (!dir) {
-        *count = 0;
+    DIR* directory = opendir(database_path);
+    if (!directory) {
+        *collection_count = 0;
         return NULL;
     }
     
-    struct dirent *entry;
-    int coll_count = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && 
-            strcmp(entry->d_name, ".") != 0 && 
-            strcmp(entry->d_name, "..") != 0) {
-            coll_count++;
+    struct dirent* directory_entry;
+    int count = 0;
+    while ((directory_entry = readdir(directory)) != NULL) {
+        if (directory_entry->d_type == DT_DIR && 
+            strcmp(directory_entry->d_name, ".") != 0 && 
+            strcmp(directory_entry->d_name, "..") != 0) {
+            count++;
         }
     }
-    rewinddir(dir);
+    rewinddir(directory);
     
-    if (coll_count == 0) {
-        closedir(dir);
-        *count = 0;
+    if (count == 0) {
+        closedir(directory);
+        *collection_count = 0;
         return NULL;
     }
     
-    char **collections = malloc(coll_count * sizeof(char*));
+    char** collections = malloc(count * sizeof(char*));
     if (!collections) {
-        closedir(dir);
-        *count = 0;
+        closedir(directory);
+        *collection_count = 0;
         return NULL;
     }
     
     int index = 0;
-    while ((entry = readdir(dir)) != NULL && index < coll_count) {
-        if (entry->d_type == DT_DIR && 
-            strcmp(entry->d_name, ".") != 0 && 
-            strcmp(entry->d_name, "..") != 0) {
-            collections[index] = strdup(entry->d_name);
+    while ((directory_entry = readdir(directory)) != NULL && index < count) {
+        if (directory_entry->d_type == DT_DIR && 
+            strcmp(directory_entry->d_name, ".") != 0 && 
+            strcmp(directory_entry->d_name, "..") != 0) {
+            collections[index] = strdup(directory_entry->d_name);
             if (!collections[index]) {
                 for (int i = 0; i < index; i++) {
                     free(collections[i]);
                 }
                 free(collections);
-                closedir(dir);
-                *count = 0;
+                closedir(directory);
+                *collection_count = 0;
                 return NULL;
             }
             index++;
         }
     }
-    closedir(dir);
+    closedir(directory);
     
-    *count = coll_count;
+    *collection_count = count;
     return collections;
 }
 
-// ==================== INSTANCE OPERATIONS ====================
+// ==================== HIGH-PERFORMANCE INSTANCE OPERATIONS ====================
 
-char* build_instance_json(char **fields, char **values, int count) {
-    char *json = malloc(MAX_LINE_LENGTH);
-    if (!json) return NULL;
+char* build_instance_json_from_fields_and_values(char** field_names, char** field_values, int field_count) {
+    char* json_string = malloc(MAXIMUM_LINE_LENGTH);
+    if (!json_string) return NULL;
     
-    strcpy(json, "{");
+    strcpy(json_string, "{");
     
-    for (int i = 0; i < count; i++) {
-        if (i > 0) strcat(json, ",");
+    for (int field_index = 0; field_index < field_count; field_index++) {
+        if (field_index > 0) strcat(json_string, ",");
         
-        if (values[i] == NULL || strlen(values[i]) == 0) {
+        if (field_values[field_index] == NULL || strlen(field_values[field_index]) == 0) {
             continue;
         }
         
-        if ((values[i][0] == '[' && values[i][strlen(values[i])-1] == ']') ||
-            (values[i][0] == '{' && values[i][strlen(values[i])-1] == '}')) {
-            snprintf(json + strlen(json), MAX_LINE_LENGTH - strlen(json), 
-                    "\"%s\":%s", fields[i], values[i]);
+        if ((field_values[field_index][0] == '[' && field_values[field_index][strlen(field_values[field_index])-1] == ']') ||
+            (field_values[field_index][0] == '{' && field_values[field_index][strlen(field_values[field_index])-1] == '}')) {
+            snprintf(json_string + strlen(json_string), MAXIMUM_LINE_LENGTH - strlen(json_string), 
+                    "\"%s\":%s", field_names[field_index], field_values[field_index]);
         } else {
-            char *end_ptr;
-            strtol(values[i], &end_ptr, 10);
-            if (*end_ptr == '\0') {
-                snprintf(json + strlen(json), MAX_LINE_LENGTH - strlen(json), 
-                        "\"%s\":%s", fields[i], values[i]);
+            char* end_pointer;
+            strtol(field_values[field_index], &end_pointer, 10);
+            if (*end_pointer == '\0') {
+                snprintf(json_string + strlen(json_string), MAXIMUM_LINE_LENGTH - strlen(json_string), 
+                        "\"%s\":%s", field_names[field_index], field_values[field_index]);
             } else {
-                snprintf(json + strlen(json), MAX_LINE_LENGTH - strlen(json), 
-                        "\"%s\":\"%s\"", fields[i], values[i]);
+                snprintf(json_string + strlen(json_string), MAXIMUM_LINE_LENGTH - strlen(json_string), 
+                        "\"%s\":\"%s\"", field_names[field_index], field_values[field_index]);
             }
         }
     }
     
-    strcat(json, "}");
-    return json;
+    strcat(json_string, "}");
+    return json_string;
 }
 
-int instance_insert(const char *database_name, const char *collection_name, char *instance_json) {
+int insert_instance_into_collection(const char* database_name, const char* collection_name, char* instance_json) {
     if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
         fprintf(stderr, "Database or collection does not exist\n");
         return -1;
     }
     
-    field_schema_t fields[MAX_FIELDS];
+    field_schema_t fields[MAXIMUM_FIELDS];
     int field_count = 0;
-    if (load_schema(database_name, collection_name, fields, &field_count) == -1) {
+    if (load_schema_from_file(database_name, collection_name, fields, &field_count) == -1) {
         return -1;
     }
     
@@ -875,663 +1245,409 @@ int instance_insert(const char *database_name, const char *collection_name, char
         return -1;
     }
     
-    char coll_path[MAX_PATH_LENGTH];
-    snprintf(coll_path, MAX_PATH_LENGTH, "%s/%s/%s", 
-             get_sydb_base_directory(), database_name, collection_name);
+    char collection_path[MAXIMUM_PATH_LENGTH];
+    snprintf(collection_path, MAXIMUM_PATH_LENGTH, "%s/%s/%s", 
+             get_sydb_base_directory_path(), database_name, collection_name);
     
-    char lock_path[MAX_PATH_LENGTH];
-    snprintf(lock_path, MAX_PATH_LENGTH, "%s/.data.lock", coll_path);
-    int lock_fd = acquire_lock(lock_path);
-    if (lock_fd == -1) {
+    char lock_file_path[MAXIMUM_PATH_LENGTH];
+    snprintf(lock_file_path, MAXIMUM_PATH_LENGTH, "%s/.data.lock", collection_path);
+    int lock_file_descriptor = acquire_exclusive_lock(lock_file_path);
+    if (lock_file_descriptor == -1) {
         return -1;
     }
     
-    char uuid[UUID_SIZE];
-    generate_uuid(uuid);
+    char universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE];
+    generate_universally_unique_identifier(universally_unique_identifier);
     
-    char full_json[MAX_LINE_LENGTH];
-    snprintf(full_json, sizeof(full_json), "{\"_id\":\"%s\",\"_created_at\":%ld,%s", 
-             uuid, time(NULL), instance_json + 1);
+    char complete_json[MAXIMUM_LINE_LENGTH];
+    snprintf(complete_json, sizeof(complete_json), "{\"_id\":\"%s\",\"_created_at\":%ld,%s", 
+             universally_unique_identifier, time(NULL), instance_json + 1);
     
-    FILE *data_file = open_data_file(database_name, collection_name, "r+b");
+    FILE* data_file = open_data_file_with_optimizations(database_name, collection_name, "r+b");
     if (!data_file) {
         fprintf(stderr, "Error opening data file: %s\n", strerror(errno));
-        release_lock(lock_fd, lock_path);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
         return -1;
     }
     
-    if (append_record(data_file, uuid, full_json) == -1) {
-        fprintf(stderr, "Error appending record to data file\n");
+    file_header_t file_header;
+    if (read_file_header_information(data_file, &file_header) == -1) {
+        if (initialize_high_performance_data_file(data_file) == -1) {
+            fclose(data_file);
+            release_exclusive_lock(lock_file_descriptor, lock_file_path);
+            return -1;
+        }
+        if (read_file_header_information(data_file, &file_header) == -1) {
+            fclose(data_file);
+            release_exclusive_lock(lock_file_descriptor, lock_file_path);
+            return -1;
+        }
+    }
+    
+    size_t data_length = strlen(complete_json);
+    size_t total_record_size = sizeof(record_header_t) + data_length + 1;
+    
+    if (file_header.free_offset + total_record_size > file_header.file_size) {
+        file_header.file_size = file_header.free_offset + total_record_size + 1024;
+        if (write_file_header_information(data_file, &file_header) == -1) {
+            fclose(data_file);
+            release_exclusive_lock(lock_file_descriptor, lock_file_path);
+            return -1;
+        }
+    }
+    
+    if (fseek(data_file, file_header.free_offset, SEEK_SET) != 0) {
         fclose(data_file);
-        release_lock(lock_fd, lock_path);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
+        return -1;
+    }
+    
+    record_header_t record_header = {
+        .data_size = data_length,
+        .timestamp = time(NULL),
+        .flags = 0,
+        .data_checksum = compute_crc_32_checksum(complete_json, data_length),
+        .field_count = 0
+    };
+    strncpy(record_header.universally_unique_identifier, universally_unique_identifier, UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE - 1);
+    record_header.universally_unique_identifier[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE - 1] = '\0';
+    memset(record_header.reserved, 0, sizeof(record_header.reserved));
+    
+    if (fwrite(&record_header, sizeof(record_header_t), 1, data_file) != 1) {
+        fclose(data_file);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
+        return -1;
+    }
+    if (fwrite(complete_json, data_length + 1, 1, data_file) != 1) {
+        fclose(data_file);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
+        return -1;
+    }
+    
+    file_header.record_count++;
+    file_header.free_offset += total_record_size;
+    
+    if (write_file_header_information(data_file, &file_header) == -1) {
+        fclose(data_file);
+        release_exclusive_lock(lock_file_descriptor, lock_file_path);
         return -1;
     }
     
     fclose(data_file);
-    release_lock(lock_fd, lock_path);
+    release_exclusive_lock(lock_file_descriptor, lock_file_path);
     
-    printf("Instance inserted successfully with ID: %s\n", uuid);
+    printf("Instance inserted successfully with ID: %s\n", universally_unique_identifier);
     return 0;
 }
 
-char* merge_json_objects(const char *original_json, const char *update_json) {
-    char update_copy[MAX_LINE_LENGTH];
-    strncpy(update_copy, update_json, sizeof(update_copy) - 1);
-    update_copy[sizeof(update_copy) - 1] = '\0';
+// ==================== RECORD ITERATOR FOR HIGH-PERFORMANCE SCANNING ====================
+
+typedef struct {
+    FILE* data_file;
+    uint64_t current_offset;
+    uint64_t records_processed;
+    lru_cache_t* cache;
+} record_iterator_t;
+
+record_iterator_t* create_record_iterator(FILE* data_file, lru_cache_t* cache) {
+    file_header_t file_header;
+    if (read_file_header_information(data_file, &file_header) == -1) return NULL;
     
-    if (update_copy[0] == '{') {
-        memmove(update_copy, update_copy + 1, strlen(update_copy));
-    }
-    if (update_copy[strlen(update_copy)-1] == '}') {
-        update_copy[strlen(update_copy)-1] = '\0';
-    }
+    record_iterator_t* iterator = malloc(sizeof(record_iterator_t));
+    if (!iterator) return NULL;
     
-    char *update_fields[MAX_FIELDS];
-    char *update_values[MAX_FIELDS];
-    int update_count = 0;
+    iterator->data_file = data_file;
+    iterator->current_offset = sizeof(file_header_t);
+    iterator->records_processed = 0;
+    iterator->cache = cache;
     
-    char *token = strtok(update_copy, ",");
-    while (token && update_count < MAX_FIELDS) {
-        char *colon = strchr(token, ':');
-        if (colon) {
-            *colon = '\0';
-            char *field_name = token;
-            while (*field_name == ' ' || *field_name == '"') field_name++;
-            char *field_name_end = field_name + strlen(field_name) - 1;
-            while (field_name_end > field_name && (*field_name_end == ' ' || *field_name_end == '"')) {
-                *field_name_end = '\0';
-                field_name_end--;
-            }
-            
-            char *field_value = colon + 1;
-            while (*field_value == ' ') field_value++;
-            
-            update_fields[update_count] = strdup(field_name);
-            update_values[update_count] = strdup(field_value);
-            update_count++;
-        }
-        token = strtok(NULL, ",");
-    }
+    return iterator;
+}
+
+void free_record_iterator(record_iterator_t* iterator) {
+    free(iterator);
+}
+
+int read_next_record_from_iterator(record_iterator_t* iterator, record_header_t* record_header, char** json_data) {
+    file_header_t file_header;
+    if (read_file_header_information(iterator->data_file, &file_header) == -1) return -1;
     
-    char original_copy[MAX_LINE_LENGTH];
-    strncpy(original_copy, original_json, sizeof(original_copy) - 1);
-    original_copy[sizeof(original_copy) - 1] = '\0';
+    if (iterator->records_processed >= file_header.record_count) return 0;
     
-    if (original_copy[0] == '{') {
-        memmove(original_copy, original_copy + 1, strlen(original_copy));
-    }
-    if (original_copy[strlen(original_copy)-1] == '}') {
-        original_copy[strlen(original_copy)-1] = '\0';
+    if (fseek(iterator->data_file, iterator->current_offset, SEEK_SET) != 0) return -1;
+    
+    if (fread(record_header, sizeof(record_header_t), 1, iterator->data_file) != 1) return -1;
+    
+    *json_data = malloc(record_header->data_size + 1);
+    if (!*json_data) return -1;
+    
+    if (fread(*json_data, record_header->data_size + 1, 1, iterator->data_file) != 1) {
+        free(*json_data);
+        return -1;
     }
     
-    char *original_fields[MAX_FIELDS];
-    char *original_values[MAX_FIELDS];
-    int original_count = 0;
-    
-    char *orig_token = strtok(original_copy, ",");
-    while (orig_token && original_count < MAX_FIELDS) {
-        char *colon = strchr(orig_token, ':');
-        if (colon) {
-            *colon = '\0';
-            char *field_name = orig_token;
-            while (*field_name == ' ' || *field_name == '"') field_name++;
-            char *field_name_end = field_name + strlen(field_name) - 1;
-            while (field_name_end > field_name && (*field_name_end == ' ' || *field_name_end == '"')) {
-                *field_name_end = '\0';
-                field_name_end--;
-            }
-            
-            char *field_value = colon + 1;
-            while (*field_value == ' ') field_value++;
-            
-            original_fields[original_count] = strdup(field_name);
-            original_values[original_count] = strdup(field_value);
-            original_count++;
-        }
-        orig_token = strtok(NULL, ",");
+    uint32_t computed_checksum = compute_crc_32_checksum(*json_data, record_header->data_size);
+    if (computed_checksum != record_header->data_checksum) {
+        free(*json_data);
+        return -1;
     }
     
-    char *merged_json = malloc(MAX_LINE_LENGTH);
-    if (!merged_json) {
-        for (int i = 0; i < update_count; i++) {
-            free(update_fields[i]);
-            free(update_values[i]);
-        }
-        for (int i = 0; i < original_count; i++) {
-            free(original_fields[i]);
-            free(original_values[i]);
-        }
+    iterator->current_offset += sizeof(record_header_t) + record_header->data_size + 1;
+    iterator->records_processed++;
+    
+    return 1;
+}
+
+// ==================== QUERY OPERATIONS ====================
+
+char** find_instances_with_query(const char* database_name, const char* collection_name, const char* query, int* result_count) {
+    if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
+        fprintf(stderr, "Database or collection does not exist\n");
+        *result_count = 0;
         return NULL;
     }
     
-    strcpy(merged_json, "{");
-    int fields_added = 0;
-    
-    for (int i = 0; i < original_count; i++) {
-        bool is_updated = false;
-        for (int j = 0; j < update_count; j++) {
-            if (strcmp(original_fields[i], update_fields[j]) == 0) {
-                is_updated = true;
-                break;
-            }
-        }
-        
-        if (!is_updated) {
-            if (fields_added > 0) {
-                strcat(merged_json, ",");
-            }
-            
-            char *value = original_values[i];
-            if (value[0] == '"' && value[strlen(value)-1] == '"') {
-                snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                        "\"%s\":%s", original_fields[i], value);
-            } else {
-                char *end_ptr;
-                strtol(value, &end_ptr, 10);
-                if (*end_ptr == '\0') {
-                    snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                            "\"%s\":%s", original_fields[i], value);
-                } else {
-                    snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                            "\"%s\":\"%s\"", original_fields[i], value);
-                }
-            }
-            fields_added++;
-        }
-    }
-    
-    for (int i = 0; i < update_count; i++) {
-        if (fields_added > 0) {
-            strcat(merged_json, ",");
-        }
-        
-        char *value = update_values[i];
-        if (value[0] == '"' && value[strlen(value)-1] == '"') {
-            snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                    "\"%s\":%s", update_fields[i], value);
-        } else {
-            char *end_ptr;
-            strtol(value, &end_ptr, 10);
-            if (*end_ptr == '\0') {
-                snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                        "\"%s\":%s", update_fields[i], value);
-            } else {
-                snprintf(merged_json + strlen(merged_json), MAX_LINE_LENGTH - strlen(merged_json),
-                        "\"%s\":\"%s\"", update_fields[i], value);
-            }
-        }
-        fields_added++;
-    }
-    
-    strcat(merged_json, "}");
-    
-    for (int i = 0; i < update_count; i++) {
-        free(update_fields[i]);
-        free(update_values[i]);
-    }
-    for (int i = 0; i < original_count; i++) {
-        free(original_fields[i]);
-        free(original_values[i]);
-    }
-    
-    return merged_json;
-}
-
-int instance_update(const char *database_name, const char *collection_name, 
-                   const char *query, char *update_json) {
-    if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
-        fprintf(stderr, "Database or collection does not exist\n");
-        return -1;
-    }
-    
-    field_schema_t fields[MAX_FIELDS];
-    int field_count = 0;
-    if (load_schema(database_name, collection_name, fields, &field_count) == 0) {
-        char update_copy[MAX_LINE_LENGTH];
-        strncpy(update_copy, update_json, sizeof(update_copy) - 1);
-        update_copy[sizeof(update_copy) - 1] = '\0';
-        
-        if (update_copy[0] == '{') {
-            memmove(update_copy, update_copy + 1, strlen(update_copy));
-        }
-        if (update_copy[strlen(update_copy)-1] == '}') {
-            update_copy[strlen(update_copy)-1] = '\0';
-        }
-        
-        char *update_fields[MAX_FIELDS];
-        char *update_values[MAX_FIELDS];
-        int update_field_count = 0;
-        
-        char *token = strtok(update_copy, ",");
-        while (token && update_field_count < MAX_FIELDS) {
-            char *colon = strchr(token, ':');
-            if (colon) {
-                *colon = '\0';
-                char *field_name = token;
-                if (field_name[0] == '"') field_name++;
-                if (field_name[strlen(field_name)-1] == '"') field_name[strlen(field_name)-1] = '\0';
-                
-                char *field_value = colon + 1;
-                
-                update_fields[update_field_count] = strdup(field_name);
-                update_values[update_field_count] = strdup(field_value);
-                update_field_count++;
-            }
-            token = strtok(NULL, ",");
-        }
-        
-        for (int i = 0; i < update_field_count; i++) {
-            for (int j = 0; j < field_count; j++) {
-                if (strcmp(update_fields[i], fields[j].name) == 0) {
-                    if (!validate_field_value(fields[j].name, update_values[i], fields[j].type)) {
-                        for (int k = 0; k < update_field_count; k++) {
-                            free(update_fields[k]);
-                            free(update_values[k]);
-                        }
-                        return -1;
-                    }
-                    break;
-                }
-            }
-            free(update_fields[i]);
-            free(update_values[i]);
-        }
-    }
-    
-    char coll_path[MAX_PATH_LENGTH];
-    snprintf(coll_path, MAX_PATH_LENGTH, "%s/%s/%s", 
-             get_sydb_base_directory(), database_name, collection_name);
-    
-    char lock_path[MAX_PATH_LENGTH];
-    snprintf(lock_path, MAX_PATH_LENGTH, "%s/.data.lock", coll_path);
-    int lock_fd = acquire_lock(lock_path);
-    if (lock_fd == -1) {
-        return -1;
-    }
-    
-    char data_path[MAX_PATH_LENGTH];
-    snprintf(data_path, MAX_PATH_LENGTH, "%s/data%s", coll_path, DATA_FILE_EXTENSION);
-    char temp_path[MAX_PATH_LENGTH];
-    snprintf(temp_path, MAX_PATH_LENGTH, "%s/data.tmp%s", coll_path, DATA_FILE_EXTENSION);
-    
-    FILE *source_file = fopen(data_path, "r+b");
-    FILE *temp_file = fopen(temp_path, "w+b");
-    if (!source_file || !temp_file) {
-        fprintf(stderr, "Error opening files: %s\n", strerror(errno));
-        if (source_file) fclose(source_file);
-        if (temp_file) fclose(temp_file);
-        release_lock(lock_fd, lock_path);
-        return -1;
-    }
-    
-    record_iterator_t *iter = create_record_iterator(source_file);
-    if (!iter) {
-        fclose(source_file);
-        fclose(temp_file);
-        release_lock(lock_fd, lock_path);
-        return -1;
-    }
-    
-    record_header_t header;
-    char *json_data;
-    int updated_count = 0;
-    
-    while (read_next_record(iter, &header, &json_data) == 1) {
-        if (json_matches_query(json_data, query)) {
-            char *merged_json = merge_json_objects(json_data, update_json);
-            if (merged_json) {
-                append_record(temp_file, header.uuid, merged_json);
-                free(merged_json);
-                updated_count++;
-            } else {
-                append_record(temp_file, header.uuid, json_data);
-            }
-        } else {
-            append_record(temp_file, header.uuid, json_data);
-        }
-        free(json_data);
-    }
-    
-    free_record_iterator(iter);
-    fclose(source_file);
-    fclose(temp_file);
-    
-    if (updated_count > 0) {
-        if (rename(temp_path, data_path) == -1) {
-            fprintf(stderr, "Error replacing data file: %s\n", strerror(errno));
-            release_lock(lock_fd, lock_path);
-            return -1;
-        }
-        printf("Updated %d instance(s)\n", updated_count);
-    } else {
-        remove(temp_path);
-        printf("No instances found matching query\n");
-    }
-    
-    release_lock(lock_fd, lock_path);
-    return updated_count > 0 ? 0 : -1;
-}
-
-int instance_delete(const char *database_name, const char *collection_name, const char *query) {
-    if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
-        fprintf(stderr, "Database or collection does not exist\n");
-        return -1;
-    }
-    
-    char coll_path[MAX_PATH_LENGTH];
-    snprintf(coll_path, MAX_PATH_LENGTH, "%s/%s/%s", 
-             get_sydb_base_directory(), database_name, collection_name);
-    
-    char lock_path[MAX_PATH_LENGTH];
-    snprintf(lock_path, MAX_PATH_LENGTH, "%s/.data.lock", coll_path);
-    int lock_fd = acquire_lock(lock_path);
-    if (lock_fd == -1) {
-        return -1;
-    }
-    
-    char data_path[MAX_PATH_LENGTH];
-    snprintf(data_path, MAX_PATH_LENGTH, "%s/data%s", coll_path, DATA_FILE_EXTENSION);
-    char temp_path[MAX_PATH_LENGTH];
-    snprintf(temp_path, MAX_PATH_LENGTH, "%s/data.tmp%s", coll_path, DATA_FILE_EXTENSION);
-    
-    FILE *source_file = fopen(data_path, "r+b");
-    FILE *temp_file = fopen(temp_path, "w+b");
-    if (!source_file || !temp_file) {
-        fprintf(stderr, "Error opening files: %s\n", strerror(errno));
-        if (source_file) fclose(source_file);
-        if (temp_file) fclose(temp_file);
-        release_lock(lock_fd, lock_path);
-        return -1;
-    }
-    
-    record_iterator_t *iter = create_record_iterator(source_file);
-    if (!iter) {
-        fclose(source_file);
-        fclose(temp_file);
-        release_lock(lock_fd, lock_path);
-        return -1;
-    }
-    
-    record_header_t header;
-    char *json_data;
-    int deleted_count = 0;
-    
-    while (read_next_record(iter, &header, &json_data) == 1) {
-        if (!json_matches_query(json_data, query)) {
-            append_record(temp_file, header.uuid, json_data);
-        } else {
-            deleted_count++;
-        }
-        free(json_data);
-    }
-    
-    free_record_iterator(iter);
-    fclose(source_file);
-    fclose(temp_file);
-    
-    if (deleted_count > 0) {
-        if (rename(temp_path, data_path) == -1) {
-            fprintf(stderr, "Error replacing data file: %s\n", strerror(errno));
-            release_lock(lock_fd, lock_path);
-            return -1;
-        }
-        printf("Deleted %d instance(s)\n", deleted_count);
-    } else {
-        remove(temp_path);
-        printf("No instances found matching query\n");
-    }
-    
-    release_lock(lock_fd, lock_path);
-    return deleted_count > 0 ? 0 : -1;
-}
-
-char** instance_find(const char *database_name, const char *collection_name, const char *query, int *count) {
-    if (!database_exists(database_name) || !collection_exists(database_name, collection_name)) {
-        fprintf(stderr, "Database or collection does not exist\n");
-        *count = 0;
-        return NULL;
-    }
-    
-    FILE *data_file = open_data_file(database_name, collection_name, "rb");
+    FILE* data_file = open_data_file_with_optimizations(database_name, collection_name, "rb");
     if (!data_file) {
-        *count = 0;
+        *result_count = 0;
         return NULL;
     }
     
-    record_iterator_t *iter = create_record_iterator(data_file);
-    if (!iter) {
+    record_iterator_t* iterator = create_record_iterator(data_file, NULL);
+    if (!iterator) {
         fclose(data_file);
-        *count = 0;
+        *result_count = 0;
         return NULL;
     }
     
-    record_header_t header;
-    char *json_data;
+    record_header_t record_header;
+    char* json_data;
     int match_count = 0;
     
-    while (read_next_record(iter, &header, &json_data) == 1) {
-        if (json_matches_query(json_data, query)) {
+    while (read_next_record_from_iterator(iterator, &record_header, &json_data) == 1) {
+        if (json_matches_query_conditions(json_data, query)) {
             match_count++;
         }
         free(json_data);
     }
     
-    free_record_iterator(iter);
+    free_record_iterator(iterator);
     
     if (match_count == 0) {
         fclose(data_file);
-        *count = 0;
+        *result_count = 0;
         return NULL;
     }
     
-    iter = create_record_iterator(data_file);
-    char **results = malloc(match_count * sizeof(char*));
+    iterator = create_record_iterator(data_file, NULL);
+    char** results = malloc(match_count * sizeof(char*));
     if (!results) {
-        free_record_iterator(iter);
+        free_record_iterator(iterator);
         fclose(data_file);
-        *count = 0;
+        *result_count = 0;
         return NULL;
     }
     
-    int index = 0;
-    while (read_next_record(iter, &header, &json_data) == 1 && index < match_count) {
-        if (json_matches_query(json_data, query)) {
-            results[index] = strdup(json_data);
-            if (!results[index]) {
-                for (int i = 0; i < index; i++) {
+    int current_index = 0;
+    while (read_next_record_from_iterator(iterator, &record_header, &json_data) == 1 && current_index < match_count) {
+        if (json_matches_query_conditions(json_data, query)) {
+            results[current_index] = strdup(json_data);
+            if (!results[current_index]) {
+                for (int i = 0; i < current_index; i++) {
                     free(results[i]);
                 }
                 free(results);
-                free_record_iterator(iter);
+                free_record_iterator(iterator);
                 fclose(data_file);
-                *count = 0;
+                *result_count = 0;
                 return NULL;
             }
-            index++;
+            current_index++;
         }
         free(json_data);
     }
     
-    free_record_iterator(iter);
+    free_record_iterator(iterator);
     fclose(data_file);
-    *count = index;
+    *result_count = current_index;
     return results;
 }
 
-char** instance_list(const char *database_name, const char *collection_name, int *count) {
-    FILE *data_file = open_data_file(database_name, collection_name, "rb");
+char** list_all_instances_in_collection(const char* database_name, const char* collection_name, int* instance_count) {
+    FILE* data_file = open_data_file_with_optimizations(database_name, collection_name, "rb");
     if (!data_file) {
-        *count = 0;
+        *instance_count = 0;
         return NULL;
     }
     
-    file_header_t header;
-    if (read_file_header(data_file, &header) == -1) {
+    file_header_t file_header;
+    if (read_file_header_information(data_file, &file_header) == -1) {
         fclose(data_file);
-        *count = 0;
+        *instance_count = 0;
         return NULL;
     }
     
-    if (header.record_count == 0) {
+    if (file_header.record_count == 0) {
         fclose(data_file);
-        *count = 0;
+        *instance_count = 0;
         return NULL;
     }
     
-    char **instances = malloc(header.record_count * sizeof(char*));
+    char** instances = malloc(file_header.record_count * sizeof(char*));
     if (!instances) {
         fclose(data_file);
-        *count = 0;
+        *instance_count = 0;
         return NULL;
     }
     
-    record_iterator_t *iter = create_record_iterator(data_file);
-    if (!iter) {
+    record_iterator_t* iterator = create_record_iterator(data_file, NULL);
+    if (!iterator) {
         free(instances);
         fclose(data_file);
-        *count = 0;
+        *instance_count = 0;
         return NULL;
     }
     
-    record_header_t rec_header;
-    char *json_data;
-    int index = 0;
+    record_header_t record_header;
+    char* json_data;
+    int current_index = 0;
     
-    while (read_next_record(iter, &rec_header, &json_data) == 1 && index < header.record_count) {
-        instances[index] = strdup(json_data);
-        if (!instances[index]) {
-            for (int i = 0; i < index; i++) {
+    while (read_next_record_from_iterator(iterator, &record_header, &json_data) == 1 && current_index < file_header.record_count) {
+        instances[current_index] = strdup(json_data);
+        if (!instances[current_index]) {
+            for (int i = 0; i < current_index; i++) {
                 free(instances[i]);
             }
             free(instances);
-            free_record_iterator(iter);
+            free_record_iterator(iterator);
             fclose(data_file);
-            *count = 0;
+            *instance_count = 0;
             return NULL;
         }
         free(json_data);
-        index++;
+        current_index++;
     }
     
-    free_record_iterator(iter);
+    free_record_iterator(iterator);
     fclose(data_file);
-    *count = index;
+    *instance_count = current_index;
     return instances;
 }
 
 // ==================== COMMAND LINE INTERFACE ====================
 
-void print_usage() {
+void print_usage_information() {
     printf("Usage:\n");
     printf("  sydb create <database_name>\n");
-    printf("  sydb create <database_name> <model_name> --schema --<field>-<type>[-req] ...\n");
-    printf("  sydb create <database_name> <model_name> --insert-one --<field>-\"<value>\" ...\n");
-    printf("  sydb update <database_name> <model_name> --where \"<query>\" --set --<field>-\"<value>\" ...\n");
-    printf("  sydb delete <database_name> <model_name> --where \"<query>\"\n");
-    printf("  sydb find <database_name> <model_name> --where \"<query>\"\n");
-    printf("  sydb schema <database_name> <model_name>\n");
+    printf("  sydb create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...\n");
+    printf("  sydb create <database_name> <collection_name> --insert-one --<field>-\"<value>\" ...\n");
+    printf("  sydb update <database_name> <collection_name> --where \"<query>\" --set --<field>-\"<value>\" ...\n");
+    printf("  sydb delete <database_name> <collection_name> --where \"<query>\"\n");
+    printf("  sydb find <database_name> <collection_name> --where \"<query>\"\n");
+    printf("  sydb schema <database_name> <collection_name>\n");
     printf("  sydb list\n");
     printf("  sydb list <database_name>\n");
-    printf("  sydb list <database_name> <model_name>\n");
+    printf("  sydb list <database_name> <collection_name>\n");
     printf("\nField types: string, int, float, bool, array, object\n");
     printf("Add -req for required fields\n");
+    printf("Add -idx for indexed fields (improves query performance)\n");
     printf("Query format: field:value,field2:value2 (multiple conditions supported)\n");
 }
 
-int parse_insert_data(int argc, char *argv[], int start_index, 
-                     char **fields, char **values, int *count) {
-    *count = 0;
+int parse_insert_data_from_arguments(int argument_count, char* argument_values[], int start_index, 
+                                    char** field_names, char** field_values, int* field_count) {
+    *field_count = 0;
     
-    for (int i = start_index; i < argc && *count < MAX_FIELDS; i++) {
-        char *field_spec = argv[i];
-        if (strncmp(field_spec, "--", 2) != 0) continue;
+    for (int argument_index = start_index; argument_index < argument_count && *field_count < MAXIMUM_FIELDS; argument_index++) {
+        char* field_specification = argument_values[argument_index];
+        if (strncmp(field_specification, "--", 2) != 0) continue;
         
-        field_spec += 2;
+        field_specification += 2;
         
-        char *value_start = strchr(field_spec, '-');
+        char* value_start = strchr(field_specification, '-');
         if (!value_start) {
             continue;
         }
         
         *value_start = '\0';
-        char *field_value = value_start + 1;
+        char* field_value = value_start + 1;
         
         if (strlen(field_value) == 0) {
-            fields[*count] = strdup(field_spec);
-            values[*count] = strdup("");
+            field_names[*field_count] = strdup(field_specification);
+            field_values[*field_count] = strdup("");
         } else {
             if (field_value[0] == '"' && field_value[strlen(field_value)-1] == '"') {
                 field_value[strlen(field_value)-1] = '\0';
                 field_value++;
             }
             
-            fields[*count] = strdup(field_spec);
-            values[*count] = strdup(field_value);
+            field_names[*field_count] = strdup(field_specification);
+            field_values[*field_count] = strdup(field_value);
         }
         
-        if (!fields[*count] || !values[*count]) {
-            for (int j = 0; j < *count; j++) {
-                free(fields[j]);
-                free(values[j]);
+        if (!field_names[*field_count] || !field_values[*field_count]) {
+            for (int field_index = 0; field_index < *field_count; field_index++) {
+                free(field_names[field_index]);
+                free(field_values[field_index]);
             }
             return -1;
         }
         
-        (*count)++;
+        (*field_count)++;
     }
     
     return 0;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        print_usage();
+int main(int argument_count, char* argument_values[]) {
+    if (argument_count < 2) {
+        print_usage_information();
         return 1;
     }
     
-    create_directory(get_sydb_base_directory());
+    create_directory_recursively(get_sydb_base_directory_path());
     
-    if (strcmp(argv[1], "create") == 0) {
-        if (argc < 3) {
+    if (strcmp(argument_values[1], "create") == 0) {
+        if (argument_count < 3) {
             fprintf(stderr, "Error: Missing database name\n");
-            print_usage();
+            print_usage_information();
             return 1;
         }
         
-        if (argc == 3) {
-            return database_create(argv[2]);
+        if (argument_count == 3) {
+            return create_database(argument_values[2]);
         }
-        else if (argc >= 5) {
-            int schema_index = -1;
-            int insert_index = -1;
+        else if (argument_count >= 5) {
+            int schema_flag_index = -1;
+            int insert_flag_index = -1;
             
-            for (int i = 3; i < argc; i++) {
-                if (strcmp(argv[i], "--schema") == 0) {
-                    schema_index = i;
+            for (int argument_index = 3; argument_index < argument_count; argument_index++) {
+                if (strcmp(argument_values[argument_index], "--schema") == 0) {
+                    schema_flag_index = argument_index;
                     break;
-                } else if (strcmp(argv[i], "--insert-one") == 0) {
-                    insert_index = i;
+                } else if (strcmp(argument_values[argument_index], "--insert-one") == 0) {
+                    insert_flag_index = argument_index;
                     break;
                 }
             }
             
-            if (schema_index != -1) {
-                if (schema_index != 4) {
-                    fprintf(stderr, "Error: Invalid syntax. Use: sydb create <db> <collection> --schema ...\n");
-                    print_usage();
+            if (schema_flag_index != -1) {
+                if (schema_flag_index != 4) {
+                    fprintf(stderr, "Error: Invalid syntax. Use: sydb create <database> <collection> --schema ...\n");
+                    print_usage_information();
                     return 1;
                 }
                 
-                if (argc < 6) {
+                if (argument_count < 6) {
                     fprintf(stderr, "Error: Missing schema fields\n");
-                    print_usage();
+                    print_usage_information();
                     return 1;
                 }
                 
-                field_schema_t fields[MAX_FIELDS];
+                field_schema_t fields[MAXIMUM_FIELDS];
                 int field_count = 0;
-                if (parse_schema_fields(argc, argv, schema_index + 1, 
-                                       fields, &field_count) == -1) {
+                if (parse_schema_fields_from_arguments(argument_count, argument_values, schema_flag_index + 1, 
+                                                      fields, &field_count) == -1) {
                     return 1;
                 }
                 
@@ -1540,27 +1656,27 @@ int main(int argc, char *argv[]) {
                     return 1;
                 }
                 
-                return collection_create(argv[2], argv[3], fields, field_count);
+                return create_collection(argument_values[2], argument_values[3], fields, field_count);
             }
-            else if (insert_index != -1) {
-                if (insert_index != 4) {
-                    fprintf(stderr, "Error: Invalid syntax. Use: sydb create <db> <collection> --insert-one ...\n");
-                    print_usage();
+            else if (insert_flag_index != -1) {
+                if (insert_flag_index != 4) {
+                    fprintf(stderr, "Error: Invalid syntax. Use: sydb create <database> <collection> --insert-one ...\n");
+                    print_usage_information();
                     return 1;
                 }
                 
-                if (argc < 6) {
+                if (argument_count < 6) {
                     fprintf(stderr, "Error: Missing insert data\n");
-                    print_usage();
+                    print_usage_information();
                     return 1;
                 }
                 
-                char *fields[MAX_FIELDS];
-                char *values[MAX_FIELDS];
+                char* field_names[MAXIMUM_FIELDS];
+                char* field_values[MAXIMUM_FIELDS];
                 int field_count = 0;
                 
-                if (parse_insert_data(argc, argv, insert_index + 1, 
-                                    fields, values, &field_count) == -1) {
+                if (parse_insert_data_from_arguments(argument_count, argument_values, insert_flag_index + 1, 
+                                                   field_names, field_values, &field_count) == -1) {
                     fprintf(stderr, "Error: Failed to parse insert data\n");
                     return 1;
                 }
@@ -1570,102 +1686,51 @@ int main(int argc, char *argv[]) {
                     return 1;
                 }
                 
-                char *instance_json = build_instance_json(fields, values, field_count);
+                char* instance_json = build_instance_json_from_fields_and_values(field_names, field_values, field_count);
                 if (!instance_json) {
                     fprintf(stderr, "Error: Failed to build instance JSON\n");
-                    for (int i = 0; i < field_count; i++) {
-                        free(fields[i]);
-                        free(values[i]);
+                    for (int field_index = 0; field_index < field_count; field_index++) {
+                        free(field_names[field_index]);
+                        free(field_values[field_index]);
                     }
                     return 1;
                 }
                 
-                int result = instance_insert(argv[2], argv[3], instance_json);
+                int result = insert_instance_into_collection(argument_values[2], argument_values[3], instance_json);
                 
                 free(instance_json);
-                for (int i = 0; i < field_count; i++) {
-                    free(fields[i]);
-                    free(values[i]);
+                for (int field_index = 0; field_index < field_count; field_index++) {
+                    free(field_names[field_index]);
+                    free(field_values[field_index]);
                 }
                 
                 return result;
             }
             else {
                 fprintf(stderr, "Error: Missing --schema or --insert-one flag\n");
-                print_usage();
+                print_usage_information();
                 return 1;
             }
         }
         else {
             fprintf(stderr, "Error: Invalid create operation\n");
-            print_usage();
+            print_usage_information();
             return 1;
         }
     }
-    else if (strcmp(argv[1], "update") == 0) {
-        if (argc < 7 || strcmp(argv[4], "--where") != 0 || 
-            strcmp(argv[6], "--set") != 0) {
-            fprintf(stderr, "Error: Invalid update syntax\n");
-            print_usage();
-            return 1;
-        }
-        
-        char *fields[MAX_FIELDS];
-        char *values[MAX_FIELDS];
-        int field_count = 0;
-        
-        if (parse_insert_data(argc, argv, 7, fields, values, &field_count) == -1) {
-            fprintf(stderr, "Error: Failed to parse update data\n");
-            return 1;
-        }
-        
-        if (field_count == 0) {
-            fprintf(stderr, "Error: No valid update fields provided\n");
-            return 1;
-        }
-        
-        char *update_json = build_instance_json(fields, values, field_count);
-        if (!update_json) {
-            fprintf(stderr, "Error: Failed to build update JSON\n");
-            for (int i = 0; i < field_count; i++) {
-                free(fields[i]);
-                free(values[i]);
-            }
-            return 1;
-        }
-        
-        int result = instance_update(argv[2], argv[3], argv[5], update_json);
-        
-        free(update_json);
-        for (int i = 0; i < field_count; i++) {
-            free(fields[i]);
-            free(values[i]);
-        }
-        
-        return result;
-    }
-    else if (strcmp(argv[1], "delete") == 0) {
-        if (argc < 6 || strcmp(argv[4], "--where") != 0) {
-            fprintf(stderr, "Error: Invalid delete syntax\n");
-            print_usage();
-            return 1;
-        }
-        
-        return instance_delete(argv[2], argv[3], argv[5]);
-    }
-    else if (strcmp(argv[1], "find") == 0) {
-        if (argc < 6 || strcmp(argv[4], "--where") != 0) {
+    else if (strcmp(argument_values[1], "find") == 0) {
+        if (argument_count < 6 || strcmp(argument_values[4], "--where") != 0) {
             fprintf(stderr, "Error: Invalid find syntax\n");
-            print_usage();
+            print_usage_information();
             return 1;
         }
         
         int result_count;
-        char **results = instance_find(argv[2], argv[3], argv[5], &result_count);
+        char** results = find_instances_with_query(argument_values[2], argument_values[3], argument_values[5], &result_count);
         if (result_count > 0) {
-            for (int i = 0; i < result_count; i++) {
-                printf("%s\n", results[i]);
-                free(results[i]);
+            for (int result_index = 0; result_index < result_count; result_index++) {
+                printf("%s\n", results[result_index]);
+                free(results[result_index]);
             }
             free(results);
             return 0;
@@ -1674,57 +1739,57 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    else if (strcmp(argv[1], "schema") == 0) {
-        if (argc < 4) {
+    else if (strcmp(argument_values[1], "schema") == 0) {
+        if (argument_count < 4) {
             fprintf(stderr, "Error: Missing database or collection name\n");
-            print_usage();
+            print_usage_information();
             return 1;
         }
         
-        print_schema(argv[2], argv[3]);
+        print_collection_schema(argument_values[2], argument_values[3]);
         return 0;
     }
-    else if (strcmp(argv[1], "list") == 0) {
-        if (argc == 2) {
-            int db_count;
-            char **dbs = database_list(&db_count);
-            if (db_count == 0) {
+    else if (strcmp(argument_values[1], "list") == 0) {
+        if (argument_count == 2) {
+            int database_count;
+            char** databases = list_all_databases(&database_count);
+            if (database_count == 0) {
                 printf("No databases found\n");
             } else {
                 printf("Databases:\n");
-                for (int i = 0; i < db_count; i++) {
-                    printf("  %s\n", dbs[i]);
-                    free(dbs[i]);
+                for (int database_index = 0; database_index < database_count; database_index++) {
+                    printf("  %s\n", databases[database_index]);
+                    free(databases[database_index]);
                 }
-                free(dbs);
+                free(databases);
             }
             return 0;
         }
-        else if (argc == 3) {
-            int coll_count;
-            char **collections = collection_list(argv[2], &coll_count);
-            if (coll_count == 0) {
-                printf("No collections found in database '%s'\n", argv[2]);
+        else if (argument_count == 3) {
+            int collection_count;
+            char** collections = list_collections_in_database(argument_values[2], &collection_count);
+            if (collection_count == 0) {
+                printf("No collections found in database '%s'\n", argument_values[2]);
             } else {
-                printf("Collections in database '%s':\n", argv[2]);
-                for (int i = 0; i < coll_count; i++) {
-                    printf("  %s\n", collections[i]);
-                    free(collections[i]);
+                printf("Collections in database '%s':\n", argument_values[2]);
+                for (int collection_index = 0; collection_index < collection_count; collection_index++) {
+                    printf("  %s\n", collections[collection_index]);
+                    free(collections[collection_index]);
                 }
                 free(collections);
             }
             return 0;
         }
-        else if (argc == 4) {
+        else if (argument_count == 4) {
             int instance_count;
-            char **instances = instance_list(argv[2], argv[3], &instance_count);
+            char** instances = list_all_instances_in_collection(argument_values[2], argument_values[3], &instance_count);
             if (instance_count == 0) {
-                printf("No instances found in collection '%s'\n", argv[3]);
+                printf("No instances found in collection '%s'\n", argument_values[3]);
             } else {
-                printf("Instances in collection '%s':\n", argv[3]);
-                for (int i = 0; i < instance_count; i++) {
-                    printf("  %s\n", instances[i]);
-                    free(instances[i]);
+                printf("Instances in collection '%s':\n", argument_values[3]);
+                for (int instance_index = 0; instance_index < instance_count; instance_index++) {
+                    printf("  %s\n", instances[instance_index]);
+                    free(instances[instance_index]);
                 }
                 free(instances);
             }
@@ -1732,13 +1797,13 @@ int main(int argc, char *argv[]) {
         }
         else {
             fprintf(stderr, "Error: Invalid list operation\n");
-            print_usage();
+            print_usage_information();
             return 1;
         }
     }
     else {
-        fprintf(stderr, "Error: Unknown command '%s'\n", argv[1]);
-        print_usage();
+        fprintf(stderr, "Error: Unknown command '%s'\n", argument_values[1]);
+        print_usage_information();
         return 1;
     }
     
