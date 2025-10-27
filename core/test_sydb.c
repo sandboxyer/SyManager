@@ -38,9 +38,9 @@ int execute_test(TestCase *test) {
     test->success = (result == 0);
     
     if (test->success) {
-        printf("[" GREEN "✓ PASS" RESET "]");
+        printf("[" GREEN "PASS" RESET "]");
     } else {
-        printf("[" RED "✗ FAIL" RESET "]");
+        printf("[" RED "FAIL" RESET "]");
     }
     
     printf(" %s%4lld ms%s\n", CYAN, test->duration_ms, RESET);
@@ -48,7 +48,19 @@ int execute_test(TestCase *test) {
 }
 
 void run_performance_test() {
-    printf("\n" MAGENTA "🚀 PERFORMANCE TEST - Inserting 100 records" RESET "\n");
+    printf("\n" MAGENTA "PERFORMANCE TEST - Inserting 100 records" RESET "\n");
+    
+    // Setup performance database
+    printf("Setting up performance database...\n");
+    if (system("./sydb create perfdb > /dev/null 2>&1") != 0) {
+        printf(RED "Failed to create performance database\n" RESET);
+        return;
+    }
+    
+    if (system("./sydb create perfdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1") != 0) {
+        printf(RED "Failed to create performance collection\n" RESET);
+        return;
+    }
     
     long long start_time = get_current_time_ms();
     int success_count = 0;
@@ -64,8 +76,8 @@ void run_performance_test() {
         }
         
         // Progress indicator
-        if ((i + 1) % 10 == 0) {
-            printf(YELLOW "➤ Progress: %d/100\n" RESET, i + 1);
+        if ((i + 1) % 25 == 0) {
+            printf(YELLOW "Progress: %d/100\n" RESET, i + 1);
         }
     }
     
@@ -81,38 +93,38 @@ void run_performance_test() {
 }
 
 void print_fancy_result(int passed, int total, long long total_time) {
-    printf("\n" "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n");
-    printf("█" BLUE "                TEST RESULTS               " RESET "█\n");
-    printf("█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█\n");
+    printf("\n");
+    printf("===============================================\n");
+    printf(BLUE "               TEST RESULTS               " RESET "\n");
+    printf("===============================================\n");
     
     double percentage = (double)passed / total * 100;
     char *color = (percentage >= 80) ? GREEN : (percentage >= 60) ? YELLOW : RED;
-    char *emoji = (percentage >= 80) ? "🎉" : (percentage >= 60) ? "⚠️ " : "💥";
+    char *status = (percentage >= 80) ? "EXCELLENT" : (percentage >= 60) ? "ACCEPTABLE" : "NEEDS WORK";
     
-    printf("█  Tests Passed: " GREEN "%d/%d" RESET " (%s%.1f%%%s) %s  █\n", 
-           passed, total, color, percentage, RESET, emoji);
-    printf("█  Total Time: " CYAN "%lld ms" RESET "                     █\n", total_time);
-    printf("█  Status: %s%-20s" RESET "           █\n", 
-           color, (percentage >= 80) ? "EXCELLENT" : (percentage >= 60) ? "ACCEPTABLE" : "NEEDS WORK");
+    printf("  Tests Passed: " GREEN "%d/%d" RESET " (%s%.1f%%%s)\n", 
+           passed, total, color, percentage, RESET);
+    printf("  Total Time: " CYAN "%lld ms" RESET "\n", total_time);
+    printf("  Status: %s%s" RESET "\n", color, status);
     
     // Progress bar
-    printf("█  Progress: [");
+    printf("  Progress: [");
     int bar_width = 30;
     int filled = (int)((double)passed / total * bar_width);
     for (int i = 0; i < bar_width; i++) {
-        if (i < filled) printf(GREEN "█" RESET);
-        else printf("░");
+        if (i < filled) printf(GREEN "#" RESET);
+        else printf("-");
     }
-    printf("] █\n");
+    printf("]\n");
     
-    printf("▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n\n");
+    printf("===============================================\n\n");
 }
 
 int main() {
     setenv("SYDB_BASE_DIR", "/tmp/sydb_test", 1);
     
-    printf(CYAN "🧪 SYDB MINIMALIST TEST SUITE\n" RESET);
-    printf("═══════════════════════════════════════════════\n\n");
+    printf(CYAN "SYDB TEST SUITE\n" RESET);
+    printf("===============================================\n\n");
     
     TestCase tests[] = {
         // Database Operations
@@ -154,7 +166,6 @@ int main() {
     }
     
     // Performance test
-    system("./sydb create perfdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1");
     run_performance_test();
     
     // Cleanup performance db
