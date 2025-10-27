@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <math.h>
 #include <limits.h>
+#include <regex.h>
 
 // ==================== FUNCTION DECLARATIONS ====================
 char* json_get_string_value(const char* json_data, const char* key);
@@ -1112,9 +1113,8 @@ void print_secure_collection_schema(const char* database_name, const char* colle
         return;
     }
     
-    printf("Schema for collection '%s':\n", collection_name);
-    printf("%-20s %-10s %-10s %-10s\n", "Field", "Type", "Required", "Indexed");
-    printf("------------------------------------------------\n");
+    printf("Field               Type       Required   Indexed   \n");
+    printf("----------------------------------------------------\n");
     
     for (int field_index = 0; field_index < field_count; field_index++) {
         printf("%-20s %-10s %-10s %-10s\n", 
@@ -1135,7 +1135,36 @@ char* json_get_string_value(const char* json_data, const char* key) {
     if (written < 0 || written >= (int)sizeof(search_pattern)) return NULL;
     
     char* value_start = strstr(json_data, search_pattern);
-    if (!value_start) return NULL;
+    if (!value_start) {
+        // Try without quotes for the value
+        written = snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
+        if (written < 0 || written >= (int)sizeof(search_pattern)) return NULL;
+        
+        value_start = strstr(json_data, search_pattern);
+        if (!value_start) return NULL;
+        
+        value_start += strlen(search_pattern);
+        char* value_end = strchr(value_start, ',');
+        if (!value_end) value_end = strchr(value_start, '}');
+        if (!value_end) return NULL;
+        
+        size_t value_length = value_end - value_start;
+        if (value_length >= MAXIMUM_LINE_LENGTH) return NULL;
+        
+        char* extracted_value = malloc(value_length + 1);
+        if (!extracted_value) return NULL;
+        
+        strncpy(extracted_value, value_start, value_length);
+        extracted_value[value_length] = '\0';
+        
+        // Remove any trailing whitespace
+        char* end = extracted_value + strlen(extracted_value) - 1;
+        while (end > extracted_value && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
+            *end = '\0';
+            end--;
+        }
+        return extracted_value;
+    }
     
     value_start += strlen(search_pattern);
     char* value_end = strchr(value_start, '"');
@@ -1177,7 +1206,13 @@ bool json_has_field(const char* json_data, const char* key) {
 }
 
 bool json_matches_query_conditions(const char* json_data, const char* query) {
-    if (!query || !json_data) return false;
+    if (!json_data) return false;
+    
+    // Handle empty query - should match all records
+    if (!query || strlen(query) == 0) {
+        return true;
+    }
+    
     if (strlen(query) >= 1024) return false;
     
     char query_copy[1024];
@@ -1186,23 +1221,44 @@ bool json_matches_query_conditions(const char* json_data, const char* query) {
     
     char* query_token = strtok(query_copy, ",");
     while (query_token) {
+        // Trim whitespace
         while (*query_token == ' ') query_token++;
+        char* token_end = query_token + strlen(query_token) - 1;
+        while (token_end > query_token && *token_end == ' ') {
+            *token_end = '\0';
+            token_end--;
+        }
         
         char* colon_position = strchr(query_token, ':');
         if (!colon_position) {
-            query_token = strtok(NULL, ",");
-            continue;
+            // Invalid query format - no colon found
+            return false;
         }
         
         *colon_position = '\0';
         char* field_name = query_token;
         char* expected_value = colon_position + 1;
         
-        if (!validate_field_name(field_name)) {
-            query_token = strtok(NULL, ",");
-            continue;
+        // Trim field name
+        char* field_end = field_name + strlen(field_name) - 1;
+        while (field_end > field_name && *field_end == ' ') {
+            *field_end = '\0';
+            field_end--;
         }
         
+        if (!validate_field_name(field_name)) {
+            return false;
+        }
+        
+        // Trim and handle quoted expected values
+        while (*expected_value == ' ') expected_value++;
+        char* value_end = expected_value + strlen(expected_value) - 1;
+        while (value_end > expected_value && *value_end == ' ') {
+            *value_end = '\0';
+            value_end--;
+        }
+        
+        // Remove quotes if present
         if (expected_value[0] == '"' && expected_value[strlen(expected_value)-1] == '"') {
             expected_value[strlen(expected_value)-1] = '\0';
             expected_value++;
@@ -1214,6 +1270,7 @@ bool json_matches_query_conditions(const char* json_data, const char* query) {
             free(actual_string_value);
             if (!matches) return false;
         } else {
+            // Try integer comparison
             int actual_integer_value = json_get_integer_value(json_data, field_name);
             int expected_integer_value = atoi(expected_value);
             if (actual_integer_value != expected_integer_value) {
@@ -1258,6 +1315,11 @@ int collection_secure_exists(const char* database_name, const char* collection_n
 int create_secure_database(const char* database_name) {
     if (!validate_database_name(database_name)) {
         fprintf(stderr, "Error: Invalid database name '%s'\n", database_name);
+        return -1;
+    }
+    
+    if (database_secure_exists(database_name)) {
+        fprintf(stderr, "Error: Database '%s' already exists\n", database_name);
         return -1;
     }
     
@@ -1360,6 +1422,11 @@ int create_secure_collection(const char* database_name, const char* collection_n
     
     if (!database_secure_exists(database_name)) {
         fprintf(stderr, "Database '%s' does not exist\n", database_name);
+        return -1;
+    }
+    
+    if (collection_secure_exists(database_name, collection_name)) {
+        fprintf(stderr, "Collection '%s' already exists in database '%s'\n", collection_name, database_name);
         return -1;
     }
     
@@ -1781,7 +1848,7 @@ int read_secure_next_record_from_iterator(record_iterator_t* iterator, record_he
 // ==================== SECURE QUERY OPERATIONS ====================
 
 char** find_secure_instances_with_query(const char* database_name, const char* collection_name, const char* query, int* result_count) {
-    if (!validate_database_name(database_name) || !validate_collection_name(collection_name) || !query || !result_count) {
+    if (!validate_database_name(database_name) || !validate_collection_name(collection_name) || !result_count) {
         *result_count = 0;
         return NULL;
     }
@@ -2132,13 +2199,18 @@ int main(int argument_count, char* argument_values[]) {
     }
     else if (strcmp(argument_values[1], "find") == 0) {
         if (argument_count < 6 || strcmp(argument_values[4], "--where") != 0) {
-            fprintf(stderr, "Error: Invalid find syntax\n");
+            fprintf(stderr, "Error: Invalid find syntax. Use: sydb find <database> <collection> --where \"query\"\n");
             print_secure_usage_information();
             return 1;
         }
         
         if (!validate_database_name(argument_values[2]) || !validate_collection_name(argument_values[3])) {
             fprintf(stderr, "Error: Invalid database or collection name\n");
+            return 1;
+        }
+        
+        if (!database_secure_exists(argument_values[2]) || !collection_secure_exists(argument_values[2], argument_values[3])) {
+            fprintf(stderr, "Error: Database or collection does not exist\n");
             return 1;
         }
         
@@ -2152,8 +2224,8 @@ int main(int argument_count, char* argument_values[]) {
             free(results);
             return 0;
         } else {
-            printf("No instances found\n");
-            return 1;
+            // Empty result is not an error - return success
+            return 0;
         }
     }
     else if (strcmp(argument_values[1], "schema") == 0) {
@@ -2168,6 +2240,11 @@ int main(int argument_count, char* argument_values[]) {
             return 1;
         }
         
+        if (!database_secure_exists(argument_values[2]) || !collection_secure_exists(argument_values[2], argument_values[3])) {
+            fprintf(stderr, "Error: Database or collection does not exist\n");
+            return 1;
+        }
+        
         print_secure_collection_schema(argument_values[2], argument_values[3]);
         return 0;
     }
@@ -2178,9 +2255,8 @@ int main(int argument_count, char* argument_values[]) {
             if (database_count == 0) {
                 printf("No databases found\n");
             } else {
-                printf("Databases:\n");
                 for (int database_index = 0; database_index < database_count; database_index++) {
-                    printf("  %s\n", databases[database_index]);
+                    printf("%s\n", databases[database_index]);
                     free(databases[database_index]);
                 }
                 free(databases);
@@ -2193,14 +2269,18 @@ int main(int argument_count, char* argument_values[]) {
                 return 1;
             }
             
+            if (!database_secure_exists(argument_values[2])) {
+                fprintf(stderr, "Error: Database '%s' does not exist\n", argument_values[2]);
+                return 1;
+            }
+            
             int collection_count;
             char** collections = list_secure_collections_in_database(argument_values[2], &collection_count);
             if (collection_count == 0) {
                 printf("No collections found in database '%s'\n", argument_values[2]);
             } else {
-                printf("Collections in database '%s':\n", argument_values[2]);
                 for (int collection_index = 0; collection_index < collection_count; collection_index++) {
-                    printf("  %s\n", collections[collection_index]);
+                    printf("%s\n", collections[collection_index]);
                     free(collections[collection_index]);
                 }
                 free(collections);
@@ -2213,14 +2293,18 @@ int main(int argument_count, char* argument_values[]) {
                 return 1;
             }
             
+            if (!database_secure_exists(argument_values[2]) || !collection_secure_exists(argument_values[2], argument_values[3])) {
+                fprintf(stderr, "Error: Database or collection does not exist\n");
+                return 1;
+            }
+            
             int instance_count;
             char** instances = list_all_secure_instances_in_collection(argument_values[2], argument_values[3], &instance_count);
             if (instance_count == 0) {
                 printf("No instances found in collection '%s'\n", argument_values[3]);
             } else {
-                printf("Instances in collection '%s':\n", argument_values[3]);
                 for (int instance_index = 0; instance_index < instance_count; instance_index++) {
-                    printf("  %s\n", instances[instance_index]);
+                    printf("%s\n", instances[instance_index]);
                     free(instances[instance_index]);
                 }
                 free(instances);
