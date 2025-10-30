@@ -7,6 +7,7 @@ import { execSync } from 'child_process';
 
 /**
  * A class for compiling and executing C code with caching capabilities
+ * Supports both inline code and .c files
  * @class
  */
 class C {
@@ -63,20 +64,54 @@ class C {
   /**
    * @private
    */
-  static #compileAndSave(code, tag) {
+  static #getFileHash(filePath) {
+    const content = fs.readFileSync(filePath);
+    return crypto.createHash('md5').update(content).digest('hex');
+  }
+
+  /**
+   * @private
+   */
+  static #compileAndSave(codeOrFilePath, tag) {
     this.#initCache();
-    const tempFile = path.join(this.#cacheDir, `${tag}.c`);
     const executable = this.#getExecutablePath(tag);
 
     try {
-      fs.writeFileSync(tempFile, code, { mode: 0o644 });
-      const compileCommand = `${this.#compiler} ${tempFile} -o ${executable}`;
+      // Check if input is a file path or inline code
+      const isFilePath = typeof codeOrFilePath === 'string' && 
+                        (codeOrFilePath.endsWith('.c') || fs.existsSync(codeOrFilePath));
+      
+      let compileCommand;
+      
+      if (isFilePath) {
+        // Compile from file
+        if (!fs.existsSync(codeOrFilePath)) {
+          throw new Error(`File not found: ${codeOrFilePath}`);
+        }
+        compileCommand = `${this.#compiler} "${codeOrFilePath}" -o "${executable}"`;
+      } else {
+        // Compile from inline code
+        const tempFile = path.join(this.#cacheDir, `${tag}.c`);
+        fs.writeFileSync(tempFile, codeOrFilePath, { mode: 0o644 });
+        compileCommand = `${this.#compiler} "${tempFile}" -o "${executable}"`;
+        
+        // Clean up temporary source file after compilation
+        try {
+          execSync(compileCommand);
+          fs.chmodSync(executable, 0o755);
+          fs.unlinkSync(tempFile);
+        } catch (err) {
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+          throw err;
+        }
+        return executable;
+      }
+
+      // Execute compilation for file path case
       execSync(compileCommand);
       fs.chmodSync(executable, 0o755);
-      fs.unlinkSync(tempFile);
       return executable;
     } catch (err) {
-      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
       throw new Error(`Compilation failed: ${err.message}`);
     }
   }
@@ -176,8 +211,8 @@ class C {
   }
 
   /**
-   * Compile and run C code with full terminal control
-   * @param {string} code - C source code to compile and execute
+   * Compile and run C code or .c file with full terminal control
+   * @param {string} codeOrFilePath - C source code or path to .c file to compile and execute
    * @param {Object} [options] - Execution options
    * @param {Array<string|number>} [options.args=[]] - Command line arguments to pass to the executable
    * @param {string} [options.tag] - Tag for caching the executable (if not provided, temporary execution)
@@ -187,7 +222,7 @@ class C {
    * @throws {Error} - If compilation or execution fails
    * @static
    */
-  static async run(code, { 
+  static async run(codeOrFilePath, { 
     args = [], 
     tag = null, 
     force = false,
@@ -198,24 +233,37 @@ class C {
       throw new Error('onLog must be a function if provided');
     }
 
+    // Validate input
+    if (!codeOrFilePath) {
+      throw new Error('Either C code or file path must be provided');
+    }
+
     let executable;
     const isTemporary = !tag;
 
     try {
+      // Determine if input is a file path or inline code
+      const isFilePath = typeof codeOrFilePath === 'string' && 
+                        (codeOrFilePath.endsWith('.c') || fs.existsSync(codeOrFilePath));
+
+      // Generate tag based on file content hash for files, or use provided tag
+      let finalTag = tag;
+      if (isFilePath && !tag) {
+        const fileHash = this.#getFileHash(codeOrFilePath);
+        finalTag = `file_${path.basename(codeOrFilePath, '.c')}_${fileHash}`;
+      } else if (!tag) {
+        finalTag = `temp_${crypto.randomBytes(4).toString('hex')}`;
+      }
+
       // Compile or get cached executable
-      if (isTemporary) {
-        const tempTag = `temp_${crypto.randomBytes(4).toString('hex')}`;
-        executable = this.#compileAndSave(code, tempTag);
-      } else {
-        executable = this.#getExecutablePath(tag);
-        if (force || this.#forceRecompile || !fs.existsSync(executable)) {
-          this.#compileAndSave(code, tag);
-        }
+      executable = this.#getExecutablePath(finalTag);
+      if (force || this.#forceRecompile || !fs.existsSync(executable)) {
+        this.#compileAndSave(codeOrFilePath, finalTag);
       }
 
       return await this.#executeWithFullTerminal(executable, args, onLog);
     } finally {
-      // Clean up temporary executable
+      // Clean up temporary executable (only for inline code without tag)
       if (isTemporary && executable && fs.existsSync(executable)) {
         try {
           fs.unlinkSync(executable);
@@ -224,6 +272,68 @@ class C {
         }
       }
     }
+  }
+
+  /**
+   * Compile and run multiple C files together
+   * @param {Array<string>} filePaths - Array of paths to .c files to compile together
+   * @param {Object} [options] - Execution options
+   * @param {Array<string|number>} [options.args=[]] - Command line arguments to pass to the executable
+   * @param {string} [options.tag] - Tag for caching the executable
+   * @param {boolean} [options.force=false] - Force recompilation even if cached
+   * @param {Function} [options.onLog] - Optional callback function that receives each log output in real-time
+   * @returns {Promise<string>} - Promise that resolves with the complete output when process ends
+   * @throws {Error} - If compilation or execution fails
+   * @static
+   */
+  static async runFiles(filePaths, { 
+    args = [], 
+    tag = null, 
+    force = false,
+    onLog = null
+  } = {}) {
+    if (!Array.isArray(filePaths) || filePaths.length === 0) {
+      throw new Error('filePaths must be a non-empty array');
+    }
+
+    // Validate all files exist
+    for (const filePath of filePaths) {
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+      if (!filePath.endsWith('.c')) {
+        throw new Error(`File must be a .c file: ${filePath}`);
+      }
+    }
+
+    // Generate tag based on file content hashes
+    let finalTag = tag;
+    if (!tag) {
+      const hash = crypto.createHash('md5');
+      filePaths.forEach(filePath => {
+        hash.update(this.#getFileHash(filePath));
+      });
+      const filesHash = hash.digest('hex');
+      finalTag = `multi_${filesHash}`;
+    }
+
+    const executable = this.#getExecutablePath(finalTag);
+    
+    // Compile if needed
+    if (force || this.#forceRecompile || !fs.existsSync(executable)) {
+      this.#initCache();
+      const fileList = filePaths.map(fp => `"${fp}"`).join(' ');
+      const compileCommand = `${this.#compiler} ${fileList} -o "${executable}"`;
+      
+      try {
+        execSync(compileCommand);
+        fs.chmodSync(executable, 0o755);
+      } catch (err) {
+        throw new Error(`Compilation failed: ${err.message}`);
+      }
+    }
+
+    return await this.#executeWithFullTerminal(executable, args, onLog);
   }
 
   /**
