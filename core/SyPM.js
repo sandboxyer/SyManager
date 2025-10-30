@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
@@ -269,22 +270,58 @@ main
         return scriptPath;
     }
 
-    static run(filepath, config = {}) {
-        const resolvedPath = path.resolve(filepath);
-        if (!fs.existsSync(resolvedPath)) {
-            throw new Error(`File not found: ${resolvedPath}`);
+    static run(filepathOrCode, config = {}) {
+        let resolvedPath;
+        let isTempFile = false;
+        let tempFilePath = null;
+    
+        // Check if the input is a code string (contains JavaScript code patterns)
+        if (typeof filepathOrCode === 'string' && 
+            (filepathOrCode.includes('function') || 
+             filepathOrCode.includes('const ') || 
+             filepathOrCode.includes('let ') || 
+             filepathOrCode.includes('var ') || 
+             filepathOrCode.includes('require(') || 
+             filepathOrCode.includes('import ') ||
+             filepathOrCode.includes('export ') ||
+             filepathOrCode.trim().startsWith('//') ||
+             filepathOrCode.trim().startsWith('/*') ||
+             filepathOrCode.includes('console.log'))) {
+            
+            // It's a code string - create temporary file
+            isTempFile = true;
+            
+            // Detect if it's ESM (using import/export syntax) or CommonJS
+            const isESM = (filepathOrCode.includes('import ') && !filepathOrCode.includes('require(')) || 
+                         filepathOrCode.includes('export ');
+            
+            const extension = isESM ? '.mjs' : '.js';
+            const tempName = config.name ? `sypm_${config.name}_${Date.now()}${extension}` : `sypm_temp_${Date.now()}${extension}`;
+            tempFilePath = path.join(tmpdir(), tempName);
+            
+            // Write code to temporary file
+            fs.writeFileSync(tempFilePath, filepathOrCode, 'utf-8');
+            resolvedPath = tempFilePath;
+            
+            console.log(`✓ Created temporary ${isESM ? 'ESM' : 'CommonJS'} file: ${tempFilePath}`);
+        } else {
+            // It's a file path - use existing logic
+            resolvedPath = path.resolve(filepathOrCode);
+            if (!fs.existsSync(resolvedPath)) {
+                throw new Error(`File not found: ${resolvedPath}`);
+            }
         }
-
+        
         const id = this._generateId();
         const processName = config.name || this._generateProcessName();
         const logPath = path.join(LOG_DIR, `${processName}.log`);
-
+    
         // Create initial log entry
         fs.writeFileSync(logPath, `Process Manager - Started: ${new Date().toISOString()}\n`, 'utf-8');
-
+    
         let child;
         let actualPid;
-
+    
         if (config.autoRestart || config.restartTries) {
             // For auto-restart processes, create and start monitor script
             const monitorScript = this._createMonitorScript(
@@ -301,10 +338,10 @@ main
                 detached: true,
                 stdio: 'ignore'
             });
-
+    
             actualPid = child.pid;
             child.unref();
-
+    
             console.log(`✓ Started monitor with PID: ${actualPid}`);
         } else {
             // For regular processes, start directly
@@ -314,11 +351,11 @@ main
                 detached: true,
                 stdio: ['ignore', logFileDescriptor, logFileDescriptor]
             });
-
+    
             actualPid = child.pid;
             child.unref();
         }
-
+    
         const entry = {
             id,
             pid: actualPid,
@@ -334,13 +371,15 @@ main
             },
             isAutoRestart: !!(config.autoRestart || config.restartTries),
             monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null,
-            lastUpdate: new Date().toISOString()
+            lastUpdate: new Date().toISOString(),
+            isTempFile: isTempFile, // Track if this is a temporary file
+            tempFilePath: isTempFile ? tempFilePath : null // Store temp file path for cleanup
         };
-
+    
         const registry = this._loadRegistry();
         registry.push(entry);
         this._saveRegistry(registry);
-
+    
         return entry;
     }
 
@@ -413,12 +452,12 @@ main
     static kill(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
-   
+       
         if (!proc) {
             console.error('Process not found in registry.');
             return false;
         }
-   
+       
         console.log(`Killing process: ${proc.name} (ID: ${proc.id})`);
        
         // Mark as stopped in registry first
@@ -445,6 +484,18 @@ main
             console.log(`✓ Successfully killed process: ${proc.name}`);
         } else {
             console.log(`- Process ${proc.name} was not running`);
+        }
+        
+        // Clean up temporary file if this was a temp file process
+        if (proc.isTempFile && proc.tempFilePath) {
+            try {
+                if (fs.existsSync(proc.tempFilePath)) {
+                    fs.unlinkSync(proc.tempFilePath);
+                    console.log(`✓ Removed temporary file: ${proc.tempFilePath}`);
+                }
+            } catch (error) {
+                console.log(`⚠ Could not remove temp file: ${error.message}`);
+            }
         }
        
         return true;
@@ -629,6 +680,19 @@ main
                 aliveProcesses.push(proc);
             } else {
                 console.log(`Cleaning up dead process: ${proc.name} (ID: ${proc.id})`);
+                
+                // Clean up temporary files for dead processes
+                if (proc.isTempFile && proc.tempFilePath) {
+                    try {
+                        if (fs.existsSync(proc.tempFilePath)) {
+                            fs.unlinkSync(proc.tempFilePath);
+                            console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
+                        }
+                    } catch (error) {
+                        console.log(`  ⚠ Could not remove temp file: ${error.message}`);
+                    }
+                }
+                
                 // Also try to remove the monitor script if it exists
                 try {
                     const monitorScript = path.join(LOG_DIR, `monitor_${proc.id}.sh`);
