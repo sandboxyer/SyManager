@@ -120,11 +120,12 @@ class SyPM {
         return killedCount > 0;
     }
 
-    static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries) {
+    static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir) {
         // Escape paths for use in bash script
         const escapedRegistryPath = PROCESS_REGISTRY.replace(/'/g, "'\\''");
         const escapedFilePath = filePath.replace(/'/g, "'\\''");
         const escapedLogPath = logPath.replace(/'/g, "'\\''");
+        const escapedWorkingDir = workingDir ? workingDir.replace(/'/g, "'\\''") : '';
         
         const scriptContent = `#!/usr/bin/env bash
 PROCESS_ID='${processId}'
@@ -134,6 +135,7 @@ LOG_PATH='${escapedLogPath}'
 AUTO_RESTART='${autoRestart}'
 RESTART_TRIES='${restartTries}'
 REGISTRY_PATH='${escapedRegistryPath}'
+WORKING_DIR='${escapedWorkingDir}'
 CURRENT_TRIES=0
 MAX_RETRIES=${restartTries > 0 ? restartTries : 999999}
 
@@ -141,6 +143,7 @@ echo "=== PROCESS MONITOR STARTED ===" >> "$LOG_PATH"
 echo "Process: $PROCESS_NAME (ID: $PROCESS_ID)" >> "$LOG_PATH"
 echo "Auto-restart: $AUTO_RESTART" >> "$LOG_PATH"
 echo "Max restarts: $MAX_RETRIES" >> "$LOG_PATH"
+echo "Working Directory: $WORKING_DIR" >> "$LOG_PATH"
 echo "Started at: \$(date)" >> "$LOG_PATH"
 echo "Registry: $REGISTRY_PATH" >> "$LOG_PATH"
 echo "=================================" >> "$LOG_PATH"
@@ -212,8 +215,15 @@ start_and_monitor() {
     local attempt=\$1
     echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Starting process - Attempt: \$((attempt + 1))/\$MAX_RETRIES" >> "\$LOG_PATH"
     
+    # Set working directory if specified
+    local cd_command=""
+    if [[ -n "\$WORKING_DIR" && -d "\$WORKING_DIR" ]]; then
+        cd_command="cd '\$WORKING_DIR' && "
+        echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Working directory: \$WORKING_DIR" >> "\$LOG_PATH"
+    fi
+    
     # Start the Node.js process
-    node "\$FILE_PATH" >> "\$LOG_PATH" 2>&1 &
+    eval "\${cd_command}node '\$FILE_PATH'" >> "\$LOG_PATH" 2>&1 &
     local NODE_PID=\$!
     
     echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Process started with PID: \$NODE_PID" >> "\$LOG_PATH"
@@ -274,7 +284,19 @@ main
         let resolvedPath;
         let isTempFile = false;
         let tempFilePath = null;
-    
+        let workingDir = config.workingDir || null;
+
+        // Validate working directory if provided
+        if (workingDir) {
+            workingDir = path.resolve(workingDir);
+            if (!fs.existsSync(workingDir)) {
+                throw new Error(`Working directory does not exist: ${workingDir}`);
+            }
+            if (!fs.statSync(workingDir).isDirectory()) {
+                throw new Error(`Working directory is not a directory: ${workingDir}`);
+            }
+        }
+
         // Check if the input is a code string (contains JavaScript code patterns)
         if (typeof filepathOrCode === 'string' && 
             (filepathOrCode.includes('function') || 
@@ -297,18 +319,42 @@ main
             
             const extension = isESM ? '.mjs' : '.js';
             const tempName = config.name ? `sypm_${config.name}_${Date.now()}${extension}` : `sypm_temp_${Date.now()}${extension}`;
-            tempFilePath = path.join(tmpdir(), tempName);
+            
+            // Determine where to create the temp file
+            if (workingDir) {
+                // Create temp file in the specified working directory
+                tempFilePath = path.join(workingDir, tempName);
+            } else {
+                // Use system temp directory as before
+                tempFilePath = path.join(tmpdir(), tempName);
+            }
             
             // Write code to temporary file
             fs.writeFileSync(tempFilePath, filepathOrCode, 'utf-8');
             resolvedPath = tempFilePath;
             
             console.log(`✓ Created temporary ${isESM ? 'ESM' : 'CommonJS'} file: ${tempFilePath}`);
+            if (workingDir) {
+                console.log(`✓ Running in working directory: ${workingDir}`);
+            }
         } else {
             // It's a file path - use existing logic
             resolvedPath = path.resolve(filepathOrCode);
             if (!fs.existsSync(resolvedPath)) {
                 throw new Error(`File not found: ${resolvedPath}`);
+            }
+            
+            // If working directory is specified and different from file directory, create temp copy
+            if (workingDir && path.dirname(resolvedPath) !== workingDir) {
+                isTempFile = true;
+                const fileName = path.basename(resolvedPath);
+                tempFilePath = path.join(workingDir, fileName);
+                
+                // Copy the file to working directory
+                fs.copyFileSync(resolvedPath, tempFilePath);
+                resolvedPath = tempFilePath;
+                
+                console.log(`✓ Copied file to working directory: ${workingDir}`);
             }
         }
         
@@ -330,7 +376,8 @@ main
                 processName,
                 logPath,
                 config.autoRestart ? 'true' : 'false',
-                config.restartTries || 0
+                config.restartTries || 0,
+                workingDir
             );
            
             // Start the monitor script
@@ -347,10 +394,17 @@ main
             // For regular processes, start directly
             const logFileDescriptor = fs.openSync(logPath, 'a');
            
-            child = spawn(process.execPath, [resolvedPath], {
+            const spawnOptions = {
                 detached: true,
                 stdio: ['ignore', logFileDescriptor, logFileDescriptor]
-            });
+            };
+            
+            // Add working directory if specified
+            if (workingDir) {
+                spawnOptions.cwd = workingDir;
+            }
+           
+            child = spawn(process.execPath, [resolvedPath], spawnOptions);
     
             actualPid = child.pid;
             child.unref();
@@ -367,13 +421,15 @@ main
             config: {
                 autoRestart: !!config.autoRestart,
                 restartTries: config.restartTries || 0,
-                currentTries: 0
+                currentTries: 0,
+                workingDir: workingDir
             },
             isAutoRestart: !!(config.autoRestart || config.restartTries),
             monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null,
             lastUpdate: new Date().toISOString(),
-            isTempFile: isTempFile, // Track if this is a temporary file
-            tempFilePath: isTempFile ? tempFilePath : null // Store temp file path for cleanup
+            isTempFile: isTempFile,
+            tempFilePath: isTempFile ? tempFilePath : null,
+            originalPath: !isTempFile ? filepathOrCode : null
         };
     
         const registry = this._loadRegistry();
@@ -430,6 +486,7 @@ main
                 monitorPid: proc.monitorPid || 'N/A',
                 tries: proc.config?.currentTries || 0,
                 autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
+                workingDir: proc.config?.workingDir || 'Default',
                 path: proc.path
             });
         }
@@ -535,6 +592,18 @@ main
             } else {
                 console.log(`- Already dead: ${proc.name}`);
             }
+            
+            // Clean up temporary files for killed processes
+            if (proc.isTempFile && proc.tempFilePath) {
+                try {
+                    if (fs.existsSync(proc.tempFilePath)) {
+                        fs.unlinkSync(proc.tempFilePath);
+                        console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
+                    }
+                } catch (error) {
+                    console.log(`  ⚠ Could not remove temp file: ${error.message}`);
+                }
+            }
         }
        
         // Clear registry after killing all
@@ -579,6 +648,9 @@ main
 
         console.log(`🚀 Following logs for: ${proc.name} (ID: ${proc.id})`);
         console.log(`📁 Log file: ${logPath}`);
+        if (proc.config?.workingDir) {
+            console.log(`📁 Working directory: ${proc.config.workingDir}`);
+        }
         console.log('=' .repeat(80));
         console.log('Press Ctrl+C to stop following logs\n');
 
@@ -659,13 +731,18 @@ main
             this._removeFromRegistry(proc.id);
            
             // Start a new process with the same configuration
-            const newProcess = this.run(proc.path, {
+            const originalSource = proc.originalPath || proc.path;
+            const newProcess = this.run(originalSource, {
                 name: proc.name,
                 autoRestart: proc.config.autoRestart,
-                restartTries: proc.config.restartTries
+                restartTries: proc.config.restartTries,
+                workingDir: proc.config.workingDir
             });
            
             console.log(`✓ Successfully restarted: ${newProcess.name} (New PID: ${newProcess.pid}, ID: ${newProcess.id})`);
+            if (newProcess.config.workingDir) {
+                console.log(`✓ Running in working directory: ${newProcess.config.workingDir}`);
+            }
         }, 1000);
        
         return true;
@@ -745,18 +822,21 @@ Options for --run:
   --name <name>         Specify a name for the process
   --auto-restart        Auto-restart the process if it crashes
   --restart-tries <n>   Number of restart attempts (implies auto-restart)
+  --working-dir <path>  Run the process in specified working directory
 
 Global Features:
   • Processes are managed system-wide from: ${GLOBAL_BASE_DIR}
   • Access process list from any directory
   • Persistent registry across terminal sessions
   • Real-time status updates for auto-restart processes
+  • Optional working directory support
 
 Examples:
   node SyPM --run app.js --name my-app
   node SyPM --run app.js --auto-restart
   node SyPM --run app.js --restart-tries 3
   node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
+  node SyPM --run app.js --working-dir /path/to/directory
   node SyPM --list      # Shows all processes regardless of current directory
         `);
     }
@@ -816,6 +896,13 @@ Examples:
                     }
                 }
             }
+
+            if (args.includes('--working-dir')) {
+                const dirIndex = args.indexOf('--working-dir');
+                if (dirIndex + 1 < args.length && !args[dirIndex + 1].startsWith('--')) {
+                    config.workingDir = args[dirIndex + 1];
+                }
+            }
            
             try {
                 const result = this.run(filePath, config);
@@ -823,6 +910,9 @@ Examples:
                 console.log(`✓ Global registry: ${PROCESS_REGISTRY}`);
                 if (config.autoRestart) {
                     console.log(`✓ Auto-restart enabled${config.restartTries ? ` with ${config.restartTries} tries` : ''}`);
+                }
+                if (config.workingDir) {
+                    console.log(`✓ Working directory: ${config.workingDir}`);
                 }
             } catch (error) {
                 console.error('✗ Error starting process:', error.message);
