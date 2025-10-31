@@ -1,3 +1,16 @@
+/**
+ * SyPM - System Process Manager
+ * 
+ * A comprehensive process management system for Node.js applications that provides
+ * background process execution, auto-restart capabilities, process monitoring,
+ * and system-wide process management.
+ * 
+ * @class SyPM
+ * @author Your Name
+ * @version 1.0.0
+ * @license MIT
+ */
+
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -8,9 +21,22 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 
-// Global paths - fixed system locations
+/**
+ * Global base directory for SyPM configuration and data storage
+ * @constant {string}
+ */
 const GLOBAL_BASE_DIR = path.join(os.homedir(), '.sypm');
+
+/**
+ * Path to the process registry JSON file
+ * @constant {string}
+ */
 const PROCESS_REGISTRY = path.join(GLOBAL_BASE_DIR, 'processes.json');
+
+/**
+ * Directory for storing process log files
+ * @constant {string}
+ */
 const LOG_DIR = path.join(GLOBAL_BASE_DIR, 'logs');
 
 // Ensure global directories exist
@@ -24,7 +50,17 @@ if (!fs.existsSync(PROCESS_REGISTRY)) {
     fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
 }
 
+/**
+ * Main SyPM class for managing system processes
+ * @class
+ */
 class SyPM {
+    /**
+     * Loads the process registry from the filesystem
+     * @static
+     * @private
+     * @returns {Array<Object>} Array of process entries
+     */
     static _loadRegistry() {
         try {
             const raw = fs.readFileSync(PROCESS_REGISTRY, 'utf-8');
@@ -37,18 +73,43 @@ class SyPM {
         }
     }
 
+    /**
+     * Saves the process registry to the filesystem
+     * @static
+     * @private
+     * @param {Array<Object>} data - Process registry data to save
+     */
     static _saveRegistry(data) {
         fs.writeFileSync(PROCESS_REGISTRY, JSON.stringify(data, null, 2));
     }
 
+    /**
+     * Generates a unique process ID
+     * @static
+     * @private
+     * @returns {string} Unique process identifier
+     */
     static _generateId() {
         return Math.random().toString(36).substr(2, 9);
     }
 
+    /**
+     * Generates a unique process name
+     * @static
+     * @private
+     * @returns {string} Unique process name
+     */
     static _generateProcessName() {
         return `process_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     }
 
+    /**
+     * Recursively gets all child process IDs for a given parent PID
+     * @static
+     * @private
+     * @param {number} pid - Parent process ID
+     * @returns {Array<number>} Array of child process IDs
+     */
     static _getAllChildPids(pid) {
         const childPids = [];
         try {
@@ -83,6 +144,13 @@ class SyPM {
         return childPids;
     }
 
+    /**
+     * Kills a process tree including all child processes
+     * @static
+     * @private
+     * @param {number} pid - Root process ID to kill
+     * @returns {boolean} True if any processes were killed
+     */
     static _killProcessTree(pid) {
         let killedCount = 0;
        
@@ -120,6 +188,19 @@ class SyPM {
         return killedCount > 0;
     }
 
+    /**
+     * Creates a monitor script for auto-restart processes
+     * @static
+     * @private
+     * @param {string} processId - Unique process identifier
+     * @param {string} filePath - Path to the script file to monitor
+     * @param {string} processName - Name of the process
+     * @param {string} logPath - Path to the log file
+     * @param {boolean} autoRestart - Whether to auto-restart the process
+     * @param {number} restartTries - Number of restart attempts
+     * @param {string} [workingDir] - Optional working directory
+     * @returns {string} Path to the created monitor script
+     */
     static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir) {
         // Escape paths for use in bash script
         const escapedRegistryPath = PROCESS_REGISTRY.replace(/'/g, "'\\''");
@@ -244,11 +325,11 @@ start_and_monitor() {
 main() {
     while true; do
         # Check if we should continue monitoring
-        if ! should_continue; then
+        if ! should_continue; then {
             echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry" >> "\$LOG_PATH"
             update_registry "dead" "null" "\$CURRENT_TRIES"
             break
-        fi
+        }
         
         # Start and monitor the process
         start_and_monitor \$CURRENT_TRIES
@@ -280,6 +361,33 @@ main
         return scriptPath;
     }
 
+    /**
+     * Runs a Node.js script as a managed background process
+     * @static
+     * @param {string} filepathOrCode - File path to the script or JavaScript code string
+     * @param {Object} [config={}] - Configuration options for the process
+     * @param {string} [config.name] - Custom name for the process
+     * @param {boolean} [config.autoRestart] - Whether to auto-restart the process on crash
+     * @param {number} [config.restartTries] - Number of restart attempts (implies autoRestart)
+     * @param {string} [config.workingDir] - Working directory to run the process in
+     * @returns {Object} Process entry object with process details
+     * @throws {Error} If file not found or working directory is invalid
+     * 
+     * @example
+     * // Run a file with auto-restart
+     * SyPM.run('/path/to/app.js', { 
+     *   name: 'my-app',
+     *   autoRestart: true,
+     *   restartTries: 3
+     * });
+     * 
+     * @example
+     * // Run code string with working directory
+     * SyPM.run('console.log("Hello World")', {
+     *   name: 'hello-script',
+     *   workingDir: '/tmp'
+     * });
+     */
     static run(filepathOrCode, config = {}) {
         let resolvedPath;
         let isTempFile = false;
@@ -439,6 +547,15 @@ main
         return entry;
     }
 
+    /**
+     * Lists all managed processes with their current status
+     * @static
+     * @returns {Array<Object>} Array of process objects with status information
+     * 
+     * @example
+     * const processes = SyPM.list();
+     * console.table(processes);
+     */
     static list() {
         const registry = this._loadRegistry();
         const processList = [];
@@ -494,6 +611,13 @@ main
         return processList;
     }
 
+    /**
+     * Removes a process from the registry by ID
+     * @static
+     * @private
+     * @param {string} id - Process ID to remove
+     * @returns {boolean} True if process was found and removed
+     */
     static _removeFromRegistry(id) {
         const registry = this._loadRegistry();
         const index = registry.findIndex(process => process.id === id);
@@ -506,6 +630,20 @@ main
         return false;
     }
 
+    /**
+     * Kills a process by PID or ID
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to kill
+     * @returns {boolean} True if process was found and killed
+     * 
+     * @example
+     * // Kill by PID
+     * SyPM.kill(12345);
+     * 
+     * @example
+     * // Kill by ID
+     * SyPM.kill('abc123def');
+     */
     static kill(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
@@ -558,6 +696,15 @@ main
         return true;
     }
 
+    /**
+     * Kills all managed processes
+     * @static
+     * @returns {number} Number of processes killed
+     * 
+     * @example
+     * const killedCount = SyPM.killAll();
+     * console.log(`Killed ${killedCount} processes`);
+     */
     static killAll() {
         const registry = this._loadRegistry();
        
@@ -612,6 +759,17 @@ main
         return killedCount;
     }
    
+    /**
+     * Checks if a process is alive by PID or ID
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to check
+     * @returns {boolean} True if process is running
+     * 
+     * @example
+     * if (SyPM.isAlive('abc123def')) {
+     *   console.log('Process is running');
+     * }
+     */
     static isAlive(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
@@ -630,6 +788,15 @@ main
         }
     }
 
+    /**
+     * Follows logs of a process in real-time
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to follow logs for
+     * 
+     * @example
+     * // Follow logs for a process
+     * SyPM.log('abc123def');
+     */
     static log(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
@@ -711,6 +878,15 @@ main
         process.on('SIGTERM', cleanup);
     }
 
+    /**
+     * Restarts a process by PID or ID
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to restart
+     * @returns {boolean} True if process was found and restarted
+     * 
+     * @example
+     * SyPM.restart('abc123def');
+     */
     static restart(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
@@ -748,6 +924,14 @@ main
         return true;
     }
 
+    /**
+     * Cleans up dead processes and removes them from registry
+     * @static
+     * 
+     * @example
+     * // Clean up dead processes
+     * SyPM.cleanup();
+     */
     static cleanup() {
         const registry = this._loadRegistry();
         const aliveProcesses = [];
@@ -790,6 +974,13 @@ main
         }
     }
 
+    /**
+     * Displays global SyPM information
+     * @static
+     * 
+     * @example
+     * SyPM.info();
+     */
     static info() {
         console.log(`SyPM Global Information:`);
         console.log(`Base Directory: ${GLOBAL_BASE_DIR}`);
@@ -801,6 +992,13 @@ main
         console.log(`Active Processes: ${registry.filter(p => this.isAlive(p.id)).length}`);
     }
 
+    /**
+     * Displays help information for CLI usage
+     * @static
+     * 
+     * @example
+     * SyPM.displayHelp();
+     */
     static displayHelp() {
         console.log(`
 Process Manager CLI Usage (Global):
@@ -841,6 +1039,11 @@ Examples:
         `);
     }
 
+    /**
+     * Parses command line arguments and executes corresponding commands
+     * @static
+     * @private
+     */
     static parseArguments() {
         const args = process.argv.slice(2);
        
@@ -984,6 +1187,7 @@ Examples:
     }
 }
 
+// CLI entry point
 if (process.argv[1] === __filename) {
     SyPM.parseArguments();
 }
