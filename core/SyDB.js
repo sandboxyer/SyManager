@@ -1,14 +1,22 @@
-import C from "./C.js"
+    import C from "./C.js"
+    import SyPM from "./SyPM.js"
 
-class SyDB {
-static async Start(){
-    await C.run('./new_sydb.c',{args : ['--server']})
-    console.log('foi')
-    return
-}
 
-}
+    
+    class SyDB {
+    static async Start(){
+        SyPM.run(`import C from "./C.js"
 
-export default SyDB
+            console.log(process.cwd())
+            
+         console.log(await C.run('./new_sydb.c',{args : ['--server']}))
+            `,{workingDir : process.cwd()})
+    
+        return
+    }
 
-await SyDB.Start()
+    }
+
+    export default SyDB
+
+    await SyDB.Start()
