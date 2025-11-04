@@ -991,6 +991,419 @@ main
         console.log(`Total Processes: ${registry.length}`);
         console.log(`Active Processes: ${registry.filter(p => this.isAlive(p.id)).length}`);
     }
+/**
+ * Comprehensive test method to verify all SyPM functionality
+ * @static
+ * @returns {Promise<boolean>} True if all tests pass
+ * 
+ * @example
+ * // Run comprehensive tests
+ * SyPM.Test();
+ */
+static async Test() {
+    console.log('🧪 Starting SyPM Comprehensive Test Suite...\n');
+    
+    let testCount = 0;
+    let passedTests = 0;
+    let failedTests = 0;
+    
+    /**
+     * Test utility function with async support
+     * @param {string} testName - Name of the test
+     * @param {Function} testFunction - Test function to execute
+     */
+    const runTest = async (testName, testFunction) => {
+        testCount++;
+        process.stdout.write(`  ${testCount}. ${testName}... `);
+        
+        try {
+            await testFunction();
+            console.log('✓ PASSED');
+            passedTests++;
+        } catch (error) {
+            console.log('✗ FAILED');
+            console.log(`     Error: ${error.message}`);
+            failedTests++;
+        }
+    };
+
+    /**
+     * Wait for a condition to be true
+     * @param {Function} condition - Function that returns a boolean
+     * @param {number} timeout - Timeout in milliseconds
+     * @param {number} interval - Check interval in milliseconds
+     */
+    const waitFor = (condition, timeout = 5000, interval = 100) => {
+        return new Promise((resolve, reject) => {
+            const startTime = Date.now();
+            
+            const checkCondition = () => {
+                try {
+                    if (condition()) {
+                        resolve();
+                    } else if (Date.now() - startTime > timeout) {
+                        reject(new Error(`Timeout waiting for condition after ${timeout}ms`));
+                    } else {
+                        setTimeout(checkCondition, interval);
+                    }
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            
+            checkCondition();
+        });
+    };
+
+    /**
+     * Clean up before tests
+     */
+    const cleanupBeforeTests = () => {
+        // Kill all existing processes
+        const registry = this._loadRegistry();
+        if (registry.length > 0) {
+            console.log('Cleaning up existing processes before tests...');
+            this.killAll();
+        }
+        
+        // Clear registry
+        this._saveRegistry([]);
+    };
+
+    /**
+     * Create test scripts
+     */
+    const createTestScripts = () => {
+        // Simple script that runs for a short time
+        const simpleScript = `
+console.log('Simple test script started');
+setTimeout(() => {
+    console.log('Simple test script completed');
+}, 5000);
+`;
+        
+        // Script that exits immediately (for crash testing)
+        const crashScript = `
+console.log('Crash test script started');
+process.exit(1);
+`;
+        
+        // Long running script
+        const longRunningScript = `
+console.log('Long running test script started');
+setInterval(() => {
+    console.log('Long running script still alive...');
+}, 10000);
+`;
+
+        const scripts = {
+            simple: { code: simpleScript, file: path.join(tmpdir(), 'test_simple.js') },
+            crash: { code: crashScript, file: path.join(tmpdir(), 'test_crash.js') },
+            long: { code: longRunningScript, file: path.join(tmpdir(), 'test_long.js') }
+        };
+
+        // Write test scripts to files
+        for (const script of Object.values(scripts)) {
+            fs.writeFileSync(script.file, script.code, 'utf-8');
+        }
+
+        return scripts;
+    };
+
+    /**
+     * Clean up test scripts
+     */
+    const cleanupTestScripts = (scripts) => {
+        for (const script of Object.values(scripts)) {
+            try {
+                if (fs.existsSync(script.file)) {
+                    fs.unlinkSync(script.file);
+                }
+            } catch (error) {
+                // Ignore cleanup errors
+            }
+        }
+    };
+
+    // Start comprehensive testing
+    cleanupBeforeTests();
+    const testScripts = createTestScripts();
+
+    console.log('📋 Running Core Functionality Tests:\n');
+
+    // Test 1: Registry operations
+    await runTest('Registry load/save operations', () => {
+        const testData = [{ id: 'test', name: 'test' }];
+        this._saveRegistry(testData);
+        const loadedData = this._loadRegistry();
+        if (JSON.stringify(loadedData) !== JSON.stringify(testData)) {
+            throw new Error('Registry save/load mismatch');
+        }
+        this._saveRegistry([]); // Reset
+    });
+
+    // Test 2: ID generation
+    await runTest('Unique ID generation', () => {
+        const id1 = this._generateId();
+        const id2 = this._generateId();
+        if (id1 === id2) {
+            throw new Error('Generated duplicate IDs');
+        }
+        if (typeof id1 !== 'string' || id1.length === 0) {
+            throw new Error('Invalid ID generated');
+        }
+    });
+
+    // Test 3: Process name generation
+    await runTest('Process name generation', () => {
+        const name1 = this._generateProcessName();
+        const name2 = this._generateProcessName();
+        if (name1 === name2) {
+            throw new Error('Generated duplicate names');
+        }
+        if (!name1.startsWith('process_')) {
+            throw new Error('Invalid name format');
+        }
+    });
+
+    // Test 4: Run file-based process
+    let simpleProcessId;
+    await runTest('Run file-based process', async () => {
+        const process = this.run(testScripts.simple.file, { 
+            name: 'test-simple-file' 
+        });
+        simpleProcessId = process.id;
+        
+        if (!process.id || !process.pid || !process.name) {
+            throw new Error('Invalid process object returned');
+        }
+        
+        // Wait for process to start properly
+        await waitFor(() => this.isAlive(process.id), 3000, 100);
+    });
+
+    // Test 5: Run code-based process
+    let codeProcessId;
+    await runTest('Run code-based process', async () => {
+        const process = this.run(testScripts.long.code, {
+            name: 'test-code-process'
+        });
+        codeProcessId = process.id;
+        
+        if (!process.isTempFile) {
+            throw new Error('Code process should be marked as temp file');
+        }
+        
+        // Wait for process to start properly
+        await waitFor(() => this.isAlive(process.id), 3000, 100);
+    });
+
+    // Test 6: Run process with working directory
+    await runTest('Run process with working directory', async () => {
+        const testWorkingDir = path.join(tmpdir(), 'sypm_test_dir');
+        if (!fs.existsSync(testWorkingDir)) {
+            fs.mkdirSync(testWorkingDir, { recursive: true });
+        }
+        
+        const process = this.run(testScripts.simple.code, {
+            name: 'test-working-dir',
+            workingDir: testWorkingDir
+        });
+        
+        if (!process.config.workingDir) {
+            throw new Error('Working directory not set in process config');
+        }
+        
+        // Wait for process to start properly
+        await waitFor(() => this.isAlive(process.id), 3000, 100);
+        
+        // Clean up
+        this.kill(process.id);
+        
+        // Wait for process to be killed
+        await waitFor(() => !this.isAlive(process.id), 3000, 100);
+        
+        try {
+            fs.rmdirSync(testWorkingDir);
+        } catch (error) {
+            // Ignore cleanup errors
+        }
+    });
+
+    // Test 7: List processes
+    await runTest('List processes functionality', () => {
+        const processes = this.list();
+        if (!Array.isArray(processes)) {
+            throw new Error('List should return an array');
+        }
+        
+        const ourProcesses = processes.filter(p => 
+            p.name === 'test-simple-file' || p.name === 'test-code-process'
+        );
+        
+        if (ourProcesses.length < 2) {
+            throw new Error('Not all test processes found in list');
+        }
+    });
+
+    // Test 8: Process alive check
+    await runTest('Process alive status check', () => {
+        if (!this.isAlive(simpleProcessId)) {
+            throw new Error('Process should be alive');
+        }
+    });
+
+    // Test 9: Kill process by ID
+    await runTest('Kill process by ID', async () => {
+        const killed = this.kill(simpleProcessId);
+        if (!killed) {
+            throw new Error('Failed to kill process by ID');
+        }
+        
+        // Wait for process to die
+        await waitFor(() => !this.isAlive(simpleProcessId), 3000, 100);
+    });
+
+    // Test 10: Kill process by PID
+    await runTest('Kill process by PID', async () => {
+        const processes = this.list();
+        const codeProcess = processes.find(p => p.name === 'test-code-process');
+        if (!codeProcess) {
+            throw new Error('Code process not found for PID test');
+        }
+        
+        const killed = this.kill(codeProcess.pid);
+        if (!killed) {
+            throw new Error('Failed to kill process by PID');
+        }
+        
+        // Wait for process to die
+        await waitFor(() => !this.isAlive(codeProcess.id), 3000, 100);
+    });
+
+    // Test 11: Run process with auto-restart
+    let autoRestartProcessId;
+    await runTest('Run process with auto-restart', async () => {
+        const process = this.run(testScripts.crash.file, {
+            name: 'test-auto-restart',
+            autoRestart: true,
+            restartTries: 2
+        });
+        autoRestartProcessId = process.id;
+        
+        if (!process.isAutoRestart) {
+            throw new Error('Auto-restart process not properly configured');
+        }
+        
+        if (!process.config.autoRestart) {
+            throw new Error('Auto-restart flag not set in config');
+        }
+        
+        // Wait for process to start
+        await waitFor(() => this.isAlive(process.id), 3000, 100);
+    });
+
+    // Test 12: Cleanup functionality
+    await runTest('Cleanup dead processes', async () => {
+        // Kill the auto-restart process first
+        this.kill(autoRestartProcessId);
+        
+        // Wait for it to die
+        await waitFor(() => !this.isAlive(autoRestartProcessId), 3000, 100);
+        
+        this.cleanup();
+        const processes = this.list();
+        const found = processes.find(p => p.id === autoRestartProcessId);
+        if (found) {
+            throw new Error('Dead process not cleaned up');
+        }
+    });
+
+    // Test 13: Kill all processes
+    await runTest('Kill all processes', async () => {
+        // Start a few processes first
+        this.run(testScripts.simple.file, { name: 'test-kill-all-1' });
+        this.run(testScripts.simple.file, { name: 'test-kill-all-2' });
+        
+        // Wait for processes to start
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        const beforeCount = this.list().length;
+        const killedCount = this.killAll();
+        
+        // Wait for processes to be killed
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        const afterCount = this.list().length;
+        if (afterCount !== 0) {
+            throw new Error('Not all processes were killed');
+        }
+    });
+
+    // Test 14: Info functionality
+    await runTest('System info display', () => {
+        // This should not throw an error
+        this.info();
+    });
+
+    // Test 15: Process restart functionality
+    await runTest('Process restart functionality', async () => {
+        const process = this.run(testScripts.long.file, {
+            name: 'test-restart'
+        });
+        
+        const originalPid = process.pid;
+        
+        // Wait for process to start
+        await waitFor(() => this.isAlive(process.id), 3000, 100);
+        
+        const restartSuccess = this.restart(process.id);
+        
+        if (!restartSuccess) {
+            throw new Error('Restart failed');
+        }
+        
+        // Wait for restart to complete
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const newProcesses = this.list();
+        const restartedProcess = newProcesses.find(p => p.name === 'test-restart');
+        
+        if (!restartedProcess) {
+            throw new Error('Restarted process not found');
+        }
+        
+        if (restartedProcess.pid === originalPid) {
+            throw new Error('Process PID did not change after restart');
+        }
+        
+        // Clean up
+        this.kill(restartedProcess.id);
+        
+        // Wait for process to be killed
+        await waitFor(() => !this.isAlive(restartedProcess.id), 3000, 100);
+    });
+
+    // Final cleanup
+    this.killAll();
+    cleanupTestScripts(testScripts);
+
+    // Test Results Summary
+    console.log('\n📊 Test Results Summary:');
+    console.log('=' .repeat(40));
+    console.log(`Total Tests: ${testCount}`);
+    console.log(`Passed: ${passedTests} ✓`);
+    console.log(`Failed: ${failedTests} ✗`);
+    console.log(`Success Rate: ${((passedTests / testCount) * 100).toFixed(1)}%`);
+    
+    if (failedTests === 0) {
+        console.log('\n🎉 ALL TESTS PASSED! SyPM is working correctly.');
+        return true;
+    } else {
+        console.log('\n⚠️  Some tests failed. Please check the implementation.');
+        return false;
+    }
+}
 
     /**
      * Displays help information for CLI usage
@@ -1014,6 +1427,7 @@ Commands:
   --log <pid|id>        Follow logs of a process (real-time)
   --cleanup             Remove dead processes from registry
   --info                Show global SyPM information
+  --test                Run comprehensive test suite
   --help                Display this help message
 
 Options for --run:
@@ -1036,6 +1450,7 @@ Examples:
   node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
   node SyPM --run app.js --working-dir /path/to/directory
   node SyPM --list      # Shows all processes regardless of current directory
+  node SyPM --test      # Run comprehensive test suite
         `);
     }
 
@@ -1054,6 +1469,11 @@ Examples:
 
         if (args.includes('--info')) {
             this.info();
+            return;
+        }
+
+        if (args.includes('--test')) {
+            this.Test();
             return;
         }
 
