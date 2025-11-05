@@ -443,19 +443,66 @@ main
     return scriptPath;
 }
 
-    /**
-     * Creates a systemd service file for daemon processes
-     * @static
-     * @private
-     * @param {string} processId - Unique process identifier
-     * @param {string} processName - Name of the process
-     * @param {string} filePath - Path to the script file
-     * @param {string} workingDir - Working directory for the process
-     * @param {string} logPath - Path to the log file
-     * @returns {string} Path to the created service file
-     */
-    static _createSystemdService(processId, processName, filePath, workingDir, logPath) {
-        const serviceContent = `[Unit]
+/**
+ * Syncs daemon processes status with system services
+ * @static
+ * @private
+ */
+static _syncDaemonStatus() {
+    const registry = this._loadRegistry();
+    const systemInfo = this._detectSystem();
+    let updated = false;
+
+    for (const proc of registry) {
+        if (proc.config?.daemon) {
+            let serviceRunning = false;
+            
+            try {
+                if (systemInfo.initSystem === 'systemd') {
+                    const serviceName = `sypm-${proc.id}.service`;
+                    const output = execSync(`systemctl is-active ${serviceName} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+                    serviceRunning = (output === 'active');
+                } else if (systemInfo.initSystem === 'openrc') {
+                    const serviceName = `sypm-${proc.id}`;
+                    const output = execSync(`rc-service ${serviceName} status 2>/dev/null`, { encoding: 'utf-8' });
+                    serviceRunning = (output.includes('started') || output.includes('running'));
+                }
+            } catch (error) {
+                // Service is not running or doesn't exist
+                serviceRunning = false;
+            }
+
+            // Update registry status based on actual service status
+            if (serviceRunning && proc.status !== 'running') {
+                proc.status = 'running';
+                updated = true;
+                console.log(`✓ Updated status for daemon process ${proc.name}: running`);
+            } else if (!serviceRunning && proc.status === 'running') {
+                proc.status = 'dead';
+                updated = true;
+                console.log(`✓ Updated status for daemon process ${proc.name}: dead`);
+            }
+        }
+    }
+
+    if (updated) {
+        this._saveRegistry(registry);
+    }
+}
+
+  /**
+ * Creates a systemd service file for daemon processes
+ * @static
+ * @private
+ * @param {string} processId - Unique process identifier
+ * @param {string} processName - Name of the process
+ * @param {string} filePath - Path to the script file
+ * @param {string} workingDir - Working directory for the process
+ * @param {string} logPath - Path to the log file
+ * @returns {string} Path to the created service file
+ */
+static _createSystemdService(processId, processName, filePath, workingDir, logPath) {
+    const serviceContent = `[Unit]
 Description=SyPM Managed Process: ${processName}
 After=network.target
 
@@ -474,24 +521,24 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 `;
 
-        const servicePath = path.join(DAEMON_DIR, `sypm-${processId}.service`);
-        fs.writeFileSync(servicePath, serviceContent, 'utf-8');
-        return servicePath;
-    }
+    const servicePath = path.join(DAEMON_DIR, `sypm-${processId}.service`);
+    fs.writeFileSync(servicePath, serviceContent, 'utf-8');
+    return servicePath;
+}
 
-    /**
-     * Creates an OpenRC init script for daemon processes
-     * @static
-     * @private
-     * @param {string} processId - Unique process identifier
-     * @param {string} processName - Name of the process
-     * @param {string} filePath - Path to the script file
-     * @param {string} workingDir - Working directory for the process
-     * @param {string} logPath - Path to the log file
-     * @returns {string} Path to the created init script
-     */
-    static _createOpenRCInitScript(processId, processName, filePath, workingDir, logPath) {
-        const initScriptContent = `#!/sbin/openrc-run
+/**
+ * Creates an OpenRC init script for daemon processes
+ * @static
+ * @private
+ * @param {string} processId - Unique process identifier
+ * @param {string} processName - Name of the process
+ * @param {string} filePath - Path to the script file
+ * @param {string} workingDir - Working directory for the process
+ * @param {string} logPath - Path to the log file
+ * @returns {string} Path to the created init script
+ */
+static _createOpenRCInitScript(processId, processName, filePath, workingDir, logPath) {
+    const initScriptContent = `#!/sbin/openrc-run
 
 name="sypm-${processId}"
 description="SyPM Managed Process: ${processName}"
@@ -524,11 +571,11 @@ stop() {
 }
 `;
 
-        const initScriptPath = path.join(DAEMON_DIR, `sypm-${processId}`);
-        fs.writeFileSync(initScriptPath, initScriptContent, 'utf-8');
-        fs.chmodSync(initScriptPath, 0o755);
-        return initScriptPath;
-    }
+    const initScriptPath = path.join(DAEMON_DIR, `sypm-${processId}`);
+    fs.writeFileSync(initScriptPath, initScriptContent, 'utf-8');
+    fs.chmodSync(initScriptPath, 0o755);
+    return initScriptPath;
+}
 
     /**
      * Enables a process to start automatically on system boot
@@ -834,53 +881,26 @@ stop() {
     }
 
     /**
-     * Lists all managed processes with their current status
-     * @static
-     * @returns {Array<Object>} Array of process objects with status information
-     * 
-     * @example
-     * const processes = SyPM.list();
-     * console.table(processes);
-     */
-    static list() {
-        const registry = this._loadRegistry();
-        const processList = [];
+ * Lists all managed processes with their current status
+ * @static
+ * @returns {Array<Object>} Array of process objects with status information
+ * 
+ * @example
+ * const processes = SyPM.list();
+ * console.table(processes);
+ */
+static list() {
+    // Sync daemon processes status first
+    this._syncDaemonStatus();
+    
+    const registry = this._loadRegistry();
+    const processList = [];
 
-        for (const proc of registry) {
-            // For auto-restart processes, trust the registry status completely
-            // Don't overwrite with process alive checks
-            let status = proc.status;
-            let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
+    for (const proc of registry) {
+        // For daemon processes, trust the synced status
+        if (proc.config?.daemon) {
+            let displayStatus = proc.status.charAt(0).toUpperCase() + proc.status.slice(1);
             
-            // Only check if process is alive for status verification, but don't auto-update status
-            let isAlive = false;
-            try {
-                if (proc.isAutoRestart && proc.monitorPid) {
-                    process.kill(proc.monitorPid, 0);
-                    isAlive = true;
-                } else {
-                    process.kill(proc.pid, 0);
-                    isAlive = true;
-                }
-            } catch (e) {
-                isAlive = false;
-            }
-
-            // If the monitor says it's running/restarting but process is dead, update status
-            if (!isAlive && (proc.status === 'running' || proc.status === 'restarting')) {
-                status = 'dead';
-                proc.status = status;
-                displayStatus = 'Dead';
-                this._saveRegistry(registry);
-            }
-            // If monitor says it's stopped but process is alive, update to running
-            else if (isAlive && proc.status === 'stopped') {
-                status = 'running';
-                proc.status = status;
-                displayStatus = 'Running';
-                this._saveRegistry(registry);
-            }
-
             processList.push({
                 status: displayStatus,
                 id: proc.id,
@@ -893,10 +913,58 @@ stop() {
                 workingDir: proc.config?.workingDir || 'Default',
                 path: proc.path
             });
+            continue;
         }
 
-        return processList;
+        // For auto-restart processes, trust the registry status completely
+        let status = proc.status;
+        let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
+        
+        // Only check if process is alive for status verification, but don't auto-update status
+        let isAlive = false;
+        try {
+            if (proc.isAutoRestart && proc.monitorPid) {
+                process.kill(proc.monitorPid, 0);
+                isAlive = true;
+            } else {
+                process.kill(proc.pid, 0);
+                isAlive = true;
+            }
+        } catch (e) {
+            isAlive = false;
+        }
+
+        // If the monitor says it's running/restarting but process is dead, update status
+        if (!isAlive && (proc.status === 'running' || proc.status === 'restarting')) {
+            status = 'dead';
+            proc.status = status;
+            displayStatus = 'Dead';
+            this._saveRegistry(registry);
+        }
+        // If monitor says it's stopped but process is alive, update to running
+        else if (isAlive && proc.status === 'stopped') {
+            status = 'running';
+            proc.status = status;
+            displayStatus = 'Running';
+            this._saveRegistry(registry);
+        }
+
+        processList.push({
+            status: displayStatus,
+            id: proc.id,
+            name: proc.name,
+            pid: proc.pid,
+            monitorPid: proc.monitorPid || 'N/A',
+            tries: proc.config?.currentTries || 0,
+            autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
+            daemon: proc.config?.daemon ? 'Yes' : 'No',
+            workingDir: proc.config?.workingDir || 'Default',
+            path: proc.path
+        });
     }
+
+    return processList;
+}
 
     /**
      * Removes a process from the registry by ID
@@ -988,73 +1056,96 @@ stop() {
         return true;
     }
 
-    /**
-     * Kills all managed processes
-     * @static
-     * @returns {number} Number of processes killed
-     * 
-     * @example
-     * const killedCount = SyPM.killAll();
-     * console.log(`Killed ${killedCount} processes`);
-     */
-    static killAll() {
-        const registry = this._loadRegistry();
-       
-        if (registry.length === 0) {
-            console.log('No processes to kill.');
-            return 0;
-        }
+   /**
+ * Kills all managed processes
+ * @static
+ * @returns {number} Number of processes killed
+ * 
+ * @example
+ * const killedCount = SyPM.killAll();
+ * console.log(`Killed ${killedCount} processes`);
+ */
+static killAll() {
+    const registry = this._loadRegistry();
+   
+    if (registry.length === 0) {
+        console.log('No processes to kill.');
+        return 0;
+    }
 
-        console.log(`Killing all ${registry.length} processes...`);
+    console.log(`Killing all ${registry.length} processes...`);
+   
+    // First, mark all as stopped in registry
+    for (const proc of registry) {
+        proc.status = 'stopped';
+    }
+    this._saveRegistry(registry);
+   
+    let killedCount = 0;
+   
+    // Then kill all processes
+    for (const proc of registry) {
+        let killed = false;
        
-        // First, mark all as stopped in registry
-        for (const proc of registry) {
-            proc.status = 'stopped';
+        // For daemon processes, stop the system service first
+        if (proc.config?.daemon) {
+            try {
+                const systemInfo = this._detectSystem();
+                if (systemInfo.initSystem === 'systemd') {
+                    const serviceName = `sypm-${proc.id}.service`;
+                    execSync(`systemctl stop ${serviceName} 2>/dev/null || true`);
+                    console.log(`✓ Stopped systemd service: ${serviceName}`);
+                    killed = true;
+                } else if (systemInfo.initSystem === 'openrc') {
+                    const serviceName = `sypm-${proc.id}`;
+                    execSync(`rc-service ${serviceName} stop 2>/dev/null || true`);
+                    console.log(`✓ Stopped OpenRC service: ${serviceName}`);
+                    killed = true;
+                }
+            } catch (error) {
+                console.log(`⚠ Could not stop daemon service for ${proc.name}: ${error.message}`);
+            }
         }
-        this._saveRegistry(registry);
        
-        let killedCount = 0;
-       
-        // Then kill all processes
-        for (const proc of registry) {
-            let killed = false;
-           
+        // For non-daemon processes, use the normal killing method
+        if (!killed) {
             if (proc.isAutoRestart && proc.monitorPid) {
                 killed = this._killProcessTree(proc.monitorPid);
             } else {
                 killed = this._killProcessTree(proc.pid);
             }
-           
-            if (killed) {
-                killedCount++;
-                console.log(`✓ Killed: ${proc.name}`);
-            } else {
-                console.log(`- Already dead: ${proc.name}`);
-            }
-            
-            // Disable daemon mode if enabled
-            if (proc.config?.daemon) {
-                this._disableDaemon(proc.id);
-            }
-            
-            // Clean up temporary files for killed processes
-            if (proc.isTempFile && proc.tempFilePath) {
-                try {
-                    if (fs.existsSync(proc.tempFilePath)) {
-                        fs.unlinkSync(proc.tempFilePath);
-                        console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
-                    }
-                } catch (error) {
-                    console.log(`  ⚠ Could not remove temp file: ${error.message}`);
-                }
-            }
         }
        
-        // Clear registry after killing all
-        this._saveRegistry([]);
-        console.log(`\n✓ Successfully killed ${killedCount} out of ${registry.length} processes.`);
-        return killedCount;
+        if (killed) {
+            killedCount++;
+            console.log(`✓ Killed: ${proc.name}`);
+        } else {
+            console.log(`- Already dead: ${proc.name}`);
+        }
+        
+        // Disable daemon mode if enabled
+        if (proc.config?.daemon) {
+            this._disableDaemon(proc.id);
+        }
+        
+        // Clean up temporary files for killed processes
+        if (proc.isTempFile && proc.tempFilePath) {
+            try {
+                if (fs.existsSync(proc.tempFilePath)) {
+                    fs.unlinkSync(proc.tempFilePath);
+                    console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
+                }
+            } catch (error) {
+                console.log(`  ⚠ Could not remove temp file: ${error.message}`);
+            }
+        }
     }
+   
+    // Clear registry after killing all
+    this._saveRegistry([]);
+    console.log(`\n✓ Successfully killed ${killedCount} out of ${registry.length} processes.`);
+    return killedCount;
+}
    
     /**
      * Checks if a process is alive by PID or ID
