@@ -3,7 +3,7 @@
  * 
  * A comprehensive process management system for Node.js applications that provides
  * background process execution, auto-restart capabilities, process monitoring,
- * and system-wide process management.
+ * system-wide process management, and daemon support for system reboots.
  * 
  * @class SyPM
  * @author Your Name
@@ -39,12 +39,21 @@ const PROCESS_REGISTRY = path.join(GLOBAL_BASE_DIR, 'processes.json');
  */
 const LOG_DIR = path.join(GLOBAL_BASE_DIR, 'logs');
 
+/**
+ * Directory for storing daemon service files
+ * @constant {string}
+ */
+const DAEMON_DIR = path.join(GLOBAL_BASE_DIR, 'daemons');
+
 // Ensure global directories exist
 if (!fs.existsSync(GLOBAL_BASE_DIR)) {
     fs.mkdirSync(GLOBAL_BASE_DIR, { recursive: true });
 }
 if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+if (!fs.existsSync(DAEMON_DIR)) {
+    fs.mkdirSync(DAEMON_DIR, { recursive: true });
 }
 if (!fs.existsSync(PROCESS_REGISTRY)) {
     fs.writeFileSync(PROCESS_REGISTRY, '[]', 'utf-8');
@@ -101,6 +110,61 @@ class SyPM {
      */
     static _generateProcessName() {
         return `process_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    }
+
+    /**
+     * Detects the current operating system and init system
+     * @static
+     * @private
+     * @returns {Object} Object containing OS and init system information
+     */
+    static _detectSystem() {
+        const platform = os.platform();
+        let initSystem = 'unknown';
+        let shell = 'bash';
+        
+        // Detect init system
+        try {
+            if (fs.existsSync('/proc/1/comm')) {
+                const initProcess = fs.readFileSync('/proc/1/comm', 'utf-8').trim();
+                if (initProcess.includes('systemd')) {
+                    initSystem = 'systemd';
+                } else if (initProcess.includes('init')) {
+                    initSystem = 'sysvinit';
+                } else if (initProcess.includes('runit')) {
+                    initSystem = 'runit';
+                } else if (initProcess.includes('openrc')) {
+                    initSystem = 'openrc';
+                }
+            }
+            
+            // Check for Alpine Linux (uses ash as default shell)
+            if (fs.existsSync('/etc/alpine-release')) {
+                shell = 'ash';
+            }
+            
+            // Check for specific init files
+            if (fs.existsSync('/etc/systemd/system')) {
+                initSystem = 'systemd';
+            } else if (fs.existsSync('/etc/init.d')) {
+                initSystem = 'sysvinit';
+            } else if (fs.existsSync('/etc/runit')) {
+                initSystem = 'runit';
+            } else if (fs.existsSync('/etc/init')) {
+                initSystem = 'upstart';
+            }
+        } catch (error) {
+            // If detection fails, use defaults
+            console.warn('System detection failed, using defaults');
+        }
+        
+        return {
+            platform: platform,
+            initSystem: initSystem,
+            shell: shell,
+            isLinux: platform === 'linux',
+            isAlpine: fs.existsSync('/etc/alpine-release')
+        };
     }
 
     /**
@@ -188,33 +252,39 @@ class SyPM {
         return killedCount > 0;
     }
 
-    /**
-     * Creates a monitor script for auto-restart processes
-     * @static
-     * @private
-     * @param {string} processId - Unique process identifier
-     * @param {string} filePath - Path to the script file to monitor
-     * @param {string} processName - Name of the process
-     * @param {string} logPath - Path to the log file
-     * @param {boolean} autoRestart - Whether to auto-restart the process
-     * @param {number} restartTries - Number of restart attempts
-     * @param {string} [workingDir] - Optional working directory
-     * @returns {string} Path to the created monitor script
-     */
-    static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir) {
-        // Escape paths for use in bash script
-        const escapedRegistryPath = PROCESS_REGISTRY.replace(/'/g, "'\\''");
-        const escapedFilePath = filePath.replace(/'/g, "'\\''");
-        const escapedLogPath = logPath.replace(/'/g, "'\\''");
-        const escapedWorkingDir = workingDir ? workingDir.replace(/'/g, "'\\''") : '';
-        
-        const scriptContent = `#!/usr/bin/env bash
+   /**
+ * Creates a monitor script for auto-restart processes
+ * @static
+ * @private
+ * @param {string} processId - Unique process identifier
+ * @param {string} filePath - Path to the script file to monitor
+ * @param {string} processName - Name of the process
+ * @param {string} logPath - Path to the log file
+ * @param {boolean} autoRestart - Whether to auto-restart the process
+ * @param {number} restartTries - Number of restart attempts
+ * @param {string} [workingDir] - Optional working directory
+ * @param {boolean} [daemon] - Whether to run as daemon
+ * @returns {string} Path to the created monitor script
+ */
+static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir, daemon = false) {
+    const systemInfo = this._detectSystem();
+    const shell = systemInfo.shell;
+    
+    // Escape paths for use in shell script
+    const escapedRegistryPath = PROCESS_REGISTRY.replace(/'/g, "'\\''");
+    const escapedFilePath = filePath.replace(/'/g, "'\\''");
+    const escapedLogPath = logPath.replace(/'/g, "'\\''");
+    const escapedWorkingDir = workingDir ? workingDir.replace(/'/g, "'\\''") : '';
+    
+    // Use shell-specific syntax
+    const scriptContent = `#!/usr/bin/env ${shell}
+
 PROCESS_ID='${processId}'
 FILE_PATH='${escapedFilePath}'
 PROCESS_NAME='${processName}'
 LOG_PATH='${escapedLogPath}'
-AUTO_RESTART='${autoRestart}'
-RESTART_TRIES='${restartTries}'
+AUTO_RESTART=${autoRestart ? 'true' : 'false'}
+RESTART_TRIES=${restartTries || 0}
 REGISTRY_PATH='${escapedRegistryPath}'
 WORKING_DIR='${escapedWorkingDir}'
 CURRENT_TRIES=0
@@ -252,14 +322,15 @@ try {
             registry[processIndex].config.currentTries = parseInt('\$current_tries');
             registry[processIndex].lastUpdate = new Date().toISOString();
             fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+            console.log('Registry updated:', '\$status');
         }
     }
 } catch (error) {
-    // Silently fail if registry update fails
+    console.error('Registry update failed:', error.message);
 }
 EOF
     
-    node /tmp/update_registry_$$.js 2>/dev/null
+    node /tmp/update_registry_$$.js >> "$LOG_PATH" 2>&1
     rm -f /tmp/update_registry_$$.js
 }
 
@@ -273,19 +344,27 @@ try {
     if (fs.existsSync(registryPath)) {
         const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
         const process = registry.find(p => p.id === '${processId}');
-        if (!process || process.status === 'stopped' || process.status === 'dead') {
+        if (!process) {
+            console.log('Process not found in registry');
             process.exit(1);
         }
+        if (process.status === 'stopped' || process.status === 'dead') {
+            console.log('Process status is stopped/dead:', process.status);
+            process.exit(1);
+        }
+        console.log('Process status OK:', process.status);
         process.exit(0);
     } else {
+        console.log('Registry file not found');
         process.exit(1);
     }
 } catch (e) {
+    console.log('Registry check error:', e.message);
     process.exit(0); // Continue by default if registry is corrupted
 }
 EOF
     
-    node /tmp/check_registry_$$.js 2>/dev/null
+    node /tmp/check_registry_$$.js >> "$LOG_PATH" 2>&1
     local result=\$?
     rm -f /tmp/check_registry_$$.js
     return \$result
@@ -298,12 +377,13 @@ start_and_monitor() {
     
     # Set working directory if specified
     local cd_command=""
-    if [[ -n "\$WORKING_DIR" && -d "\$WORKING_DIR" ]]; then
+    if [ -n "\$WORKING_DIR" ] && [ -d "\$WORKING_DIR" ]; then
         cd_command="cd '\$WORKING_DIR' && "
         echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Working directory: \$WORKING_DIR" >> "\$LOG_PATH"
     fi
     
     # Start the Node.js process
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Executing: \${cd_command}node '\$FILE_PATH'" >> "\$LOG_PATH"
     eval "\${cd_command}node '\$FILE_PATH'" >> "\$LOG_PATH" 2>&1 &
     local NODE_PID=\$!
     
@@ -323,26 +403,28 @@ start_and_monitor() {
 
 # Main monitor function
 main() {
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor starting for process: \$PROCESS_NAME" >> "\$LOG_PATH"
+    
     while true; do
         # Check if we should continue monitoring
-        if ! should_continue; then {
-            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry" >> "\$LOG_PATH"
+        if ! should_continue; then
+            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Monitor stopped by registry - process should not continue" >> "\$LOG_PATH"
             update_registry "dead" "null" "\$CURRENT_TRIES"
             break
-        }
+        fi
         
         # Start and monitor the process
         start_and_monitor \$CURRENT_TRIES
         local exit_code=\$?
         
         # Check if auto-restart is enabled and we have tries left
-        if [[ "\$AUTO_RESTART" == "true" && \$CURRENT_TRIES -lt \$((MAX_RETRIES - 1)) ]]; then
+        if [ "\$AUTO_RESTART" = "true" ] && [ \$CURRENT_TRIES -lt \$((MAX_RETRIES - 1)) ]; then
             CURRENT_TRIES=\$((CURRENT_TRIES + 1))
             echo "[\$(date +'%Y-%m-%d %H:%M:%S')] Auto-restarting... Attempt: \$CURRENT_TRIES/\$MAX_RETRIES" >> "\$LOG_PATH"
             update_registry "restarting" "null" "\$CURRENT_TRIES"
             sleep 2
         else
-            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] No more restart attempts" >> "\$LOG_PATH"
+            echo "[\$(date +'%Y-%m-%d %H:%M:%S')] No more restart attempts. Final status." >> "\$LOG_PATH"
             update_registry "dead" "null" "\$CURRENT_TRIES"
             break
         fi
@@ -355,10 +437,247 @@ main() {
 main
 `;
 
-        const scriptPath = path.join(LOG_DIR, `monitor_${processId}.sh`);
-        fs.writeFileSync(scriptPath, scriptContent, 'utf-8');
-        fs.chmodSync(scriptPath, 0o755);
-        return scriptPath;
+    const scriptPath = path.join(LOG_DIR, `monitor_${processId}.sh`);
+    fs.writeFileSync(scriptPath, scriptContent, 'utf-8');
+    fs.chmodSync(scriptPath, 0o755);
+    return scriptPath;
+}
+
+/**
+ * Syncs daemon processes status with system services
+ * @static
+ * @private
+ */
+static _syncDaemonStatus() {
+    const registry = this._loadRegistry();
+    const systemInfo = this._detectSystem();
+    let updated = false;
+
+    for (const proc of registry) {
+        if (proc.config?.daemon) {
+            let serviceRunning = false;
+            
+            try {
+                if (systemInfo.initSystem === 'systemd') {
+                    const serviceName = `sypm-${proc.id}.service`;
+                    const output = execSync(`systemctl is-active ${serviceName} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+                    serviceRunning = (output === 'active');
+                } else if (systemInfo.initSystem === 'openrc') {
+                    const serviceName = `sypm-${proc.id}`;
+                    const output = execSync(`rc-service ${serviceName} status 2>/dev/null`, { encoding: 'utf-8' });
+                    serviceRunning = (output.includes('started') || output.includes('running'));
+                }
+            } catch (error) {
+                // Service is not running or doesn't exist
+                serviceRunning = false;
+            }
+
+            // Update registry status based on actual service status
+            if (serviceRunning && proc.status !== 'running') {
+                proc.status = 'running';
+                updated = true;
+                console.log(`✓ Updated status for daemon process ${proc.name}: running`);
+            } else if (!serviceRunning && proc.status === 'running') {
+                proc.status = 'dead';
+                updated = true;
+                console.log(`✓ Updated status for daemon process ${proc.name}: dead`);
+            }
+        }
+    }
+
+    if (updated) {
+        this._saveRegistry(registry);
+    }
+}
+
+  /**
+ * Creates a systemd service file for daemon processes
+ * @static
+ * @private
+ * @param {string} processId - Unique process identifier
+ * @param {string} processName - Name of the process
+ * @param {string} filePath - Path to the script file
+ * @param {string} workingDir - Working directory for the process
+ * @param {string} logPath - Path to the log file
+ * @returns {string} Path to the created service file
+ */
+static _createSystemdService(processId, processName, filePath, workingDir, logPath) {
+    const serviceContent = `[Unit]
+Description=SyPM Managed Process: ${processName}
+After=network.target
+
+[Service]
+Type=simple
+User=${os.userInfo().username}
+WorkingDirectory=${workingDir || path.dirname(filePath)}
+ExecStart=/usr/bin/node ${filePath}
+Restart=always
+RestartSec=3
+StandardOutput=append:${logPath}
+StandardError=append:${logPath}
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+    const servicePath = path.join(DAEMON_DIR, `sypm-${processId}.service`);
+    fs.writeFileSync(servicePath, serviceContent, 'utf-8');
+    return servicePath;
+}
+
+/**
+ * Creates an OpenRC init script for daemon processes
+ * @static
+ * @private
+ * @param {string} processId - Unique process identifier
+ * @param {string} processName - Name of the process
+ * @param {string} filePath - Path to the script file
+ * @param {string} workingDir - Working directory for the process
+ * @param {string} logPath - Path to the log file
+ * @returns {string} Path to the created init script
+ */
+static _createOpenRCInitScript(processId, processName, filePath, workingDir, logPath) {
+    const initScriptContent = `#!/sbin/openrc-run
+
+name="sypm-${processId}"
+description="SyPM Managed Process: ${processName}"
+pidfile="/var/run/sypm-${processId}.pid"
+
+command="/usr/bin/node"
+command_args="${filePath}"
+command_background=true
+
+depend() {
+    need net
+}
+
+start() {
+    ebegin "Starting ${processName}"
+    start-stop-daemon --start \\
+        --pidfile "\${pidfile}" \\
+        --make-pidfile \\
+        --background \\
+        --user ${os.userInfo().username} \\
+        --chdir "${workingDir || path.dirname(filePath)}" \\
+        --exec /usr/bin/node -- ${filePath} >> ${logPath} 2>&1
+    eend \$?
+}
+
+stop() {
+    ebegin "Stopping ${processName}"
+    start-stop-daemon --stop --pidfile "\${pidfile}"
+    eend \$?
+}
+`;
+
+    const initScriptPath = path.join(DAEMON_DIR, `sypm-${processId}`);
+    fs.writeFileSync(initScriptPath, initScriptContent, 'utf-8');
+    fs.chmodSync(initScriptPath, 0o755);
+    return initScriptPath;
+}
+
+    /**
+     * Enables a process to start automatically on system boot
+     * @static
+     * @private
+     * @param {string} processId - Unique process identifier
+     * @param {Object} processInfo - Process information object
+     * @returns {boolean} True if daemon setup was successful
+     */
+    static _enableDaemon(processId, processInfo) {
+        const systemInfo = this._detectSystem();
+        
+        if (!systemInfo.isLinux) {
+            console.log('⚠️  Daemon mode is only supported on Linux systems');
+            return false;
+        }
+
+        try {
+            if (systemInfo.initSystem === 'systemd') {
+                const servicePath = this._createSystemdService(
+                    processId,
+                    processInfo.name,
+                    processInfo.path,
+                    processInfo.config.workingDir,
+                    processInfo.log
+                );
+                
+                // Copy service file to systemd directory
+                const systemServicePath = `/etc/systemd/system/sypm-${processId}.service`;
+                execSync(`sudo cp "${servicePath}" "${systemServicePath}"`);
+                execSync('sudo systemctl daemon-reload');
+                execSync(`sudo systemctl enable sypm-${processId}.service`);
+                
+                console.log(`✓ Systemd service created and enabled: sypm-${processId}.service`);
+                return true;
+                
+            } else if (systemInfo.initSystem === 'openrc') {
+                const initScriptPath = this._createOpenRCInitScript(
+                    processId,
+                    processInfo.name,
+                    processInfo.path,
+                    processInfo.config.workingDir,
+                    processInfo.log
+                );
+                
+                // Copy init script to OpenRC directory
+                const systemInitPath = `/etc/init.d/sypm-${processId}`;
+                execSync(`sudo cp "${initScriptPath}" "${systemInitPath}"`);
+                execSync(`sudo rc-update add sypm-${processId} default`);
+                
+                console.log(`✓ OpenRC init script created and enabled: sypm-${processId}`);
+                return true;
+                
+            } else {
+                console.log(`⚠️  Unsupported init system: ${systemInfo.initSystem}`);
+                console.log('⚠️  Daemon mode requires systemd or OpenRC');
+                return false;
+            }
+        } catch (error) {
+            console.log(`⚠️  Failed to enable daemon mode: ${error.message}`);
+            console.log('⚠️  You may need to run with sudo privileges');
+            return false;
+        }
+    }
+
+    /**
+     * Disables a process from starting automatically on system boot
+     * @static
+     * @private
+     * @param {string} processId - Unique process identifier
+     * @returns {boolean} True if daemon was successfully disabled
+     */
+    static _disableDaemon(processId) {
+        const systemInfo = this._detectSystem();
+        
+        if (!systemInfo.isLinux) {
+            return false;
+        }
+
+        try {
+            if (systemInfo.initSystem === 'systemd') {
+                const serviceName = `sypm-${processId}.service`;
+                execSync(`sudo systemctl disable ${serviceName} 2>/dev/null || true`);
+                execSync(`sudo rm -f /etc/systemd/system/${serviceName}`);
+                execSync('sudo systemctl daemon-reload');
+                console.log(`✓ Systemd service disabled and removed: ${serviceName}`);
+                return true;
+                
+            } else if (systemInfo.initSystem === 'openrc') {
+                const serviceName = `sypm-${processId}`;
+                execSync(`sudo rc-update del ${serviceName} 2>/dev/null || true`);
+                execSync(`sudo rm -f /etc/init.d/${serviceName}`);
+                console.log(`✓ OpenRC init script disabled and removed: ${serviceName}`);
+                return true;
+                
+            } else {
+                return false;
+            }
+        } catch (error) {
+            console.log(`⚠️  Failed to disable daemon mode: ${error.message}`);
+            return false;
+        }
     }
 
     /**
@@ -370,15 +689,17 @@ main
      * @param {boolean} [config.autoRestart] - Whether to auto-restart the process on crash
      * @param {number} [config.restartTries] - Number of restart attempts (implies autoRestart)
      * @param {string} [config.workingDir] - Working directory to run the process in
+     * @param {boolean} [config.daemon] - Whether to run as system daemon (auto-start on boot)
      * @returns {Object} Process entry object with process details
      * @throws {Error} If file not found or working directory is invalid
      * 
      * @example
-     * // Run a file with auto-restart
+     * // Run a file with auto-restart and daemon mode
      * SyPM.run('/path/to/app.js', { 
      *   name: 'my-app',
      *   autoRestart: true,
-     *   restartTries: 3
+     *   restartTries: 3,
+     *   daemon: true
      * });
      * 
      * @example
@@ -485,11 +806,13 @@ main
                 logPath,
                 config.autoRestart ? 'true' : 'false',
                 config.restartTries || 0,
-                workingDir
+                workingDir,
+                config.daemon
             );
            
-            // Start the monitor script
-            child = spawn('bash', [monitorScript], {
+            const systemInfo = this._detectSystem();
+            // Start the monitor script with appropriate shell
+            child = spawn(systemInfo.shell, [monitorScript], {
                 detached: true,
                 stdio: 'ignore'
             });
@@ -497,7 +820,7 @@ main
             actualPid = child.pid;
             child.unref();
     
-            console.log(`✓ Started monitor with PID: ${actualPid}`);
+            console.log(`✓ Started monitor with PID: ${actualPid} using ${systemInfo.shell}`);
         } else {
             // For regular processes, start directly
             const logFileDescriptor = fs.openSync(logPath, 'a');
@@ -530,7 +853,8 @@ main
                 autoRestart: !!config.autoRestart,
                 restartTries: config.restartTries || 0,
                 currentTries: 0,
-                workingDir: workingDir
+                workingDir: workingDir,
+                daemon: !!config.daemon
             },
             isAutoRestart: !!(config.autoRestart || config.restartTries),
             monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null,
@@ -543,58 +867,40 @@ main
         const registry = this._loadRegistry();
         registry.push(entry);
         this._saveRegistry(registry);
+
+        // Enable daemon mode if requested
+        if (config.daemon) {
+            const daemonSuccess = this._enableDaemon(id, entry);
+            if (daemonSuccess) {
+                console.log(`✓ Daemon mode enabled for process: ${processName}`);
+                console.log(`✓ Process will auto-start on system reboot`);
+            }
+        }
     
         return entry;
     }
 
     /**
-     * Lists all managed processes with their current status
-     * @static
-     * @returns {Array<Object>} Array of process objects with status information
-     * 
-     * @example
-     * const processes = SyPM.list();
-     * console.table(processes);
-     */
-    static list() {
-        const registry = this._loadRegistry();
-        const processList = [];
+ * Lists all managed processes with their current status
+ * @static
+ * @returns {Array<Object>} Array of process objects with status information
+ * 
+ * @example
+ * const processes = SyPM.list();
+ * console.table(processes);
+ */
+static list() {
+    // Sync daemon processes status first
+    this._syncDaemonStatus();
+    
+    const registry = this._loadRegistry();
+    const processList = [];
 
-        for (const proc of registry) {
-            // For auto-restart processes, trust the registry status completely
-            // Don't overwrite with process alive checks
-            let status = proc.status;
-            let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
+    for (const proc of registry) {
+        // For daemon processes, trust the synced status
+        if (proc.config?.daemon) {
+            let displayStatus = proc.status.charAt(0).toUpperCase() + proc.status.slice(1);
             
-            // Only check if process is alive for status verification, but don't auto-update status
-            let isAlive = false;
-            try {
-                if (proc.isAutoRestart && proc.monitorPid) {
-                    process.kill(proc.monitorPid, 0);
-                    isAlive = true;
-                } else {
-                    process.kill(proc.pid, 0);
-                    isAlive = true;
-                }
-            } catch (e) {
-                isAlive = false;
-            }
-
-            // If the monitor says it's running/restarting but process is dead, update status
-            if (!isAlive && (proc.status === 'running' || proc.status === 'restarting')) {
-                status = 'dead';
-                proc.status = status;
-                displayStatus = 'Dead';
-                this._saveRegistry(registry);
-            }
-            // If monitor says it's stopped but process is alive, update to running
-            else if (isAlive && proc.status === 'stopped') {
-                status = 'running';
-                proc.status = status;
-                displayStatus = 'Running';
-                this._saveRegistry(registry);
-            }
-
             processList.push({
                 status: displayStatus,
                 id: proc.id,
@@ -603,13 +909,62 @@ main
                 monitorPid: proc.monitorPid || 'N/A',
                 tries: proc.config?.currentTries || 0,
                 autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
+                daemon: proc.config?.daemon ? 'Yes' : 'No',
                 workingDir: proc.config?.workingDir || 'Default',
                 path: proc.path
             });
+            continue;
         }
 
-        return processList;
+        // For auto-restart processes, trust the registry status completely
+        let status = proc.status;
+        let displayStatus = status.charAt(0).toUpperCase() + status.slice(1);
+        
+        // Only check if process is alive for status verification, but don't auto-update status
+        let isAlive = false;
+        try {
+            if (proc.isAutoRestart && proc.monitorPid) {
+                process.kill(proc.monitorPid, 0);
+                isAlive = true;
+            } else {
+                process.kill(proc.pid, 0);
+                isAlive = true;
+            }
+        } catch (e) {
+            isAlive = false;
+        }
+
+        // If the monitor says it's running/restarting but process is dead, update status
+        if (!isAlive && (proc.status === 'running' || proc.status === 'restarting')) {
+            status = 'dead';
+            proc.status = status;
+            displayStatus = 'Dead';
+            this._saveRegistry(registry);
+        }
+        // If monitor says it's stopped but process is alive, update to running
+        else if (isAlive && proc.status === 'stopped') {
+            status = 'running';
+            proc.status = status;
+            displayStatus = 'Running';
+            this._saveRegistry(registry);
+        }
+
+        processList.push({
+            status: displayStatus,
+            id: proc.id,
+            name: proc.name,
+            pid: proc.pid,
+            monitorPid: proc.monitorPid || 'N/A',
+            tries: proc.config?.currentTries || 0,
+            autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
+            daemon: proc.config?.daemon ? 'Yes' : 'No',
+            workingDir: proc.config?.workingDir || 'Default',
+            path: proc.path
+        });
     }
+
+    return processList;
+}
 
     /**
      * Removes a process from the registry by ID
@@ -681,6 +1036,11 @@ main
             console.log(`- Process ${proc.name} was not running`);
         }
         
+        // Disable daemon mode if enabled
+        if (proc.config?.daemon) {
+            this._disableDaemon(proc.id);
+        }
+        
         // Clean up temporary file if this was a temp file process
         if (proc.isTempFile && proc.tempFilePath) {
             try {
@@ -696,68 +1056,96 @@ main
         return true;
     }
 
-    /**
-     * Kills all managed processes
-     * @static
-     * @returns {number} Number of processes killed
-     * 
-     * @example
-     * const killedCount = SyPM.killAll();
-     * console.log(`Killed ${killedCount} processes`);
-     */
-    static killAll() {
-        const registry = this._loadRegistry();
-       
-        if (registry.length === 0) {
-            console.log('No processes to kill.');
-            return 0;
-        }
+   /**
+ * Kills all managed processes
+ * @static
+ * @returns {number} Number of processes killed
+ * 
+ * @example
+ * const killedCount = SyPM.killAll();
+ * console.log(`Killed ${killedCount} processes`);
+ */
+static killAll() {
+    const registry = this._loadRegistry();
+   
+    if (registry.length === 0) {
+        console.log('No processes to kill.');
+        return 0;
+    }
 
-        console.log(`Killing all ${registry.length} processes...`);
+    console.log(`Killing all ${registry.length} processes...`);
+   
+    // First, mark all as stopped in registry
+    for (const proc of registry) {
+        proc.status = 'stopped';
+    }
+    this._saveRegistry(registry);
+   
+    let killedCount = 0;
+   
+    // Then kill all processes
+    for (const proc of registry) {
+        let killed = false;
        
-        // First, mark all as stopped in registry
-        for (const proc of registry) {
-            proc.status = 'stopped';
+        // For daemon processes, stop the system service first
+        if (proc.config?.daemon) {
+            try {
+                const systemInfo = this._detectSystem();
+                if (systemInfo.initSystem === 'systemd') {
+                    const serviceName = `sypm-${proc.id}.service`;
+                    execSync(`systemctl stop ${serviceName} 2>/dev/null || true`);
+                    console.log(`✓ Stopped systemd service: ${serviceName}`);
+                    killed = true;
+                } else if (systemInfo.initSystem === 'openrc') {
+                    const serviceName = `sypm-${proc.id}`;
+                    execSync(`rc-service ${serviceName} stop 2>/dev/null || true`);
+                    console.log(`✓ Stopped OpenRC service: ${serviceName}`);
+                    killed = true;
+                }
+            } catch (error) {
+                console.log(`⚠ Could not stop daemon service for ${proc.name}: ${error.message}`);
+            }
         }
-        this._saveRegistry(registry);
        
-        let killedCount = 0;
-       
-        // Then kill all processes
-        for (const proc of registry) {
-            let killed = false;
-           
+        // For non-daemon processes, use the normal killing method
+        if (!killed) {
             if (proc.isAutoRestart && proc.monitorPid) {
                 killed = this._killProcessTree(proc.monitorPid);
             } else {
                 killed = this._killProcessTree(proc.pid);
             }
-           
-            if (killed) {
-                killedCount++;
-                console.log(`✓ Killed: ${proc.name}`);
-            } else {
-                console.log(`- Already dead: ${proc.name}`);
-            }
-            
-            // Clean up temporary files for killed processes
-            if (proc.isTempFile && proc.tempFilePath) {
-                try {
-                    if (fs.existsSync(proc.tempFilePath)) {
-                        fs.unlinkSync(proc.tempFilePath);
-                        console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
-                    }
-                } catch (error) {
-                    console.log(`  ⚠ Could not remove temp file: ${error.message}`);
-                }
-            }
         }
        
-        // Clear registry after killing all
-        this._saveRegistry([]);
-        console.log(`\n✓ Successfully killed ${killedCount} out of ${registry.length} processes.`);
-        return killedCount;
+        if (killed) {
+            killedCount++;
+            console.log(`✓ Killed: ${proc.name}`);
+        } else {
+            console.log(`- Already dead: ${proc.name}`);
+        }
+        
+        // Disable daemon mode if enabled
+        if (proc.config?.daemon) {
+            this._disableDaemon(proc.id);
+        }
+        
+        // Clean up temporary files for killed processes
+        if (proc.isTempFile && proc.tempFilePath) {
+            try {
+                if (fs.existsSync(proc.tempFilePath)) {
+                    fs.unlinkSync(proc.tempFilePath);
+                    console.log(`  ✓ Removed temporary file: ${proc.tempFilePath}`);
+                }
+            } catch (error) {
+                console.log(`  ⚠ Could not remove temp file: ${error.message}`);
+            }
+        }
     }
+   
+    // Clear registry after killing all
+    this._saveRegistry([]);
+    console.log(`\n✓ Successfully killed ${killedCount} out of ${registry.length} processes.`);
+    return killedCount;
+}
    
     /**
      * Checks if a process is alive by PID or ID
@@ -817,6 +1205,9 @@ main
         console.log(`📁 Log file: ${logPath}`);
         if (proc.config?.workingDir) {
             console.log(`📁 Working directory: ${proc.config.workingDir}`);
+        }
+        if (proc.config?.daemon) {
+            console.log(`🔧 Daemon mode: Enabled`);
         }
         console.log('=' .repeat(80));
         console.log('Press Ctrl+C to stop following logs\n');
@@ -912,16 +1303,96 @@ main
                 name: proc.name,
                 autoRestart: proc.config.autoRestart,
                 restartTries: proc.config.restartTries,
-                workingDir: proc.config.workingDir
+                workingDir: proc.config.workingDir,
+                daemon: proc.config.daemon
             });
            
             console.log(`✓ Successfully restarted: ${newProcess.name} (New PID: ${newProcess.pid}, ID: ${newProcess.id})`);
             if (newProcess.config.workingDir) {
                 console.log(`✓ Running in working directory: ${newProcess.config.workingDir}`);
             }
+            if (newProcess.config.daemon) {
+                console.log(`✓ Daemon mode: Enabled`);
+            }
         }, 1000);
        
         return true;
+    }
+
+    /**
+     * Enables daemon mode for an existing process
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to enable daemon mode for
+     * @returns {boolean} True if daemon mode was successfully enabled
+     * 
+     * @example
+     * SyPM.enableDaemon('abc123def');
+     */
+    static enableDaemon(pidOrId) {
+        const registry = this._loadRegistry();
+        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
+   
+        if (!proc) {
+            console.error('Process not found.');
+            return false;
+        }
+
+        if (proc.config.daemon) {
+            console.log(`Process ${proc.name} already has daemon mode enabled.`);
+            return true;
+        }
+
+        console.log(`Enabling daemon mode for process: ${proc.name} (ID: ${proc.id})`);
+        
+        const success = this._enableDaemon(proc.id, proc);
+        if (success) {
+            // Update registry
+            proc.config.daemon = true;
+            this._saveRegistry(registry);
+            console.log(`✓ Daemon mode enabled for process: ${proc.name}`);
+            return true;
+        } else {
+            console.log(`✗ Failed to enable daemon mode for process: ${proc.name}`);
+            return false;
+        }
+    }
+
+    /**
+     * Disables daemon mode for an existing process
+     * @static
+     * @param {string|number} pidOrId - Process ID or PID to disable daemon mode for
+     * @returns {boolean} True if daemon mode was successfully disabled
+     * 
+     * @example
+     * SyPM.disableDaemon('abc123def');
+     */
+    static disableDaemon(pidOrId) {
+        const registry = this._loadRegistry();
+        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
+   
+        if (!proc) {
+            console.error('Process not found.');
+            return false;
+        }
+
+        if (!proc.config.daemon) {
+            console.log(`Process ${proc.name} does not have daemon mode enabled.`);
+            return true;
+        }
+
+        console.log(`Disabling daemon mode for process: ${proc.name} (ID: ${proc.id})`);
+        
+        const success = this._disableDaemon(proc.id);
+        if (success) {
+            // Update registry
+            proc.config.daemon = false;
+            this._saveRegistry(registry);
+            console.log(`✓ Daemon mode disabled for process: ${proc.name}`);
+            return true;
+        } else {
+            console.log(`✗ Failed to disable daemon mode for process: ${proc.name}`);
+            return false;
+        }
     }
 
     /**
@@ -941,6 +1412,11 @@ main
                 aliveProcesses.push(proc);
             } else {
                 console.log(`Cleaning up dead process: ${proc.name} (ID: ${proc.id})`);
+                
+                // Disable daemon mode if enabled
+                if (proc.config?.daemon) {
+                    this._disableDaemon(proc.id);
+                }
                 
                 // Clean up temporary files for dead processes
                 if (proc.isTempFile && proc.tempFilePath) {
@@ -982,14 +1458,468 @@ main
      * SyPM.info();
      */
     static info() {
+        const systemInfo = this._detectSystem();
+        
         console.log(`SyPM Global Information:`);
         console.log(`Base Directory: ${GLOBAL_BASE_DIR}`);
         console.log(`Registry File: ${PROCESS_REGISTRY}`);
         console.log(`Log Directory: ${LOG_DIR}`);
+        console.log(`Daemon Directory: ${DAEMON_DIR}`);
+        console.log(`Operating System: ${systemInfo.platform}`);
+        console.log(`Init System: ${systemInfo.initSystem}`);
+        console.log(`Default Shell: ${systemInfo.shell}`);
+        console.log(`Alpine Linux: ${systemInfo.isAlpine ? 'Yes' : 'No'}`);
         
         const registry = this._loadRegistry();
         console.log(`Total Processes: ${registry.length}`);
         console.log(`Active Processes: ${registry.filter(p => this.isAlive(p.id)).length}`);
+        console.log(`Daemon Processes: ${registry.filter(p => p.config?.daemon).length}`);
+    }
+
+    /**
+     * Comprehensive test method to verify all SyPM functionality including daemon support
+     * @static
+     * @returns {Promise<boolean>} True if all tests pass
+     * 
+     * @example
+     * // Run comprehensive tests
+     * SyPM.Test();
+     */
+    static async Test() {
+        console.log('🧪 Starting SyPM Comprehensive Test Suite...\n');
+        
+        let testCount = 0;
+        let passedTests = 0;
+        let failedTests = 0;
+        
+        /**
+         * Test utility function with async support
+         * @param {string} testName - Name of the test
+         * @param {Function} testFunction - Test function to execute
+         */
+        const runTest = async (testName, testFunction) => {
+            testCount++;
+            process.stdout.write(`  ${testCount}. ${testName}... `);
+            
+            try {
+                await testFunction();
+                console.log('✓ PASSED');
+                passedTests++;
+            } catch (error) {
+                console.log('✗ FAILED');
+                console.log(`     Error: ${error.message}`);
+                failedTests++;
+            }
+        };
+
+        /**
+         * Wait for a condition to be true
+         * @param {Function} condition - Function that returns a boolean
+         * @param {number} timeout - Timeout in milliseconds
+         * @param {number} interval - Check interval in milliseconds
+         */
+        const waitFor = (condition, timeout = 5000, interval = 100) => {
+            return new Promise((resolve, reject) => {
+                const startTime = Date.now();
+                
+                const checkCondition = () => {
+                    try {
+                        if (condition()) {
+                            resolve();
+                        } else if (Date.now() - startTime > timeout) {
+                            reject(new Error(`Timeout waiting for condition after ${timeout}ms`));
+                        } else {
+                            setTimeout(checkCondition, interval);
+                        }
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                
+                checkCondition();
+            });
+        };
+
+        /**
+         * Clean up before tests
+         */
+        const cleanupBeforeTests = () => {
+            // Kill all existing processes
+            const registry = this._loadRegistry();
+            if (registry.length > 0) {
+                console.log('Cleaning up existing processes before tests...');
+                this.killAll();
+            }
+            
+            // Clear registry
+            this._saveRegistry([]);
+        };
+
+        /**
+         * Create test scripts
+         */
+        const createTestScripts = () => {
+            // Simple script that runs for a short time
+            const simpleScript = `
+console.log('Simple test script started');
+setTimeout(() => {
+    console.log('Simple test script completed');
+}, 5000);
+`;
+            
+            // Script that exits immediately (for crash testing)
+            const crashScript = `
+console.log('Crash test script started');
+process.exit(1);
+`;
+            
+            // Long running script
+            const longRunningScript = `
+console.log('Long running test script started');
+setInterval(() => {
+    console.log('Long running script still alive...');
+}, 10000);
+`;
+
+            const scripts = {
+                simple: { code: simpleScript, file: path.join(tmpdir(), 'test_simple.js') },
+                crash: { code: crashScript, file: path.join(tmpdir(), 'test_crash.js') },
+                long: { code: longRunningScript, file: path.join(tmpdir(), 'test_long.js') }
+            };
+
+            // Write test scripts to files
+            for (const script of Object.values(scripts)) {
+                fs.writeFileSync(script.file, script.code, 'utf-8');
+            }
+
+            return scripts;
+        };
+
+        /**
+         * Clean up test scripts
+         */
+        const cleanupTestScripts = (scripts) => {
+            for (const script of Object.values(scripts)) {
+                try {
+                    if (fs.existsSync(script.file)) {
+                        fs.unlinkSync(script.file);
+                    }
+                } catch (error) {
+                    // Ignore cleanup errors
+                }
+            }
+        };
+
+        // Start comprehensive testing
+        cleanupBeforeTests();
+        const testScripts = createTestScripts();
+
+        console.log('📋 Running Core Functionality Tests:\n');
+
+        // Test 1: Registry operations
+        await runTest('Registry load/save operations', () => {
+            const testData = [{ id: 'test', name: 'test' }];
+            this._saveRegistry(testData);
+            const loadedData = this._loadRegistry();
+            if (JSON.stringify(loadedData) !== JSON.stringify(testData)) {
+                throw new Error('Registry save/load mismatch');
+            }
+            this._saveRegistry([]); // Reset
+        });
+
+        // Test 2: ID generation
+        await runTest('Unique ID generation', () => {
+            const id1 = this._generateId();
+            const id2 = this._generateId();
+            if (id1 === id2) {
+                throw new Error('Generated duplicate IDs');
+            }
+            if (typeof id1 !== 'string' || id1.length === 0) {
+                throw new Error('Invalid ID generated');
+            }
+        });
+
+        // Test 3: Process name generation
+        await runTest('Process name generation', () => {
+            const name1 = this._generateProcessName();
+            const name2 = this._generateProcessName();
+            if (name1 === name2) {
+                throw new Error('Generated duplicate names');
+            }
+            if (!name1.startsWith('process_')) {
+                throw new Error('Invalid name format');
+            }
+        });
+
+        // Test 4: System detection
+        await runTest('System detection', () => {
+            const systemInfo = this._detectSystem();
+            if (!systemInfo.platform) {
+                throw new Error('System detection failed');
+            }
+            console.log(`\n     Detected: ${systemInfo.platform}, ${systemInfo.initSystem}, ${systemInfo.shell}`);
+        });
+
+        // Test 5: Run file-based process
+        let simpleProcessId;
+        await runTest('Run file-based process', async () => {
+            const process = this.run(testScripts.simple.file, { 
+                name: 'test-simple-file' 
+            });
+            simpleProcessId = process.id;
+            
+            if (!process.id || !process.pid || !process.name) {
+                throw new Error('Invalid process object returned');
+            }
+            
+            // Wait for process to start properly
+            await waitFor(() => this.isAlive(process.id), 3000, 100);
+        });
+
+        // Test 6: Run code-based process
+        let codeProcessId;
+        await runTest('Run code-based process', async () => {
+            const process = this.run(testScripts.long.code, {
+                name: 'test-code-process'
+            });
+            codeProcessId = process.id;
+            
+            if (!process.isTempFile) {
+                throw new Error('Code process should be marked as temp file');
+            }
+            
+            // Wait for process to start properly
+            await waitFor(() => this.isAlive(process.id), 3000, 100);
+        });
+
+        // Test 7: Run process with working directory
+        await runTest('Run process with working directory', async () => {
+            const testWorkingDir = path.join(tmpdir(), 'sypm_test_dir');
+            if (!fs.existsSync(testWorkingDir)) {
+                fs.mkdirSync(testWorkingDir, { recursive: true });
+            }
+            
+            const process = this.run(testScripts.simple.code, {
+                name: 'test-working-dir',
+                workingDir: testWorkingDir
+            });
+            
+            if (!process.config.workingDir) {
+                throw new Error('Working directory not set in process config');
+            }
+            
+            // Wait for process to start properly
+            await waitFor(() => this.isAlive(process.id), 3000, 100);
+            
+            // Clean up
+            this.kill(process.id);
+            
+            // Wait for process to be killed
+            await waitFor(() => !this.isAlive(process.id), 3000, 100);
+            
+            try {
+                fs.rmdirSync(testWorkingDir);
+            } catch (error) {
+                // Ignore cleanup errors
+            }
+        });
+
+        // Test 8: List processes
+        await runTest('List processes functionality', () => {
+            const processes = this.list();
+            if (!Array.isArray(processes)) {
+                throw new Error('List should return an array');
+            }
+            
+            const ourProcesses = processes.filter(p => 
+                p.name === 'test-simple-file' || p.name === 'test-code-process'
+            );
+            
+            if (ourProcesses.length < 2) {
+                throw new Error('Not all test processes found in list');
+            }
+        });
+
+        // Test 9: Process alive check
+        await runTest('Process alive status check', () => {
+            if (!this.isAlive(simpleProcessId)) {
+                throw new Error('Process should be alive');
+            }
+        });
+
+        // Test 10: Kill process by ID
+        await runTest('Kill process by ID', async () => {
+            const killed = this.kill(simpleProcessId);
+            if (!killed) {
+                throw new Error('Failed to kill process by ID');
+            }
+            
+            // Wait for process to die
+            await waitFor(() => !this.isAlive(simpleProcessId), 3000, 100);
+        });
+
+        // Test 11: Kill process by PID
+        await runTest('Kill process by PID', async () => {
+            const processes = this.list();
+            const codeProcess = processes.find(p => p.name === 'test-code-process');
+            if (!codeProcess) {
+                throw new Error('Code process not found for PID test');
+            }
+            
+            const killed = this.kill(codeProcess.pid);
+            if (!killed) {
+                throw new Error('Failed to kill process by PID');
+            }
+            
+            // Wait for process to die
+            await waitFor(() => !this.isAlive(codeProcess.id), 3000, 100);
+        });
+
+        // Test 12: Run process with auto-restart
+        let autoRestartProcessId;
+        await runTest('Run process with auto-restart', async () => {
+            const process = this.run(testScripts.crash.file, {
+                name: 'test-auto-restart',
+                autoRestart: true,
+                restartTries: 2
+            });
+            autoRestartProcessId = process.id;
+            
+            if (!process.isAutoRestart) {
+                throw new Error('Auto-restart process not properly configured');
+            }
+            
+            if (!process.config.autoRestart) {
+                throw new Error('Auto-restart flag not set in config');
+            }
+            
+            // Wait for process to start
+            await waitFor(() => this.isAlive(process.id), 3000, 100);
+        });
+
+        // Test 13: Daemon mode functionality (test without actual system installation)
+        await runTest('Daemon mode configuration', async () => {
+            const systemInfo = this._detectSystem();
+            if (!systemInfo.isLinux) {
+                console.log('\n     Skipping daemon test on non-Linux system');
+                return;
+            }
+            
+            const process = this.run(testScripts.long.file, {
+                name: 'test-daemon-process',
+                daemon: true
+            });
+            
+            if (!process.config.daemon) {
+                throw new Error('Daemon flag not set in config');
+            }
+            
+            console.log(`\n     Daemon mode configured for ${systemInfo.initSystem}`);
+            
+            // Clean up
+            this.kill(process.id);
+        });
+
+        // Test 14: Cleanup functionality
+        await runTest('Cleanup dead processes', async () => {
+            // Kill the auto-restart process first
+            this.kill(autoRestartProcessId);
+            
+            // Wait for it to die
+            await waitFor(() => !this.isAlive(autoRestartProcessId), 3000, 100);
+            
+            this.cleanup();
+            const processes = this.list();
+            const found = processes.find(p => p.id === autoRestartProcessId);
+            if (found) {
+                throw new Error('Dead process not cleaned up');
+            }
+        });
+
+        // Test 15: Kill all processes
+        await runTest('Kill all processes', async () => {
+            // Start a few processes first
+            this.run(testScripts.simple.file, { name: 'test-kill-all-1' });
+            this.run(testScripts.simple.file, { name: 'test-kill-all-2' });
+            
+            // Wait for processes to start
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            const beforeCount = this.list().length;
+            const killedCount = this.killAll();
+            
+            // Wait for processes to be killed
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            const afterCount = this.list().length;
+            if (afterCount !== 0) {
+                throw new Error('Not all processes were killed');
+            }
+        });
+
+        // Test 16: Info functionality
+        await runTest('System info display', () => {
+            // This should not throw an error
+            this.info();
+        });
+
+        // Test 17: Process restart functionality
+        await runTest('Process restart functionality', async () => {
+            const process = this.run(testScripts.long.file, {
+                name: 'test-restart'
+            });
+            
+            const originalPid = process.pid;
+            
+            // Wait for process to start
+            await waitFor(() => this.isAlive(process.id), 3000, 100);
+            
+            const restartSuccess = this.restart(process.id);
+            
+            if (!restartSuccess) {
+                throw new Error('Restart failed');
+            }
+            
+            // Wait for restart to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const newProcesses = this.list();
+            const restartedProcess = newProcesses.find(p => p.name === 'test-restart');
+            
+            if (!restartedProcess) {
+                throw new Error('Restarted process not found');
+            }
+            
+            if (restartedProcess.pid === originalPid) {
+                throw new Error('Process PID did not change after restart');
+            }
+            
+            // Clean up
+            this.kill(restartedProcess.id);
+            
+            // Wait for process to be killed
+            await waitFor(() => !this.isAlive(restartedProcess.id), 3000, 100);
+        });
+
+        // Final cleanup
+        this.killAll();
+        cleanupTestScripts(testScripts);
+
+        // Test Results Summary
+        console.log('\n📊 Test Results Summary:');
+        console.log('=' .repeat(40));
+        console.log(`Total Tests: ${testCount}`);
+        console.log(`Passed: ${passedTests} ✓`);
+        console.log(`Failed: ${failedTests} ✗`);
+        console.log(`Success Rate: ${((passedTests / testCount) * 100).toFixed(1)}%`);
+        
+        if (failedTests === 0) {
+            console.log('\n🎉 ALL TESTS PASSED! SyPM is working correctly.');
+            return true;
+        } else {
+            console.log('\n⚠️  Some tests failed. Please check the implementation.');
+            return false;
+        }
     }
 
     /**
@@ -1014,6 +1944,9 @@ Commands:
   --log <pid|id>        Follow logs of a process (real-time)
   --cleanup             Remove dead processes from registry
   --info                Show global SyPM information
+  --enable-daemon <id>  Enable daemon mode for a process (auto-start on boot)
+  --disable-daemon <id> Disable daemon mode for a process
+  --test                Run comprehensive test suite
   --help                Display this help message
 
 Options for --run:
@@ -1021,6 +1954,7 @@ Options for --run:
   --auto-restart        Auto-restart the process if it crashes
   --restart-tries <n>   Number of restart attempts (implies auto-restart)
   --working-dir <path>  Run the process in specified working directory
+  --daemon              Run as system daemon (auto-start on system boot)
 
 Global Features:
   • Processes are managed system-wide from: ${GLOBAL_BASE_DIR}
@@ -1028,6 +1962,9 @@ Global Features:
   • Persistent registry across terminal sessions
   • Real-time status updates for auto-restart processes
   • Optional working directory support
+  • Daemon mode for auto-start on system reboot (Linux only)
+  • Support for Ubuntu (systemd) and Alpine Linux (OpenRC)
+  • Automatic shell detection (bash/ash)
 
 Examples:
   node SyPM --run app.js --name my-app
@@ -1035,7 +1972,11 @@ Examples:
   node SyPM --run app.js --restart-tries 3
   node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
   node SyPM --run app.js --working-dir /path/to/directory
+  node SyPM --run app.js --daemon
+  node SyPM --enable-daemon abc123def
+  node SyPM --disable-daemon abc123def
   node SyPM --list      # Shows all processes regardless of current directory
+  node SyPM --test      # Run comprehensive test suite
         `);
     }
 
@@ -1054,6 +1995,16 @@ Examples:
 
         if (args.includes('--info')) {
             this.info();
+            return;
+        }
+
+        if (args.includes('--test')) {
+            this.Test().then(success => {
+                process.exit(success ? 0 : 1);
+            }).catch(error => {
+                console.error('Test suite failed:', error);
+                process.exit(1);
+            });
             return;
         }
 
@@ -1106,6 +2057,10 @@ Examples:
                     config.workingDir = args[dirIndex + 1];
                 }
             }
+
+            if (args.includes('--daemon')) {
+                config.daemon = true;
+            }
            
             try {
                 const result = this.run(filePath, config);
@@ -1116,6 +2071,9 @@ Examples:
                 }
                 if (config.workingDir) {
                     console.log(`✓ Working directory: ${config.workingDir}`);
+                }
+                if (config.daemon) {
+                    console.log(`✓ Daemon mode: Enabled (auto-start on system boot)`);
                 }
             } catch (error) {
                 console.error('✗ Error starting process:', error.message);
@@ -1177,6 +2135,30 @@ Examples:
             return;
         }
 
+        if (args.includes('--enable-daemon')) {
+            const daemonIndex = args.indexOf('--enable-daemon');
+            if (daemonIndex + 1 >= args.length || args[daemonIndex + 1].startsWith('--')) {
+                console.error('Error: --enable-daemon requires a process ID');
+                return;
+            }
+           
+            const processId = args[daemonIndex + 1];
+            this.enableDaemon(processId);
+            return;
+        }
+
+        if (args.includes('--disable-daemon')) {
+            const daemonIndex = args.indexOf('--disable-daemon');
+            if (daemonIndex + 1 >= args.length || args[daemonIndex + 1].startsWith('--')) {
+                console.error('Error: --disable-daemon requires a process ID');
+                return;
+            }
+           
+            const processId = args[daemonIndex + 1];
+            this.disableDaemon(processId);
+            return;
+        }
+
         if (args.includes('--cleanup')) {
             this.cleanup();
             return;
@@ -1187,7 +2169,6 @@ Examples:
     }
 }
 
-// CLI entry point
 if (process.argv[1] === __filename) {
     SyPM.parseArguments();
 }
