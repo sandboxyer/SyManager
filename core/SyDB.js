@@ -9,9 +9,12 @@
 
             console.log(process.cwd())
             
-         console.log(await C.run('./new_sydb.c',{args : ['--server']}))
-            `,{workingDir : process.cwd()})
-    
+         C.run('./util/SyDB.c',{args : ['--server']})
+        console.log('C.run() executado, SyDB server ON')    
+	`,{workingDir : process.cwd()})
+     
+	
+	console.log('C.run() executado, SyDB server ON')
         return
     }
 
