@@ -46,6 +46,11 @@
 #define HTTP_SERVER_BUFFER_SIZE 8192
 #define HTTP_SERVER_MAX_HEADERS 100
 #define HTTP_SERVER_MAX_CONTENT_LENGTH (10 * 1024 * 1024) // 10MB
+#define THREAD_POOL_WORKER_COUNT 16
+#define THREAD_POOL_QUEUE_CAPACITY 1000
+#define FILE_CONNECTION_POOL_SIZE 50
+#define RATE_LIMIT_MAX_REQUESTS 100
+#define RATE_LIMIT_WINDOW_SECONDS 60
 
 typedef enum {
     FIELD_TYPE_STRING,
@@ -86,18 +91,63 @@ typedef struct {
     http_response_t response;
 } http_client_context_t;
 
+// ==================== HIGH-PERFORMANCE THREAD POOL ====================
+
+typedef struct {
+    pthread_t* worker_threads;
+    int worker_thread_count;
+    http_client_context_t** task_queue;
+    int queue_capacity;
+    int queue_size;
+    int queue_head;
+    int queue_tail;
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_not_empty_condition;
+    pthread_cond_t queue_not_full_condition;
+    bool shutdown_flag;
+} thread_pool_t;
+
+// ==================== HIGH-PERFORMANCE FILE CONNECTION POOL ====================
+
+typedef struct {
+    char database_name[MAXIMUM_NAME_LENGTH];
+    char collection_name[MAXIMUM_NAME_LENGTH];
+    FILE* data_file;
+    time_t last_used_timestamp;
+    bool in_use_flag;
+} file_connection_t;
+
+typedef struct {
+    file_connection_t* file_connections;
+    int connection_pool_size;
+    pthread_mutex_t pool_mutex;
+} file_connection_pool_t;
+
+// ==================== HIGH-PERFORMANCE RATE LIMITING ====================
+
+typedef struct {
+    char client_ip_address[INET6_ADDRSTRLEN];
+    time_t last_request_time;
+    int request_count;
+    time_t rate_limit_window_start;
+} rate_limit_entry_t;
+
+typedef struct {
+    rate_limit_entry_t* rate_limit_entries;
+    int rate_limit_entries_count;
+    pthread_mutex_t rate_limit_mutex;
+} rate_limiter_t;
+
+// ==================== HTTP SERVER WITH PERFORMANCE ENHANCEMENTS ====================
+
 typedef struct {
     int server_socket;
-    int port;
-    bool running;
+    int port_number;
+    bool running_flag;
     pthread_t accept_thread;
-    pthread_t worker_threads[MAXIMUM_THREAD_POOL_SIZE];
-    pthread_mutex_t queue_mutex;
-    pthread_cond_t queue_condition;
-    http_client_context_t* client_queue[HTTP_SERVER_MAX_CONNECTIONS];
-    int queue_size;
-    int queue_front;
-    int queue_rear;
+    thread_pool_t* thread_pool;
+    file_connection_pool_t* file_connection_pool;
+    rate_limiter_t* rate_limiter;
 } http_server_t;
 
 // ==================== HTTP ROUTES DOCUMENTATION ====================
@@ -246,6 +296,14 @@ typedef struct {
     uint8_t reserved[20];
 } record_header_t;
 
+// ==================== OPTIMIZED PATH COMPONENTS PARSING ====================
+
+typedef struct {
+    char database_name[MAXIMUM_NAME_LENGTH];
+    char collection_name[MAXIMUM_NAME_LENGTH];
+    char instance_id[UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE];
+} path_components_t;
+
 // ==================== B-TREE INDEX IMPLEMENTATION ====================
 
 typedef struct b_tree_node {
@@ -300,17 +358,6 @@ typedef struct {
     bool writer_active;
 } collection_lock_t;
 
-typedef struct {
-    pthread_t threads[MAXIMUM_THREAD_POOL_SIZE];
-    pthread_mutex_t queue_lock;
-    pthread_cond_t queue_condition;
-    void (*tasks[MAXIMUM_THREAD_POOL_SIZE])(void*);
-    void* task_arguments[MAXIMUM_THREAD_POOL_SIZE];
-    int task_count;
-    int active_threads_count;
-    bool shutdown;
-} thread_pool_t;
-
 // ==================== DATABASE COLLECTION STRUCTURE ====================
 
 typedef struct {
@@ -335,6 +382,32 @@ typedef struct {
     uint64_t records_processed;
     lru_cache_t* cache;
 } record_iterator_t;
+
+// ==================== HIGH-PERFORMANCE UTILITY FUNCTIONS ====================
+
+// High-performance JSON building functions
+char* build_json_array_high_performance(char** items, int item_count);
+char* build_json_object_high_performance(char** keys, char** values, int pair_count);
+
+// Thread pool functions
+thread_pool_t* create_thread_pool(int worker_thread_count, int queue_capacity);
+void destroy_thread_pool(thread_pool_t* thread_pool);
+int thread_pool_submit_task(thread_pool_t* thread_pool, http_client_context_t* client_context);
+void* thread_pool_worker_function(void* thread_pool_argument);
+
+// File connection pool functions
+file_connection_pool_t* create_file_connection_pool(int pool_size);
+void destroy_file_connection_pool(file_connection_pool_t* connection_pool);
+FILE* get_file_connection(file_connection_pool_t* connection_pool, const char* database_name, const char* collection_name);
+void release_file_connection(file_connection_pool_t* connection_pool, FILE* data_file);
+
+// Rate limiting functions
+rate_limiter_t* create_rate_limiter(void);
+void destroy_rate_limiter(rate_limiter_t* rate_limiter);
+bool check_rate_limit(rate_limiter_t* rate_limiter, const char* client_ip_address);
+
+// Optimized path parsing
+int parse_api_path_optimized(const char* path, path_components_t* components);
 
 // ==================== FUNCTION DECLARATIONS ====================
 
@@ -463,6 +536,556 @@ char* create_error_response(const char* error_message);
 char* extract_path_parameter(const char* path, const char* prefix);
 char* url_decode(const char* encoded_string);
 
+// ==================== HIGH-PERFORMANCE IMPLEMENTATIONS ====================
+
+// High-performance JSON array building - O(n) instead of O(n²)
+char* build_json_array_high_performance(char** items, int item_count) {
+    if (!items || item_count <= 0) {
+        return strdup("[]");
+    }
+    
+    // Calculate total size needed in single pass
+    size_t total_size = 3; // "[]" + null terminator
+    for (int item_index = 0; item_index < item_count; item_index++) {
+        if (items[item_index]) {
+            total_size += strlen(items[item_index]) + 3; // ,""
+        }
+    }
+    
+    // Allocate exactly the needed size
+    char* result_string = malloc(total_size);
+    if (!result_string) {
+        return NULL;
+    }
+    
+    // Build JSON in single pass without repeated scanning
+    char* current_position = result_string;
+    *current_position++ = '[';
+    
+    for (int item_index = 0; item_index < item_count; item_index++) {
+        if (items[item_index]) {
+            if (item_index > 0) {
+                *current_position++ = ',';
+            }
+            *current_position++ = '"';
+            
+            // Use stpcpy for efficient string copying (returns pointer to end)
+            current_position = stpcpy(current_position, items[item_index]);
+            *current_position++ = '"';
+        }
+    }
+    
+    *current_position++ = ']';
+    *current_position = '\0';
+    
+    return result_string;
+}
+
+// High-performance JSON object building
+char* build_json_object_high_performance(char** keys, char** values, int pair_count) {
+    if (!keys || !values || pair_count <= 0) {
+        return strdup("{}");
+    }
+    
+    // Calculate total size needed
+    size_t total_size = 3; // "{}\0"
+    for (int pair_index = 0; pair_index < pair_count; pair_index++) {
+        if (keys[pair_index] && values[pair_index]) {
+            total_size += strlen(keys[pair_index]) + strlen(values[pair_index]) + 5; // ,"":""
+        }
+    }
+    
+    char* result_string = malloc(total_size);
+    if (!result_string) {
+        return NULL;
+    }
+    
+    char* current_position = result_string;
+    *current_position++ = '{';
+    
+    for (int pair_index = 0; pair_index < pair_count; pair_index++) {
+        if (keys[pair_index] && values[pair_index]) {
+            if (pair_index > 0) {
+                *current_position++ = ',';
+            }
+            *current_position++ = '"';
+            current_position = stpcpy(current_position, keys[pair_index]);
+            *current_position++ = '"';
+            *current_position++ = ':';
+            *current_position++ = '"';
+            current_position = stpcpy(current_position, values[pair_index]);
+            *current_position++ = '"';
+        }
+    }
+    
+    *current_position++ = '}';
+    *current_position = '\0';
+    
+    return result_string;
+}
+
+// Thread pool implementation for controlled concurrency
+thread_pool_t* create_thread_pool(int worker_thread_count, int queue_capacity) {
+    if (worker_thread_count <= 0 || queue_capacity <= 0) {
+        return NULL;
+    }
+    
+    thread_pool_t* thread_pool = secure_malloc(sizeof(thread_pool_t));
+    if (!thread_pool) {
+        return NULL;
+    }
+    
+    thread_pool->worker_threads = secure_malloc(worker_thread_count * sizeof(pthread_t));
+    thread_pool->task_queue = secure_malloc(queue_capacity * sizeof(http_client_context_t*));
+    
+    if (!thread_pool->worker_threads || !thread_pool->task_queue) {
+        secure_free((void**)&thread_pool->worker_threads);
+        secure_free((void**)&thread_pool->task_queue);
+        secure_free((void**)&thread_pool);
+        return NULL;
+    }
+    
+    thread_pool->worker_thread_count = worker_thread_count;
+    thread_pool->queue_capacity = queue_capacity;
+    thread_pool->queue_size = 0;
+    thread_pool->queue_head = 0;
+    thread_pool->queue_tail = 0;
+    thread_pool->shutdown_flag = false;
+    
+    if (pthread_mutex_init(&thread_pool->queue_mutex, NULL) != 0) {
+        secure_free((void**)&thread_pool->worker_threads);
+        secure_free((void**)&thread_pool->task_queue);
+        secure_free((void**)&thread_pool);
+        return NULL;
+    }
+    
+    if (pthread_cond_init(&thread_pool->queue_not_empty_condition, NULL) != 0 ||
+        pthread_cond_init(&thread_pool->queue_not_full_condition, NULL) != 0) {
+        pthread_mutex_destroy(&thread_pool->queue_mutex);
+        secure_free((void**)&thread_pool->worker_threads);
+        secure_free((void**)&thread_pool->task_queue);
+        secure_free((void**)&thread_pool);
+        return NULL;
+    }
+    
+    // Create worker threads
+    for (int thread_index = 0; thread_index < worker_thread_count; thread_index++) {
+        if (pthread_create(&thread_pool->worker_threads[thread_index], NULL, 
+                          thread_pool_worker_function, thread_pool) != 0) {
+            // Cleanup on failure
+            thread_pool->shutdown_flag = true;
+            pthread_cond_broadcast(&thread_pool->queue_not_empty_condition);
+            
+            for (int i = 0; i < thread_index; i++) {
+                pthread_join(thread_pool->worker_threads[i], NULL);
+            }
+            
+            pthread_mutex_destroy(&thread_pool->queue_mutex);
+            pthread_cond_destroy(&thread_pool->queue_not_empty_condition);
+            pthread_cond_destroy(&thread_pool->queue_not_full_condition);
+            secure_free((void**)&thread_pool->worker_threads);
+            secure_free((void**)&thread_pool->task_queue);
+            secure_free((void**)&thread_pool);
+            return NULL;
+        }
+    }
+    
+    return thread_pool;
+}
+
+void destroy_thread_pool(thread_pool_t* thread_pool) {
+    if (!thread_pool) return;
+    
+    pthread_mutex_lock(&thread_pool->queue_mutex);
+    thread_pool->shutdown_flag = true;
+    pthread_cond_broadcast(&thread_pool->queue_not_empty_condition);
+    pthread_mutex_unlock(&thread_pool->queue_mutex);
+    
+    // Wait for all worker threads to finish
+    for (int thread_index = 0; thread_index < thread_pool->worker_thread_count; thread_index++) {
+        pthread_join(thread_pool->worker_threads[thread_index], NULL);
+    }
+    
+    // Cleanup any remaining tasks in queue
+    for (int task_index = 0; task_index < thread_pool->queue_size; task_index++) {
+        http_client_context_t* context = thread_pool->task_queue[
+            (thread_pool->queue_head + task_index) % thread_pool->queue_capacity];
+        if (context) {
+            http_server_free_request(&context->request);
+            http_server_free_response(&context->response);
+            close(context->client_socket);
+            free(context);
+        }
+    }
+    
+    pthread_mutex_destroy(&thread_pool->queue_mutex);
+    pthread_cond_destroy(&thread_pool->queue_not_empty_condition);
+    pthread_cond_destroy(&thread_pool->queue_not_full_condition);
+    secure_free((void**)&thread_pool->worker_threads);
+    secure_free((void**)&thread_pool->task_queue);
+    secure_free((void**)&thread_pool);
+}
+
+int thread_pool_submit_task(thread_pool_t* thread_pool, http_client_context_t* client_context) {
+    if (!thread_pool || !client_context || thread_pool->shutdown_flag) {
+        return -1;
+    }
+    
+    pthread_mutex_lock(&thread_pool->queue_mutex);
+    
+    // Wait if queue is full
+    while (thread_pool->queue_size == thread_pool->queue_capacity && !thread_pool->shutdown_flag) {
+        pthread_cond_wait(&thread_pool->queue_not_full_condition, &thread_pool->queue_mutex);
+    }
+    
+    if (thread_pool->shutdown_flag) {
+        pthread_mutex_unlock(&thread_pool->queue_mutex);
+        return -1;
+    }
+    
+    // Add task to queue
+    thread_pool->task_queue[thread_pool->queue_tail] = client_context;
+    thread_pool->queue_tail = (thread_pool->queue_tail + 1) % thread_pool->queue_capacity;
+    thread_pool->queue_size++;
+    
+    pthread_cond_signal(&thread_pool->queue_not_empty_condition);
+    pthread_mutex_unlock(&thread_pool->queue_mutex);
+    
+    return 0;
+}
+
+void* thread_pool_worker_function(void* thread_pool_argument) {
+    thread_pool_t* thread_pool = (thread_pool_t*)thread_pool_argument;
+    
+    while (true) {
+        pthread_mutex_lock(&thread_pool->queue_mutex);
+        
+        // Wait for tasks or shutdown
+        while (thread_pool->queue_size == 0 && !thread_pool->shutdown_flag) {
+            pthread_cond_wait(&thread_pool->queue_not_empty_condition, &thread_pool->queue_mutex);
+        }
+        
+        if (thread_pool->shutdown_flag && thread_pool->queue_size == 0) {
+            pthread_mutex_unlock(&thread_pool->queue_mutex);
+            break;
+        }
+        
+        // Get task from queue
+        http_client_context_t* client_context = thread_pool->task_queue[thread_pool->queue_head];
+        thread_pool->queue_head = (thread_pool->queue_head + 1) % thread_pool->queue_capacity;
+        thread_pool->queue_size--;
+        
+        pthread_cond_signal(&thread_pool->queue_not_full_condition);
+        pthread_mutex_unlock(&thread_pool->queue_mutex);
+        
+        // Process the request
+        http_route_request(client_context);
+        http_send_response(client_context->client_socket, &client_context->response);
+        
+        // Cleanup
+        http_server_free_request(&client_context->request);
+        http_server_free_response(&client_context->response);
+        close(client_context->client_socket);
+        free(client_context);
+    }
+    
+    return NULL;
+}
+
+// File connection pool for efficient file handle reuse
+file_connection_pool_t* create_file_connection_pool(int pool_size) {
+    if (pool_size <= 0) {
+        return NULL;
+    }
+    
+    file_connection_pool_t* connection_pool = secure_malloc(sizeof(file_connection_pool_t));
+    if (!connection_pool) {
+        return NULL;
+    }
+    
+    connection_pool->file_connections = secure_malloc(pool_size * sizeof(file_connection_t));
+    if (!connection_pool->file_connections) {
+        secure_free((void**)&connection_pool);
+        return NULL;
+    }
+    
+    connection_pool->connection_pool_size = pool_size;
+    
+    // Initialize all connections as unused
+    for (int connection_index = 0; connection_index < pool_size; connection_index++) {
+        connection_pool->file_connections[connection_index].database_name[0] = '\0';
+        connection_pool->file_connections[connection_index].collection_name[0] = '\0';
+        connection_pool->file_connections[connection_index].data_file = NULL;
+        connection_pool->file_connections[connection_index].last_used_timestamp = 0;
+        connection_pool->file_connections[connection_index].in_use_flag = false;
+    }
+    
+    if (pthread_mutex_init(&connection_pool->pool_mutex, NULL) != 0) {
+        secure_free((void**)&connection_pool->file_connections);
+        secure_free((void**)&connection_pool);
+        return NULL;
+    }
+    
+    return connection_pool;
+}
+
+void destroy_file_connection_pool(file_connection_pool_t* connection_pool) {
+    if (!connection_pool) return;
+    
+    pthread_mutex_lock(&connection_pool->pool_mutex);
+    
+    for (int connection_index = 0; connection_index < connection_pool->connection_pool_size; connection_index++) {
+        if (connection_pool->file_connections[connection_index].data_file) {
+            fclose(connection_pool->file_connections[connection_index].data_file);
+        }
+    }
+    
+    pthread_mutex_unlock(&connection_pool->pool_mutex);
+    pthread_mutex_destroy(&connection_pool->pool_mutex);
+    secure_free((void**)&connection_pool->file_connections);
+    secure_free((void**)&connection_pool);
+}
+
+FILE* get_file_connection(file_connection_pool_t* connection_pool, const char* database_name, const char* collection_name) {
+    if (!connection_pool || !database_name || !collection_name) {
+        return NULL;
+    }
+    
+    pthread_mutex_lock(&connection_pool->pool_mutex);
+    
+    // Look for existing connection
+    for (int connection_index = 0; connection_index < connection_pool->connection_pool_size; connection_index++) {
+        file_connection_t* connection = &connection_pool->file_connections[connection_index];
+        
+        if (!connection->in_use_flag && 
+            strcmp(connection->database_name, database_name) == 0 &&
+            strcmp(connection->collection_name, collection_name) == 0) {
+            
+            connection->in_use_flag = true;
+            connection->last_used_timestamp = time(NULL);
+            pthread_mutex_unlock(&connection_pool->pool_mutex);
+            return connection->data_file;
+        }
+    }
+    
+    // Look for unused slot
+    for (int connection_index = 0; connection_index < connection_pool->connection_pool_size; connection_index++) {
+        file_connection_t* connection = &connection_pool->file_connections[connection_index];
+        
+        if (!connection->in_use_flag) {
+            // Open new file connection
+            FILE* data_file = open_secure_data_file_with_optimizations(database_name, collection_name, "r+b");
+            if (data_file) {
+                strncpy(connection->database_name, database_name, MAXIMUM_NAME_LENGTH - 1);
+                connection->database_name[MAXIMUM_NAME_LENGTH - 1] = '\0';
+                strncpy(connection->collection_name, collection_name, MAXIMUM_NAME_LENGTH - 1);
+                connection->collection_name[MAXIMUM_NAME_LENGTH - 1] = '\0';
+                connection->data_file = data_file;
+                connection->last_used_timestamp = time(NULL);
+                connection->in_use_flag = true;
+                pthread_mutex_unlock(&connection_pool->pool_mutex);
+                return data_file;
+            }
+        }
+    }
+    
+    // No available slots, open temporary connection
+    pthread_mutex_unlock(&connection_pool->pool_mutex);
+    return open_secure_data_file_with_optimizations(database_name, collection_name, "r+b");
+}
+
+void release_file_connection(file_connection_pool_t* connection_pool, FILE* data_file) {
+    if (!connection_pool || !data_file) return;
+    
+    pthread_mutex_lock(&connection_pool->pool_mutex);
+    
+    // Find and mark connection as available
+    for (int connection_index = 0; connection_index < connection_pool->connection_pool_size; connection_index++) {
+        file_connection_t* connection = &connection_pool->file_connections[connection_index];
+        
+        if (connection->data_file == data_file && connection->in_use_flag) {
+            connection->in_use_flag = false;
+            connection->last_used_timestamp = time(NULL);
+            pthread_mutex_unlock(&connection_pool->pool_mutex);
+            return;
+        }
+    }
+    
+    pthread_mutex_unlock(&connection_pool->pool_mutex);
+    
+    // Not found in pool, close the file
+    fclose(data_file);
+}
+
+// Rate limiting implementation
+rate_limiter_t* create_rate_limiter(void) {
+    rate_limiter_t* rate_limiter = secure_malloc(sizeof(rate_limiter_t));
+    if (!rate_limiter) {
+        return NULL;
+    }
+    
+    rate_limiter->rate_limit_entries = secure_malloc(HTTP_SERVER_MAX_CONNECTIONS * sizeof(rate_limit_entry_t));
+    if (!rate_limiter->rate_limit_entries) {
+        secure_free((void**)&rate_limiter);
+        return NULL;
+    }
+    
+    rate_limiter->rate_limit_entries_count = 0;
+    
+    if (pthread_mutex_init(&rate_limiter->rate_limit_mutex, NULL) != 0) {
+        secure_free((void**)&rate_limiter->rate_limit_entries);
+        secure_free((void**)&rate_limiter);
+        return NULL;
+    }
+    
+    return rate_limiter;
+}
+
+void destroy_rate_limiter(rate_limiter_t* rate_limiter) {
+    if (!rate_limiter) return;
+    
+    pthread_mutex_destroy(&rate_limiter->rate_limit_mutex);
+    secure_free((void**)&rate_limiter->rate_limit_entries);
+    secure_free((void**)&rate_limiter);
+}
+
+bool check_rate_limit(rate_limiter_t* rate_limiter, const char* client_ip_address) {
+    if (!rate_limiter || !client_ip_address) {
+        return true; // Allow if rate limiting is disabled
+    }
+    
+    pthread_mutex_lock(&rate_limiter->rate_limit_mutex);
+    
+    time_t current_time = time(NULL);
+    bool request_allowed = true;
+    
+    // Find existing client entry
+    rate_limit_entry_t* client_entry = NULL;
+    for (int entry_index = 0; entry_index < rate_limiter->rate_limit_entries_count; entry_index++) {
+        if (strcmp(rate_limiter->rate_limit_entries[entry_index].client_ip_address, client_ip_address) == 0) {
+            client_entry = &rate_limiter->rate_limit_entries[entry_index];
+            break;
+        }
+    }
+    
+    if (!client_entry) {
+        // Create new entry if not found and there's space
+        if (rate_limiter->rate_limit_entries_count < HTTP_SERVER_MAX_CONNECTIONS) {
+            client_entry = &rate_limiter->rate_limit_entries[rate_limiter->rate_limit_entries_count++];
+            strncpy(client_entry->client_ip_address, client_ip_address, INET6_ADDRSTRLEN - 1);
+            client_entry->client_ip_address[INET6_ADDRSTRLEN - 1] = '\0';
+            client_entry->request_count = 0;
+            client_entry->rate_limit_window_start = current_time;
+        } else {
+            // No space for new entries, allow request
+            pthread_mutex_unlock(&rate_limiter->rate_limit_mutex);
+            return true;
+        }
+    }
+    
+    // Check if rate limit window has expired
+    if (current_time - client_entry->rate_limit_window_start >= RATE_LIMIT_WINDOW_SECONDS) {
+        client_entry->request_count = 0;
+        client_entry->rate_limit_window_start = current_time;
+    }
+    
+    // Check rate limit
+    if (client_entry->request_count >= RATE_LIMIT_MAX_REQUESTS) {
+        request_allowed = false;
+    } else {
+        client_entry->request_count++;
+        client_entry->last_request_time = current_time;
+    }
+    
+    pthread_mutex_unlock(&rate_limiter->rate_limit_mutex);
+    return request_allowed;
+}
+
+// Optimized path parsing without memory allocations
+int parse_api_path_optimized(const char* path, path_components_t* components) {
+    if (!path || !components) {
+        return -1;
+    }
+    
+    // Initialize components
+    components->database_name[0] = '\0';
+    components->collection_name[0] = '\0';
+    components->instance_id[0] = '\0';
+    
+    const char* current_position = path;
+    
+    // Parse /api/databases/
+    if (strncmp(current_position, "/api/databases/", 15) != 0) {
+        return -1;
+    }
+    current_position += 15;
+    
+    // Extract database name
+    const char* database_name_end = strchr(current_position, '/');
+    if (!database_name_end) {
+        // Only database name provided
+        size_t database_name_length = strlen(current_position);
+        if (database_name_length >= MAXIMUM_NAME_LENGTH) {
+            return -1;
+        }
+        strncpy(components->database_name, current_position, database_name_length);
+        components->database_name[database_name_length] = '\0';
+        return 0;
+    }
+    
+    size_t database_name_length = database_name_end - current_position;
+    if (database_name_length >= MAXIMUM_NAME_LENGTH) {
+        return -1;
+    }
+    strncpy(components->database_name, current_position, database_name_length);
+    components->database_name[database_name_length] = '\0';
+    
+    current_position = database_name_end + 1;
+    
+    // Check for /collections/
+    if (strncmp(current_position, "collections/", 12) != 0) {
+        return -1;
+    }
+    current_position += 12;
+    
+    // Extract collection name
+    const char* collection_name_end = strchr(current_position, '/');
+    if (!collection_name_end) {
+        // Only collection name provided
+        size_t collection_name_length = strlen(current_position);
+        if (collection_name_length >= MAXIMUM_NAME_LENGTH) {
+            return -1;
+        }
+        strncpy(components->collection_name, current_position, collection_name_length);
+        components->collection_name[collection_name_length] = '\0';
+        return 0;
+    }
+    
+    size_t collection_name_length = collection_name_end - current_position;
+    if (collection_name_length >= MAXIMUM_NAME_LENGTH) {
+        return -1;
+    }
+    strncpy(components->collection_name, current_position, collection_name_length);
+    components->collection_name[collection_name_length] = '\0';
+    
+    current_position = collection_name_end + 1;
+    
+    // Check for /instances/
+    if (strncmp(current_position, "instances/", 10) == 0) {
+        current_position += 10;
+        
+        // Extract instance ID
+        size_t instance_id_length = strlen(current_position);
+        if (instance_id_length >= UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE) {
+            return -1;
+        }
+        strncpy(components->instance_id, current_position, instance_id_length);
+        components->instance_id[instance_id_length] = '\0';
+    }
+    
+    return 0;
+}
+
 // ==================== HELPER FUNCTIONS ====================
 
 char* string_repeat(char character, int count) {
@@ -477,12 +1100,12 @@ void display_http_routes() {
     printf("SYDB HTTP Server Available Routes:\n");
     printf("===================================\n\n");
     
-    for (size_t i = 0; i < HTTP_ROUTES_COUNT; i++) {
-        printf("Method: %s\n", http_routes[i].method);
-        printf("Path: %s\n", http_routes[i].path);
-        printf("Description: %s\n", http_routes[i].description);
-        printf("Request Schema:\n%s\n", http_routes[i].request_schema);
-        printf("Response Schema:\n%s\n", http_routes[i].response_schema);
+    for (size_t route_index = 0; route_index < HTTP_ROUTES_COUNT; route_index++) {
+        printf("Method: %s\n", http_routes[route_index].method);
+        printf("Path: %s\n", http_routes[route_index].path);
+        printf("Description: %s\n", http_routes[route_index].description);
+        printf("Request Schema:\n%s\n", http_routes[route_index].request_schema);
+        printf("Response Schema:\n%s\n", http_routes[route_index].response_schema);
         printf("%s\n", string_repeat('-', 60));
     }
     
@@ -557,15 +1180,15 @@ char* url_decode(const char* encoded_string) {
     
     char* decoded_ptr = decoded_string;
     
-    for (size_t i = 0; i < encoded_length; i++) {
-        if (encoded_string[i] == '%' && i + 2 < encoded_length) {
-            char hex[3] = {encoded_string[i+1], encoded_string[i+2], '\0'};
+    for (size_t char_index = 0; char_index < encoded_length; char_index++) {
+        if (encoded_string[char_index] == '%' && char_index + 2 < encoded_length) {
+            char hex[3] = {encoded_string[char_index+1], encoded_string[char_index+2], '\0'};
             *decoded_ptr++ = (char)strtol(hex, NULL, 16);
-            i += 2;
-        } else if (encoded_string[i] == '+') {
+            char_index += 2;
+        } else if (encoded_string[char_index] == '+') {
             *decoded_ptr++ = ' ';
         } else {
-            *decoded_ptr++ = encoded_string[i];
+            *decoded_ptr++ = encoded_string[char_index];
         }
     }
     
@@ -573,7 +1196,7 @@ char* url_decode(const char* encoded_string) {
     return decoded_string;
 }
 
-// ==================== HTTP API IMPLEMENTATION ====================
+// ==================== HTTP API IMPLEMENTATION WITH PERFORMANCE OPTIMIZATIONS ====================
 
 char* http_api_list_databases() {
     int database_count = 0;
@@ -583,24 +1206,23 @@ char* http_api_list_databases() {
         return create_error_response("Failed to list databases");
     }
     
-    char databases_json[4096] = "[";
-    int current_length = 1;
+    // Use high-performance JSON building
+    char* databases_json = build_json_array_high_performance(databases, database_count);
     
-    for (int i = 0; i < database_count; i++) {
-        if (i > 0) {
-            strcat(databases_json, ",");
-            current_length++;
-        }
-        strcat(databases_json, "\"");
-        strcat(databases_json, databases[i]);
-        strcat(databases_json, "\"");
-        current_length += strlen(databases[i]) + 2;
-        free(databases[i]);
+    // Cleanup
+    for (int database_index = 0; database_index < database_count; database_index++) {
+        free(databases[database_index]);
     }
-    strcat(databases_json, "]");
-    
     free(databases);
-    return create_success_response_with_data("databases", databases_json);
+    
+    if (!databases_json) {
+        return create_error_response("Failed to build response");
+    }
+    
+    char* response = create_success_response_with_data("databases", databases_json);
+    free(databases_json);
+    
+    return response;
 }
 
 char* http_api_create_database(const char* database_name) {
@@ -675,24 +1297,23 @@ char* http_api_list_collections(const char* database_name) {
         return create_error_response("Failed to list collections");
     }
     
-    char collections_json[4096] = "[";
-    int current_length = 1;
+    // Use high-performance JSON building
+    char* collections_json = build_json_array_high_performance(collections, collection_count);
     
-    for (int i = 0; i < collection_count; i++) {
-        if (i > 0) {
-            strcat(collections_json, ",");
-            current_length++;
-        }
-        strcat(collections_json, "\"");
-        strcat(collections_json, collections[i]);
-        strcat(collections_json, "\"");
-        current_length += strlen(collections[i]) + 2;
-        free(collections[i]);
+    // Cleanup
+    for (int collection_index = 0; collection_index < collection_count; collection_index++) {
+        free(collections[collection_index]);
     }
-    strcat(collections_json, "]");
-    
     free(collections);
-    return create_success_response_with_data("collections", collections_json);
+    
+    if (!collections_json) {
+        return create_error_response("Failed to build response");
+    }
+    
+    char* response = create_success_response_with_data("collections", collections_json);
+    free(collections_json);
+    
+    return response;
 }
 
 char* http_api_create_collection(const char* database_name, const char* collection_name, const char* schema_json) {
@@ -857,30 +1478,47 @@ char* http_api_get_collection_schema(const char* database_name, const char* coll
         return create_error_response("Failed to load schema");
     }
     
-    char schema_json[4096] = "{\"fields\":[";
-    int current_length = 12;
+    // Build schema JSON using high-performance method
+    char** field_jsons = malloc(field_count * sizeof(char*));
+    if (!field_jsons) {
+        return create_error_response("Memory allocation failed");
+    }
     
-    for (int i = 0; i < field_count; i++) {
-        if (i > 0) {
-            strcat(schema_json, ",");
-            current_length++;
-        }
-        
+    for (int field_index = 0; field_index < field_count; field_index++) {
         char field_json[512];
         snprintf(field_json, sizeof(field_json), 
                 "{\"name\":\"%s\",\"type\":\"%s\",\"required\":%s,\"indexed\":%s}",
-                fields[i].name,
-                convert_secure_field_type_to_string(fields[i].type),
-                fields[i].required ? "true" : "false",
-                fields[i].indexed ? "true" : "false");
+                fields[field_index].name,
+                convert_secure_field_type_to_string(fields[field_index].type),
+                fields[field_index].required ? "true" : "false",
+                fields[field_index].indexed ? "true" : "false");
         
-        strcat(schema_json, field_json);
-        current_length += strlen(field_json);
-        
-        if (current_length >= 4000) break; // Prevent buffer overflow
+        field_jsons[field_index] = strdup(field_json);
+        if (!field_jsons[field_index]) {
+            for (int i = 0; i < field_index; i++) {
+                free(field_jsons[i]);
+            }
+            free(field_jsons);
+            return create_error_response("Memory allocation failed");
+        }
     }
     
-    strcat(schema_json, "]}");
+    char* fields_json = build_json_array_high_performance(field_jsons, field_count);
+    
+    // Cleanup
+    for (int field_index = 0; field_index < field_count; field_index++) {
+        free(field_jsons[field_index]);
+    }
+    free(field_jsons);
+    
+    if (!fields_json) {
+        return create_error_response("Failed to build schema JSON");
+    }
+    
+    char schema_json[4096];
+    snprintf(schema_json, sizeof(schema_json), "{\"fields\":%s}", fields_json);
+    free(fields_json);
+    
     return create_success_response_with_data("schema", schema_json);
 }
 
@@ -920,24 +1558,23 @@ char* http_api_list_instances(const char* database_name, const char* collection_
         return create_error_response("Failed to list instances");
     }
     
-    char instances_json[8192] = "[";
-    int current_length = 1;
+    // Use high-performance JSON building
+    char* instances_json = build_json_array_high_performance(instances, instance_count);
     
-    for (int i = 0; i < instance_count; i++) {
-        if (i > 0) {
-            strcat(instances_json, ",");
-            current_length++;
-        }
-        strcat(instances_json, instances[i]);
-        current_length += strlen(instances[i]);
-        free(instances[i]);
-        
-        if (current_length >= 8000) break; // Prevent buffer overflow
+    // Cleanup
+    for (int instance_index = 0; instance_index < instance_count; instance_index++) {
+        free(instances[instance_index]);
     }
-    strcat(instances_json, "]");
+    free(instances);
     
-    if (instances) free(instances);
-    return create_success_response_with_data("instances", instances_json);
+    if (!instances_json) {
+        return create_error_response("Failed to build response");
+    }
+    
+    char* response = create_success_response_with_data("instances", instances_json);
+    free(instances_json);
+    
+    return response;
 }
 
 char* http_api_insert_instance(const char* database_name, const char* collection_name, const char* instance_json) {
@@ -1092,7 +1729,7 @@ char* http_api_execute_command(const char* command_json) {
     return strdup(response);
 }
 
-// ==================== HTTP REQUEST ROUTING ====================
+// ==================== HTTP REQUEST ROUTING WITH PERFORMANCE OPTIMIZATIONS ====================
 
 void http_route_request(http_client_context_t* context) {
     if (!context) return;
@@ -1102,7 +1739,27 @@ void http_route_request(http_client_context_t* context) {
     char* path = context->request.path;
     char* method = context->request.method;
     
-    // Route the request
+    // Use optimized path parsing when possible
+    path_components_t path_components;
+    if (parse_api_path_optimized(path, &path_components) == 0) {
+        // Route using optimized path components
+        if (strcmp(method, "GET") == 0) {
+            if (strcmp(path_components.database_name, "") != 0 && 
+                strcmp(path_components.collection_name, "") == 0) {
+                // GET /api/databases/{database_name} - List collections
+                char* response_json = http_api_list_collections(path_components.database_name);
+                if (response_json) {
+                    http_response_set_json_body(&context->response, response_json);
+                    free(response_json);
+                } else {
+                    http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Internal server error\"}");
+                }
+                return;
+            }
+        }
+    }
+    
+    // Fallback to original routing for complex paths
     if (strcmp(method, "GET") == 0) {
         if (strcmp(path, "/api/databases") == 0) {
             // List all databases
@@ -1377,9 +2034,6 @@ void http_route_request(http_client_context_t* context) {
     }
 }
 
-// [REST OF THE ORIGINAL CODE REMAINS EXACTLY THE SAME - ALL THE SECURITY FUNCTIONS, 
-// CACHE IMPLEMENTATIONS, DATABASE OPERATIONS, ETC.]
-
 // ==================== SECURITY VALIDATION FUNCTIONS ====================
 
 bool validate_path_component(const char* component) {
@@ -1391,8 +2045,8 @@ bool validate_path_component(const char* component) {
     if (strcmp(component, ".") == 0) return false;
     if (strcmp(component, "..") == 0) return false;
     
-    for (size_t i = 0; i < strlen(component); i++) {
-        if (component[i] < 32 || component[i] == 127) return false;
+    for (size_t char_index = 0; char_index < strlen(component); char_index++) {
+        if (component[char_index] < 32 || component[char_index] == 127) return false;
     }
     
     return true;
@@ -1410,12 +2064,12 @@ bool validate_field_name(const char* field_name) {
     if (!field_name || strlen(field_name) == 0) return false;
     if (strlen(field_name) >= MAXIMUM_FIELD_LENGTH) return false;
     
-    for (size_t i = 0; i < strlen(field_name); i++) {
-        char c = field_name[i];
-        if (!((c >= 'a' && c <= 'z') || 
-              (c >= 'A' && c <= 'Z') || 
-              (c >= '0' && c <= '9') || 
-              c == '_')) {
+    for (size_t char_index = 0; char_index < strlen(field_name); char_index++) {
+        char current_char = field_name[char_index];
+        if (!((current_char >= 'a' && current_char <= 'z') || 
+              (current_char >= 'A' && current_char <= 'Z') || 
+              (current_char >= '0' && current_char <= '9') || 
+              current_char == '_')) {
             return false;
         }
     }
@@ -1428,17 +2082,17 @@ void* secure_malloc(size_t size) {
         return NULL;
     }
     
-    void* ptr = malloc(size);
-    if (ptr) {
-        memset(ptr, 0, size);
+    void* pointer = malloc(size);
+    if (pointer) {
+        memset(pointer, 0, size);
     }
-    return ptr;
+    return pointer;
 }
 
-void secure_free(void** ptr) {
-    if (ptr && *ptr) {
-        free(*ptr);
-        *ptr = NULL;
+void secure_free(void** pointer) {
+    if (pointer && *pointer) {
+        free(*pointer);
+        *pointer = NULL;
     }
 }
 
@@ -1500,9 +2154,9 @@ int create_secure_directory_recursively(const char* path) {
         temporary_path[path_length - 1] = '\0';
     }
     
-    for (size_t i = 1; i < strlen(temporary_path); i++) {
-        if (temporary_path[i] == '/') {
-            temporary_path[i] = '\0';
+    for (size_t char_index = 1; char_index < strlen(temporary_path); char_index++) {
+        if (temporary_path[char_index] == '/') {
+            temporary_path[char_index] = '\0';
             
             if (strlen(temporary_path) > 0) {
                 if (mkdir(temporary_path, 0755) == -1) {
@@ -1513,7 +2167,7 @@ int create_secure_directory_recursively(const char* path) {
                 }
             }
             
-            temporary_path[i] = '/';
+            temporary_path[char_index] = '/';
         }
     }
     
@@ -3264,7 +3918,7 @@ int parse_secure_insert_data_from_arguments(int argument_count, char* argument_v
     return 0;
 }
 
-// ==================== HTTP SERVER IMPLEMENTATION ====================
+// ==================== HTTP SERVER IMPLEMENTATION WITH PERFORMANCE ENHANCEMENTS ====================
 
 http_server_t* http_server_instance = NULL;
 
@@ -3293,17 +3947,17 @@ void http_server_initialize_request(http_request_t* request) {
     request->body_length = 0;
     request->query_string = NULL;
     
-    for (int i = 0; i < HTTP_SERVER_MAX_HEADERS; i++) {
-        request->headers[i] = NULL;
+    for (int header_index = 0; header_index < HTTP_SERVER_MAX_HEADERS; header_index++) {
+        request->headers[header_index] = NULL;
     }
 }
 
 void http_server_free_request(http_request_t* request) {
     if (!request) return;
     
-    for (int i = 0; i < request->header_count; i++) {
-        if (request->headers[i]) {
-            free(request->headers[i]);
+    for (int header_index = 0; header_index < request->header_count; header_index++) {
+        if (request->headers[header_index]) {
+            free(request->headers[header_index]);
         }
     }
     
@@ -3319,9 +3973,9 @@ void http_server_free_request(http_request_t* request) {
 void http_server_free_response(http_response_t* response) {
     if (!response) return;
     
-    for (int i = 0; i < response->header_count; i++) {
-        if (response->headers[i]) {
-            free(response->headers[i]);
+    for (int header_index = 0; header_index < response->header_count; header_index++) {
+        if (response->headers[header_index]) {
+            free(response->headers[header_index]);
         }
     }
     
@@ -3468,10 +4122,10 @@ int http_send_response(int client_socket, http_response_t* response) {
     }
     
     // Send headers
-    for (int i = 0; i < response->header_count; i++) {
-        if (response->headers[i]) {
+    for (int header_index = 0; header_index < response->header_count; header_index++) {
+        if (response->headers[header_index]) {
             char header_line[1024];
-            snprintf(header_line, sizeof(header_line), "%s\r\n", response->headers[i]);
+            snprintf(header_line, sizeof(header_line), "%s\r\n", response->headers[header_index]);
             if (send(client_socket, header_line, strlen(header_line), 0) < 0) {
                 return -1;
             }
@@ -3493,39 +4147,39 @@ int http_send_response(int client_socket, http_response_t* response) {
     return 0;
 }
 
-void* http_client_handler(void* arg) {
-    http_client_context_t* context = (http_client_context_t*)arg;
-    if (!context) return NULL;
+void* http_client_handler(void* client_context_argument) {
+    http_client_context_t* client_context = (http_client_context_t*)client_context_argument;
+    if (!client_context) return NULL;
     
     // Route the request
-    http_route_request(context);
+    http_route_request(client_context);
     
     // Send response
-    http_send_response(context->client_socket, &context->response);
+    http_send_response(client_context->client_socket, &client_context->response);
     
     // Cleanup
-    http_server_free_request(&context->request);
-    http_server_free_response(&context->response);
-    close(context->client_socket);
-    free(context);
+    http_server_free_request(&client_context->request);
+    http_server_free_response(&client_context->response);
+    close(client_context->client_socket);
+    free(client_context);
     
     return NULL;
 }
 
-void* http_accept_loop(void* arg) {
-    http_server_t* server = (http_server_t*)arg;
-    if (!server) return NULL;
+void* http_accept_loop(void* server_argument) {
+    http_server_t* http_server = (http_server_t*)server_argument;
+    if (!http_server) return NULL;
     
-    while (server->running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+    while (http_server->running_flag) {
+        struct sockaddr_in client_address;
+        socklen_t client_address_length = sizeof(client_address);
         
-        int client_socket = accept(server->server_socket, 
-                                 (struct sockaddr*)&client_addr, 
-                                 &client_len);
+        int client_socket = accept(http_server->server_socket, 
+                                 (struct sockaddr*)&client_address, 
+                                 &client_address_length);
         
         if (client_socket < 0) {
-            if (server->running) {
+            if (http_server->running_flag) {
                 perror("accept failed");
             }
             continue;
@@ -3538,6 +4192,23 @@ void* http_accept_loop(void* arg) {
         setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         
+        // Check rate limiting
+        char client_ip_address[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_address.sin_addr, client_ip_address, sizeof(client_ip_address));
+        
+        if (!check_rate_limit(http_server->rate_limiter, client_ip_address)) {
+            // Rate limited - send 429 Too Many Requests
+            http_response_t rate_limit_response;
+            http_server_initialize_response(&rate_limit_response);
+            rate_limit_response.status_code = 429;
+            rate_limit_response.status_message = "Too Many Requests";
+            http_response_set_json_body(&rate_limit_response, "{\"success\":false,\"error\":\"Rate limit exceeded\"}");
+            http_send_response(client_socket, &rate_limit_response);
+            http_server_free_response(&rate_limit_response);
+            close(client_socket);
+            continue;
+        }
+        
         // Read request
         char buffer[HTTP_SERVER_BUFFER_SIZE];
         ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
@@ -3545,31 +4216,28 @@ void* http_accept_loop(void* arg) {
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             
-            http_client_context_t* context = malloc(sizeof(http_client_context_t));
-            if (context) {
-                context->client_socket = client_socket;
-                context->client_address = client_addr;
+            http_client_context_t* client_context = malloc(sizeof(http_client_context_t));
+            if (client_context) {
+                client_context->client_socket = client_socket;
+                client_context->client_address = client_address;
                 
-                if (http_parse_request(buffer, bytes_read, &context->request) == 0) {
-                    // Create thread to handle client
-                    pthread_t client_thread;
-                    if (pthread_create(&client_thread, NULL, http_client_handler, context) == 0) {
-                        pthread_detach(client_thread);
-                    } else {
-                        // Thread creation failed, handle in current thread
-                        http_client_handler(context);
+                if (http_parse_request(buffer, bytes_read, &client_context->request) == 0) {
+                    // Submit to thread pool for processing
+                    if (thread_pool_submit_task(http_server->thread_pool, client_context) != 0) {
+                        // Thread pool submission failed, handle directly
+                        http_client_handler(client_context);
                     }
                 } else {
                     // Parse failed, send bad request
-                    http_response_t response;
-                    http_server_initialize_response(&response);
-                    response.status_code = 400;
-                    response.status_message = "Bad Request";
-                    http_response_set_json_body(&response, "{\"success\":false,\"error\":\"Invalid HTTP request\"}");
-                    http_send_response(client_socket, &response);
-                    http_server_free_response(&response);
+                    http_response_t bad_request_response;
+                    http_server_initialize_response(&bad_request_response);
+                    bad_request_response.status_code = 400;
+                    bad_request_response.status_message = "Bad Request";
+                    http_response_set_json_body(&bad_request_response, "{\"success\":false,\"error\":\"Invalid HTTP request\"}");
+                    http_send_response(client_socket, &bad_request_response);
+                    http_server_free_response(&bad_request_response);
                     close(client_socket);
-                    free(context);
+                    free(client_context);
                 }
             } else {
                 close(client_socket);
@@ -3588,87 +4256,97 @@ int http_server_start(int port) {
         return -1;
     }
     
-    http_server_t* server = malloc(sizeof(http_server_t));
-    if (!server) return -1;
+    http_server_t* http_server = malloc(sizeof(http_server_t));
+    if (!http_server) return -1;
     
-    memset(server, 0, sizeof(http_server_t));
-    server->port = port;
-    server->running = true;
+    memset(http_server, 0, sizeof(http_server_t));
+    http_server->port_number = port;
+    http_server->running_flag = true;
     
-    // Initialize queue mutex and condition
-    if (pthread_mutex_init(&server->queue_mutex, NULL) != 0) {
-        free(server);
+    // Create thread pool
+    http_server->thread_pool = create_thread_pool(THREAD_POOL_WORKER_COUNT, THREAD_POOL_QUEUE_CAPACITY);
+    if (!http_server->thread_pool) {
+        free(http_server);
         return -1;
     }
     
-    if (pthread_cond_init(&server->queue_condition, NULL) != 0) {
-        pthread_mutex_destroy(&server->queue_mutex);
-        free(server);
-        return -1;
-    }
+    // Create file connection pool
+    http_server->file_connection_pool = create_file_connection_pool(FILE_CONNECTION_POOL_SIZE);
+    
+    // Create rate limiter
+    http_server->rate_limiter = create_rate_limiter();
     
     // Create server socket
-    server->server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->server_socket < 0) {
+    http_server->server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (http_server->server_socket < 0) {
         perror("socket creation failed");
-        pthread_mutex_destroy(&server->queue_mutex);
-        pthread_cond_destroy(&server->queue_condition);
-        free(server);
+        destroy_thread_pool(http_server->thread_pool);
+        if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
+        if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
+        free(http_server);
         return -1;
     }
     
     // Set socket options
-    int opt = 1;
-    if (setsockopt(server->server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    int socket_option = 1;
+    if (setsockopt(http_server->server_socket, SOL_SOCKET, SO_REUSEADDR, &socket_option, sizeof(socket_option)) < 0) {
         perror("setsockopt failed");
-        close(server->server_socket);
-        pthread_mutex_destroy(&server->queue_mutex);
-        pthread_cond_destroy(&server->queue_condition);
-        free(server);
+        close(http_server->server_socket);
+        destroy_thread_pool(http_server->thread_pool);
+        if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
+        if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
+        free(http_server);
         return -1;
     }
     
     // Bind socket
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port);
+    struct sockaddr_in server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(port);
     
-    if (bind(server->server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+    if (bind(http_server->server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
         perror("bind failed");
-        close(server->server_socket);
-        pthread_mutex_destroy(&server->queue_mutex);
-        pthread_cond_destroy(&server->queue_condition);
-        free(server);
+        close(http_server->server_socket);
+        destroy_thread_pool(http_server->thread_pool);
+        if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
+        if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
+        free(http_server);
         return -1;
     }
     
     // Listen for connections
-    if (listen(server->server_socket, HTTP_SERVER_MAX_CONNECTIONS) < 0) {
+    if (listen(http_server->server_socket, HTTP_SERVER_MAX_CONNECTIONS) < 0) {
         perror("listen failed");
-        close(server->server_socket);
-        pthread_mutex_destroy(&server->queue_mutex);
-        pthread_cond_destroy(&server->queue_condition);
-        free(server);
+        close(http_server->server_socket);
+        destroy_thread_pool(http_server->thread_pool);
+        if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
+        if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
+        free(http_server);
         return -1;
     }
     
-    http_server_instance = server;
+    http_server_instance = http_server;
     
     // Create accept thread
-    if (pthread_create(&server->accept_thread, NULL, http_accept_loop, server) != 0) {
+    if (pthread_create(&http_server->accept_thread, NULL, http_accept_loop, http_server) != 0) {
         perror("pthread_create failed for accept thread");
-        close(server->server_socket);
-        pthread_mutex_destroy(&server->queue_mutex);
-        pthread_cond_destroy(&server->queue_condition);
-        free(server);
+        close(http_server->server_socket);
+        destroy_thread_pool(http_server->thread_pool);
+        if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
+        if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
+        free(http_server);
         http_server_instance = NULL;
         return -1;
     }
     
     printf("SYDB HTTP Server started on port %d\n", port);
-    printf("Server is running...\n");
+    printf("Server is running with performance enhancements:\n");
+    printf("  - Thread pool: %d workers\n", THREAD_POOL_WORKER_COUNT);
+    printf("  - File connection pool: %d connections\n", FILE_CONNECTION_POOL_SIZE);
+    printf("  - Rate limiting: %d requests per %d seconds\n", RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS);
+    printf("Press Ctrl+C to stop the server\n");
     
     return 0;
 }
@@ -3676,7 +4354,7 @@ int http_server_start(int port) {
 void http_server_stop() {
     if (!http_server_instance) return;
     
-    http_server_instance->running = false;
+    http_server_instance->running_flag = false;
     
     // Close server socket to break accept loop
     if (http_server_instance->server_socket >= 0) {
@@ -3686,9 +4364,14 @@ void http_server_stop() {
     // Wait for accept thread to finish
     pthread_join(http_server_instance->accept_thread, NULL);
     
-    // Cleanup
-    pthread_mutex_destroy(&http_server_instance->queue_mutex);
-    pthread_cond_destroy(&http_server_instance->queue_condition);
+    // Cleanup resources
+    destroy_thread_pool(http_server_instance->thread_pool);
+    if (http_server_instance->file_connection_pool) {
+        destroy_file_connection_pool(http_server_instance->file_connection_pool);
+    }
+    if (http_server_instance->rate_limiter) {
+        destroy_rate_limiter(http_server_instance->rate_limiter);
+    }
     
     free(http_server_instance);
     http_server_instance = NULL;
