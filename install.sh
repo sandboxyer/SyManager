@@ -28,6 +28,7 @@ declare -A NODE_ENTRY_POINTS=(
   # Add your specific entry points below:
   ["core/HUD/HUD.js"]="sy"
   ["core/SyPM.js"]="sypm"
+  ["core/SyDB.js"]="sydb"
   # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
 )
 
@@ -39,6 +40,7 @@ declare -A COMMAND_WORKING_DIR=(
   # Default behavior is "global" if not specified
   ["sy"]="global"           # Uses installation directory
   ["sypm"]="caller"         # Uses caller's current directory
+   ["sydb"]="global" 
 )
 
 # PRESERVATION WHITELIST (OPTIONAL - files to keep during updates)

@@ -3,6 +3,7 @@
   "type": "module",
   "scripts": {
     "sy": "node ./core/HUD/HUD.js",
-    "sypm" :"node ./core/SyPM.js"	
+    "sypm" :"node ./core/SyPM.js"	,
+    "sydb" : "node ./core/SyDB.js"
   }
 }
