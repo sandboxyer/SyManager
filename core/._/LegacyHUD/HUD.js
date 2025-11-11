@@ -1,4 +1,4 @@
-import TerminalHUD from '../TerminalHUD.js'
+import TerminalHUD from '../../TerminalHUD.js'
 import MainMenu from './MainMenu.js'
 
 let HUD = new TerminalHUD()

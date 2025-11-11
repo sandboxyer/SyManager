@@ -1,7 +1,7 @@
     import HUD from './HUD.js'
-    import ClipInstaller from '../util/clip.js'
+    import ClipInstaller from '../../util/clip.js'
     import MainMenu from './MainMenu.js'
-    import System from '../System.js'
+    import System from '../../System.js'
 
     const MiscMenu = async () => {
         let final = {

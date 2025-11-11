@@ -33,7 +33,7 @@ class SyDB {
 
                 console.log("Starting SYDB HTTP Server...")
                 
-             console.log(await C.run('./core/util/SyDB.c',{args : ['--server']}))
+             console.log(await C.run('./core/interfaces/SyDB/SyDB.c',{args : ['--server']}))
                 `,{workingDir : process.cwd()})
             
             this.#serverStarted = true
@@ -418,7 +418,7 @@ class SyDB {
     static async showRoutes() {
         // This would execute the C binary with --routes flag
         try {
-            const result = await C.run('./core/util/SyDB.c', { args: ['--routes'] })
+            const result = await C.run('./core/interfaces/SyDB/SyDB.c', { args: ['--routes'] })
             return {
                 success: true,
                 routes: result
@@ -722,7 +722,7 @@ Examples:
             // Use SyPM to run the server in background (non-blocking)
             await SyPM.run(`import C from "./core/C.js"
                 console.log("Starting SYDB HTTP Server on port ${port}...")
-                console.log(await C.run('./core/util/SyDB.c',{args : ['--server', '${port}']}))
+                console.log(await C.run('./core/interfaces/SyDB/SyDB.c',{args : ['--server', '${port}']}))
             `, { workingDir: process.cwd() })
             
             console.log('SYDB Server started successfully in background')
