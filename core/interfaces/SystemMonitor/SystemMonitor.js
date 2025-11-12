@@ -1,4 +1,4 @@
-import C from '../../util/C.js'
+import C from '../Util/C.js'
 import Monitor from './Monitor.js'
 import MonitorConfig from './MonitorConfig.js'
 
