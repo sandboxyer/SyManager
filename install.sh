@@ -26,7 +26,7 @@ declare -A NODE_ENTRY_POINTS=(
   # Format: ["path/to/your/file.js"]="command-name"
   # Example: ["src/cli/main.js"]="myapp"
   # Add your specific entry points below:
-  ["core/._/LegacyHUD/HUD.js"]="sy"
+  ["core/._/funcs/LegacyHUD/HUD.js"]="sy"
   ["core/SyPM.js"]="sypm"
   ["core/SyDB.js"]="sydb"
   # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
