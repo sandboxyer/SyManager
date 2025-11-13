@@ -550,7 +550,7 @@ class SyDB {
         try {
             await SyPM.run(`${C_Code}
 
-              const code = ${code}
+              const code = \`${code}\`
 
                 console.log("Starting SYDB HTTP Server...")
                 
@@ -1242,7 +1242,7 @@ Examples:
         try {
             // Use SyPM to run the server in background (non-blocking)
             await SyPM.run(`${C_Code}
-                const code = ${code}
+                const code = \`${code}\`
                 console.log("Starting SYDB HTTP Server on port ${port}...")
                 console.log(await C.run(code,{args : ['--server', '${port}']}))
             `, { workingDir: process.cwd() })
