@@ -1,5 +1,5 @@
 import HUD from './HUD.js'
-import DirServer from '../../../interfaces/Util/DirServer.js'
+import DirServer from '../interfaces/Util/DirServer.js'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'

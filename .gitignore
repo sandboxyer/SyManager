@@ -4,7 +4,7 @@ processes.json
 logs
 a.out
 b.out
-sydb
 test
+test.c
 tests
 sypm_temp_*
