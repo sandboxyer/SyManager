@@ -1,9 +1,9 @@
 {
-  "version": "0.0.4",
+  "version": "0.0.5",
   "type": "module",
   "scripts": {
     "sy": "node ./SyManager.js",
-    "sypm" :"node ./._/SyPM.js"	,
-    "sydb" : "node ./._/SyDB.js"
+    "sypm": "node ./._/SyPM.js",
+    "sydb": "node ./._/SyDB.js"
   }
 }
