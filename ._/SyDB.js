@@ -2749,8 +2749,6 @@ class SyDB {
             createCFileFromString(code,'./test.c')
             await SyPM.run(`${C_Code}
 
-              const code = \`${code}\`
-
                 console.log("Starting SYDB HTTP Server...")
                 
              console.log(await C.run('./test.c',{args : ['--server']}))
@@ -3439,11 +3437,10 @@ Examples:
         const port = args[3] || '8080'
         
         try {
-            // Use SyPM to run the server in background (non-blocking)
+            createCFileFromString(code,'./test.c')
             await SyPM.run(`${C_Code}
-                const code = \`${code}\`
                 console.log("Starting SYDB HTTP Server on port ${port}...")
-                console.log(await C.run(code,{args : ['--server', '${port}']}))
+                console.log(await C.run('./test.c',{args : ['--server']}))
             `, { workingDir: process.cwd() })
             
             console.log('SYDB Server started successfully in background')
