@@ -27,6 +27,9 @@ typedef struct {
     char details[1024];
 } TestCase;
 
+// Global variable for CLI command
+char cli_command[32] = "./sydb";
+
 long long get_current_time_ms() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -56,7 +59,7 @@ int count_files_in_directory(const char *path) {
 
 int count_instances_in_collection(const char *database, const char *collection) {
     char command[512];
-    snprintf(command, sizeof(command), "./sydb list %s %s 2>/dev/null | wc -l", database, collection);
+    snprintf(command, sizeof(command), "%s list %s %s 2>/dev/null | wc -l", cli_command, database, collection);
     
     FILE *fp = popen(command, "r");
     if (!fp) return -1;
@@ -73,7 +76,7 @@ int count_instances_in_collection(const char *database, const char *collection) 
 
 char* get_last_inserted_id(const char *database, const char *collection) {
     char command[512];
-    snprintf(command, sizeof(command), "./sydb list %s %s 2>/dev/null | tail -1", database, collection);
+    snprintf(command, sizeof(command), "%s list %s %s 2>/dev/null | tail -1", cli_command, database, collection);
     
     FILE *fp = popen(command, "r");
     if (!fp) return NULL;
@@ -160,7 +163,7 @@ int verify_collection_structure(const char *database, const char *collection) {
 
 int verify_schema_content(const char *database, const char *collection, const char *expected_fields) {
     char command[512];
-    snprintf(command, sizeof(command), "./sydb schema %s %s", database, collection);
+    snprintf(command, sizeof(command), "%s schema %s %s", cli_command, database, collection);
     
     char output[1024];
     if (execute_command_and_capture(command, output, sizeof(output)) != 0) {
@@ -233,21 +236,21 @@ void run_security_tests() {
     TestCase security_tests[] = {
         {
             "Prevent directory traversal in database names",
-            "./sydb create '../evil' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
+            "%s create '../evil' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/../evil'",
             "",
             0, 0, 0, ""
         },
         {
             "Prevent directory traversal in collection names", 
-            "./sydb create testdb '../../evil' --schema --name-string 2>&1 | grep -i 'invalid\\|error' > /dev/null",
+            "%s create testdb '../../evil' --schema --name-string 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/testdb/../../evil'",
             "",
             0, 0, 0, ""
         },
         {
             "Reject invalid database names with special chars",
-            "./sydb create 'invalid/name' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
+            "%s create 'invalid/name' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/invalid/name'", 
             "",
             0, 0, 0, ""
@@ -258,6 +261,16 @@ void run_security_tests() {
     int security_passed = 0;
     
     for (int i = 0; i < security_count; i++) {
+        // Replace %s with cli_command in both command and verification_command
+        char final_command[1024];
+        char final_verification[1024];
+        
+        snprintf(final_command, sizeof(final_command), security_tests[i].command, cli_command);
+        snprintf(final_verification, sizeof(final_verification), security_tests[i].verification_command, cli_command);
+        
+        strcpy(security_tests[i].command, final_command);
+        strcpy(security_tests[i].verification_command, final_verification);
+        
         if (execute_test_with_verification(&security_tests[i])) {
             security_passed++;
         }
@@ -270,11 +283,17 @@ void run_data_integrity_tests() {
     printf("\n" MAGENTA "DATA INTEGRITY TESTS - CRC validation and file structure" RESET "\n");
     
     // Create test database and collection first
-    system("./sydb create integritydb > /dev/null 2>&1");
-    system("./sydb create integritydb data --schema --value-string-req > /dev/null 2>&1");
+    char create_db_cmd[256];
+    char create_collection_cmd[256];
+    char insert_cmd[256];
     
-    // Insert some data
-    system("./sydb create integritydb data --insert-one --value-\"test_data_1\" > /dev/null 2>&1");
+    snprintf(create_db_cmd, sizeof(create_db_cmd), "%s create integritydb > /dev/null 2>&1", cli_command);
+    snprintf(create_collection_cmd, sizeof(create_collection_cmd), "%s create integritydb data --schema --value-string-req > /dev/null 2>&1", cli_command);
+    snprintf(insert_cmd, sizeof(insert_cmd), "%s create integritydb data --insert-one --value-\"test_data_1\" > /dev/null 2>&1", cli_command);
+    
+    system(create_db_cmd);
+    system(create_collection_cmd);
+    system(insert_cmd);
     
     TestCase integrity_tests[] = {
         {
@@ -286,7 +305,7 @@ void run_data_integrity_tests() {
         },
         {
             "Data file grows with inserts",
-            "./sydb create integritydb data --insert-one --value-\"test_data_2\" > /dev/null 2>&1",
+            "%s create integritydb data --insert-one --value-\"test_data_2\" > /dev/null 2>&1",
             "ls -l /tmp/sydb_test/integritydb/data/data.sydb | awk '{print $5}'",
             "",
             0, 0, 0, ""
@@ -297,6 +316,13 @@ void run_data_integrity_tests() {
     int integrity_passed = 0;
     
     for (int i = 0; i < integrity_count; i++) {
+        // Replace %s with cli_command
+        if (strstr(integrity_tests[i].command, "%s") != NULL) {
+            char final_command[1024];
+            snprintf(final_command, sizeof(final_command), integrity_tests[i].command, cli_command);
+            strcpy(integrity_tests[i].command, final_command);
+        }
+        
         if (execute_test_with_verification(&integrity_tests[i])) {
             integrity_passed++;
         }
@@ -310,12 +336,21 @@ void run_performance_test() {
     
     // Setup performance database
     printf("Setting up performance database...\n");
-    system("./sydb create perfdb > /dev/null 2>&1");
-    system("./sydb create perfdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1");
+    char create_db_cmd[256];
+    char create_collection_cmd[256];
+    
+    snprintf(create_db_cmd, sizeof(create_db_cmd), "%s create perfdb > /dev/null 2>&1", cli_command);
+    snprintf(create_collection_cmd, sizeof(create_collection_cmd), "%s create perfdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1", cli_command);
+    
+    system(create_db_cmd);
+    system(create_collection_cmd);
     
     // Test 1: Single insert performance
+    char single_insert_cmd[256];
+    snprintf(single_insert_cmd, sizeof(single_insert_cmd), "%s create perfdb users --insert-one --name-\"SingleUser\" --age-30 --email-\"single@test.com\" > /dev/null 2>&1", cli_command);
+    
     long long start_time = get_current_time_ms();
-    system("./sydb create perfdb users --insert-one --name-\"SingleUser\" --age-30 --email-\"single@test.com\" > /dev/null 2>&1");
+    system(single_insert_cmd);
     long long single_insert_time = get_current_time_ms() - start_time;
     
     // Test 2: Batch insert performance
@@ -328,8 +363,8 @@ void run_performance_test() {
     for (int i = 0; i < batch_size; i++) {
         char command[512];
         snprintf(command, sizeof(command),
-                 "./sydb create perfdb users --insert-one --name-\"User%d\" --age-%d --email-\"user%d@test.com\" > /dev/null 2>&1",
-                 i, 20 + (i % 40), i);
+                 "%s create perfdb users --insert-one --name-\"User%d\" --age-%d --email-\"user%d@test.com\" > /dev/null 2>&1",
+                 cli_command, i, 20 + (i % 40), i);
         
         if (system(command) == 0) {
             success_count++;
@@ -341,8 +376,11 @@ void run_performance_test() {
     
     // Test 3: Query performance
     printf("Testing query performance...\n");
+    char query_cmd[256];
+    snprintf(query_cmd, sizeof(query_cmd), "%s find perfdb users --where \"age:25\" > /dev/null 2>&1", cli_command);
+    
     start_time = get_current_time_ms();
-    system("./sydb find perfdb users --where \"age:25\" > /dev/null 2>&1");
+    system(query_cmd);
     long long query_time = get_current_time_ms() - start_time;
     
     // Test 4: Count verification
@@ -371,42 +409,42 @@ void run_edge_case_tests() {
     TestCase edge_tests[] = {
         {
             "Handle duplicate database creation",
-            "./sydb create testdb 2>&1 | grep -i 'exist\\|error' > /dev/null",
-            "./sydb list | grep -c testdb",
+            "%s create testdb 2>&1 | grep -i 'exist\\|error' > /dev/null",
+            "%s list | grep -c testdb",
             "",
             0, 0, 0, ""
         },
         {
             "Handle duplicate collection creation",
-            "./sydb create testdb users --schema --name-string 2>&1 | grep -i 'exist\\|error' > /dev/null", 
-            "./sydb list testdb | grep -c users",
+            "%s create testdb users --schema --name-string 2>&1 | grep -i 'exist\\|error' > /dev/null", 
+            "%s list testdb | grep -c users",
             "",
             0, 0, 0, ""
         },
         {
             "Handle missing database queries",
-            "./sydb find nonexistentdb users --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
+            "%s find nonexistentdb users --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
             "echo 'Error handled'",
             "",
             0, 0, 0, ""
         },
         {
             "Handle missing collection queries", 
-            "./sydb find testdb nonexistent --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
+            "%s find testdb nonexistent --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
             "echo 'Error handled'",
             "",
             0, 0, 0, ""
         },
         {
             "Handle malformed queries",
-            "./sydb find testdb users --where \"invalid-query-format\" 2>&1 | grep -i 'error\\|invalid' > /dev/null",
+            "%s find testdb users --where \"invalid-query-format\" 2>&1 | grep -i 'error\\|invalid' > /dev/null",
             "echo 'Error handled'", 
             "",
             0, 0, 0, ""
         },
         {
             "Handle schema validation failures",
-            "./sydb create testdb users --insert-one --invalid-field-\"value\" 2>&1 | grep -i 'error\\|valid' > /dev/null",
+            "%s create testdb users --insert-one --invalid-field-\"value\" 2>&1 | grep -i 'error\\|valid' > /dev/null",
             "echo 'Validation worked'",
             "",
             0, 0, 0, ""
@@ -417,6 +455,16 @@ void run_edge_case_tests() {
     int edge_passed = 0;
     
     for (int i = 0; i < edge_count; i++) {
+        // Replace %s with cli_command in both command and verification_command
+        char final_command[1024];
+        char final_verification[1024];
+        
+        snprintf(final_command, sizeof(final_command), edge_tests[i].command, cli_command);
+        snprintf(final_verification, sizeof(final_verification), edge_tests[i].verification_command, cli_command);
+        
+        strcpy(edge_tests[i].command, final_command);
+        strcpy(edge_tests[i].verification_command, final_verification);
+        
         if (execute_test_with_verification(&edge_tests[i])) {
             edge_passed++;
         }
@@ -514,11 +562,36 @@ void print_detailed_results(int passed, int total, long long total_time, int sec
     printf("===============================================\n\n");
 }
 
-int main() {
+void print_usage(const char *program_name) {
+    printf("Usage: %s [OPTIONS]\n", program_name);
+    printf("Options:\n");
+    printf("  --cli           Use global 'sydb' command instead of './sydb'\n");
+    printf("  --help, -h      Show this help message\n");
+    printf("\nExamples:\n");
+    printf("  %s              # Use ./sydb (default)\n", program_name);
+    printf("  %s --cli        # Use global 'sydb' command\n", program_name);
+}
+
+int main(int argc, char *argv[]) {
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--cli") == 0) {
+            strcpy(cli_command, "sydb");
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, RED "Unknown option: %s\n" RESET, argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+    
     setenv("SYDB_BASE_DIR", "/tmp/sydb_test", 1);
     
     printf(CYAN "SYDB COMPREHENSIVE TEST SUITE\n" RESET);
-    printf("===============================================\n\n");
+    printf("===============================================\n");
+    printf("Using command: " YELLOW "%s" RESET "\n\n", cli_command);
     
     // Cleanup previous test
     system("rm -rf /tmp/sydb_test > /dev/null 2>&1");
@@ -528,22 +601,22 @@ int main() {
         // Database Operations with verification
         {
             "Create database 'testdb' and verify structure", 
-            "./sydb create testdb > /dev/null 2>&1",
+            "%s create testdb > /dev/null 2>&1",
             "test -d '/tmp/sydb_test/testdb'",
             "",
             0, 0, 0, ""
         },
         {
             "Create second database 'testdb2' and verify", 
-            "./sydb create testdb2 > /dev/null 2>&1",
+            "%s create testdb2 > /dev/null 2>&1",
             "test -d '/tmp/sydb_test/testdb2'", 
             "",
             0, 0, 0, ""
         },
         {
             "List databases and verify both exist",
-            "./sydb list > /dev/null 2>&1", 
-            "./sydb list | grep -c 'testdb\\|testdb2'",
+            "%s list > /dev/null 2>&1", 
+            "%s list | grep -c 'testdb\\|testdb2'",
             "2",
             0, 0, 0, ""
         },
@@ -551,22 +624,22 @@ int main() {
         // Collection Operations with deep verification
         {
             "Create 'users' collection with schema and verify files",
-            "./sydb create testdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1",
+            "%s create testdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1",
             "test -f '/tmp/sydb_test/testdb/users/schema.txt' && test -f '/tmp/sydb_test/testdb/users/data.sydb'",
             "",
             0, 0, 0, ""
         },
         {
             "Create 'products' collection and verify structure",
-            "./sydb create testdb products --schema --name-string-req --price-float > /dev/null 2>&1",
+            "%s create testdb products --schema --name-string-req --price-float > /dev/null 2>&1",
             "test -f '/tmp/sydb_test/testdb/products/schema.txt'",
             "",
             0, 0, 0, ""
         },
         {
             "View users schema and verify output format",
-            "./sydb schema testdb users > /dev/null 2>&1",
-            "./sydb schema testdb users | grep -q 'Field.*Type'",
+            "%s schema testdb users > /dev/null 2>&1",
+            "%s schema testdb users | grep -q 'Field.*Type'",
             "",
             0, 0, 0, ""
         },
@@ -574,22 +647,22 @@ int main() {
         // Insert Operations with ID verification and count tracking
         {
             "Insert user record and verify by counting instances",
-            "./sydb create testdb users --insert-one --name-\"John Doe\" --age-30 --email-\"john@test.com\" > /dev/null 2>&1",
-            "./sydb list testdb users | grep -c '\"_id\"'",
+            "%s create testdb users --insert-one --name-\"John Doe\" --age-30 --email-\"john@test.com\" > /dev/null 2>&1",
+            "%s list testdb users | grep -c '\"_id\"'",
             "1",
             0, 0, 0, ""
         },
         {
             "Insert second user and verify total count",
-            "./sydb create testdb users --insert-one --name-\"Jane Smith\" --age-25 --email-\"jane@test.com\" > /dev/null 2>&1", 
-            "./sydb list testdb users | grep -c '\"_id\"'",
+            "%s create testdb users --insert-one --name-\"Jane Smith\" --age-25 --email-\"jane@test.com\" > /dev/null 2>&1", 
+            "%s list testdb users | grep -c '\"_id\"'",
             "2",
             0, 0, 0, ""
         },
         {
             "Insert product record and verify creation",
-            "./sydb create testdb products --insert-one --name-\"Test Product\" --price-19.99 > /dev/null 2>&1",
-            "./sydb list testdb products | grep -c 'Test Product'",
+            "%s create testdb products --insert-one --name-\"Test Product\" --price-19.99 > /dev/null 2>&1",
+            "%s list testdb products | grep -c 'Test Product'",
             "1",
             0, 0, 0, ""
         },
@@ -597,22 +670,22 @@ int main() {
         // Query Operations with exact match verification
         {
             "Query users by age and verify exact match",
-            "./sydb find testdb users --where \"age:30\" > /dev/null 2>&1",
-            "./sydb find testdb users --where \"age:30\" | grep -c 'John Doe'",
+            "%s find testdb users --where \"age:30\" > /dev/null 2>&1",
+            "%s find testdb users --where \"age:30\" | grep -c 'John Doe'",
             "1", 
             0, 0, 0, ""
         },
         {
             "Query products by name and verify result",
-            "./sydb find testdb products --where \"name:Test Product\" > /dev/null 2>&1",
-            "./sydb find testdb products --where \"name:Test Product\" | grep -c 'Test Product'",
+            "%s find testdb products --where \"name:Test Product\" > /dev/null 2>&1",
+            "%s find testdb products --where \"name:Test Product\" | grep -c 'Test Product'",
             "1",
             0, 0, 0, ""
         },
         {
             "Query with non-existent condition returns empty",
-            "./sydb find testdb users --where \"age:999\" > /dev/null 2>&1",
-            "./sydb find testdb users --where \"age:999\" | wc -l",
+            "%s find testdb users --where \"age:999\" > /dev/null 2>&1",
+            "%s find testdb users --where \"age:999\" | wc -l",
             "0",
             0, 0, 0, ""
         },
@@ -620,22 +693,22 @@ int main() {
         // List Operations with count verification
         {
             "List collections in testdb and verify count",
-            "./sydb list testdb > /dev/null 2>&1",
-            "./sydb list testdb | grep -c 'users\\|products'", 
+            "%s list testdb > /dev/null 2>&1",
+            "%s list testdb | grep -c 'users\\|products'", 
             "2",
             0, 0, 0, ""
         },
         {
             "List users and verify record count",
-            "./sydb list testdb users > /dev/null 2>&1",
-            "./sydb list testdb users | grep -c '\"_id\"'",
+            "%s list testdb users > /dev/null 2>&1",
+            "%s list testdb users | grep -c '\"_id\"'",
             "2",
             0, 0, 0, ""
         },
         {
             "Verify UUID format in inserted records",
-            "./sydb list testdb users | head -1 > /dev/null 2>&1",
-            "./sydb list testdb users | head -1 | grep -Eo '\"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\"' | wc -l",
+            "%s list testdb users | head -1 > /dev/null 2>&1",
+            "%s list testdb users | head -1 | grep -Eo '\"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\"' | wc -l",
             "1",
             0, 0, 0, ""
         }
@@ -644,6 +717,18 @@ int main() {
     int total_tests = sizeof(tests) / sizeof(tests[0]);
     int passed_tests = 0;
     long long total_duration = 0;
+    
+    // Replace %s with cli_command in all test commands
+    for (int i = 0; i < total_tests; i++) {
+        char final_command[1024];
+        char final_verification[1024];
+        
+        snprintf(final_command, sizeof(final_command), tests[i].command, cli_command);
+        snprintf(final_verification, sizeof(final_verification), tests[i].verification_command, cli_command);
+        
+        strcpy(tests[i].command, final_command);
+        strcpy(tests[i].verification_command, final_verification);
+    }
     
     // Run all core tests
     for (int i = 0; i < total_tests; i++) {
