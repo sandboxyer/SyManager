@@ -520,7 +520,7 @@ char* http_api_list_databases();
 char* http_api_create_database(const char* database_name);
 char* http_api_delete_database(const char* database_name);
 char* http_api_list_collections(const char* database_name);
-char* http_api_create_collection(const char* database_name, const char* collection_name, const char* schema_json);
+char* http_api_create_collection(const char* database_name, const char* request_body);
 char* http_api_delete_collection(const char* database_name, const char* collection_name);
 char* http_api_get_collection_schema(const char* database_name, const char* collection_name);
 char* http_api_list_instances(const char* database_name, const char* collection_name, const char* query);
@@ -535,6 +535,7 @@ char* create_success_response_with_data(const char* data_type, const char* data_
 char* create_error_response(const char* error_message);
 char* extract_path_parameter(const char* path, const char* prefix);
 char* url_decode(const char* encoded_string);
+void http_route_request(http_client_context_t* context);
 
 // ==================== HIGH-PERFORMANCE IMPLEMENTATIONS ====================
 
@@ -1025,7 +1026,7 @@ int parse_api_path_optimized(const char* path, path_components_t* components) {
     if (!database_name_end) {
         // Only database name provided
         size_t database_name_length = strlen(current_position);
-        if (database_name_length >= MAXIMUM_NAME_LENGTH) {
+        if (database_name_length >= MAXIMUM_NAME_LENGTH || database_name_length == 0) {
             return -1;
         }
         strncpy(components->database_name, current_position, database_name_length);
@@ -1034,7 +1035,7 @@ int parse_api_path_optimized(const char* path, path_components_t* components) {
     }
     
     size_t database_name_length = database_name_end - current_position;
-    if (database_name_length >= MAXIMUM_NAME_LENGTH) {
+    if (database_name_length >= MAXIMUM_NAME_LENGTH || database_name_length == 0) {
         return -1;
     }
     strncpy(components->database_name, current_position, database_name_length);
@@ -1042,45 +1043,57 @@ int parse_api_path_optimized(const char* path, path_components_t* components) {
     
     current_position = database_name_end + 1;
     
-    // Check for /collections/
-    if (strncmp(current_position, "collections/", 12) != 0) {
-        return -1;
+    // Check if we have more path components
+    if (strlen(current_position) == 0) {
+        return 0;
     }
-    current_position += 12;
     
-    // Extract collection name
-    const char* collection_name_end = strchr(current_position, '/');
-    if (!collection_name_end) {
-        // Only collection name provided
-        size_t collection_name_length = strlen(current_position);
-        if (collection_name_length >= MAXIMUM_NAME_LENGTH) {
+    // Check for collections
+    if (strncmp(current_position, "collections/", 12) == 0) {
+        current_position += 12;
+        
+        // Extract collection name
+        const char* collection_name_end = strchr(current_position, '/');
+        if (!collection_name_end) {
+            // Only collection name provided
+            size_t collection_name_length = strlen(current_position);
+            if (collection_name_length >= MAXIMUM_NAME_LENGTH || collection_name_length == 0) {
+                return -1;
+            }
+            strncpy(components->collection_name, current_position, collection_name_length);
+            components->collection_name[collection_name_length] = '\0';
+            return 0;
+        }
+        
+        size_t collection_name_length = collection_name_end - current_position;
+        if (collection_name_length >= MAXIMUM_NAME_LENGTH || collection_name_length == 0) {
             return -1;
         }
         strncpy(components->collection_name, current_position, collection_name_length);
         components->collection_name[collection_name_length] = '\0';
-        return 0;
-    }
-    
-    size_t collection_name_length = collection_name_end - current_position;
-    if (collection_name_length >= MAXIMUM_NAME_LENGTH) {
-        return -1;
-    }
-    strncpy(components->collection_name, current_position, collection_name_length);
-    components->collection_name[collection_name_length] = '\0';
-    
-    current_position = collection_name_end + 1;
-    
-    // Check for /instances/
-    if (strncmp(current_position, "instances/", 10) == 0) {
-        current_position += 10;
         
-        // Extract instance ID
-        size_t instance_id_length = strlen(current_position);
-        if (instance_id_length >= UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE) {
-            return -1;
+        current_position = collection_name_end + 1;
+        
+        // Check for instances
+        if (strncmp(current_position, "instances/", 10) == 0) {
+            current_position += 10;
+            
+            // Extract instance ID
+            size_t instance_id_length = strlen(current_position);
+            if (instance_id_length >= UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE || instance_id_length == 0) {
+                return -1;
+            }
+            strncpy(components->instance_id, current_position, instance_id_length);
+            components->instance_id[instance_id_length] = '\0';
         }
-        strncpy(components->instance_id, current_position, instance_id_length);
-        components->instance_id[instance_id_length] = '\0';
+        else if (strcmp(current_position, "schema") == 0) {
+            // This is a schema request - collection name is already set
+            return 0;
+        }
+        else if (strcmp(current_position, "instances") == 0) {
+            // This is an instances list request - collection name is already set
+            return 0;
+        }
     }
     
     return 0;
@@ -1316,28 +1329,36 @@ char* http_api_list_collections(const char* database_name) {
     return response;
 }
 
-char* http_api_create_collection(const char* database_name, const char* collection_name, const char* schema_json) {
+char* http_api_create_collection(const char* database_name, const char* request_body) {
     if (!database_name || strlen(database_name) == 0) {
         return create_error_response("Database name is required");
     }
     
-    if (!collection_name || strlen(collection_name) == 0) {
-        return create_error_response("Collection name is required");
+    if (!request_body || strlen(request_body) == 0) {
+        return create_error_response("Request body is required");
     }
     
     if (!validate_database_name(database_name)) {
         return create_error_response("Invalid database name");
     }
     
-    if (!validate_collection_name(collection_name)) {
-        return create_error_response("Invalid collection name");
-    }
-    
     if (!database_secure_exists(database_name)) {
         return create_error_response("Database does not exist");
     }
     
+    // Extract collection name and schema from request body
+    char* collection_name = json_get_string_value(request_body, "name");
+    if (!collection_name || strlen(collection_name) == 0) {
+        return create_error_response("Collection name is required");
+    }
+    
+    if (!validate_collection_name(collection_name)) {
+        free(collection_name);
+        return create_error_response("Invalid collection name");
+    }
+    
     if (collection_secure_exists(database_name, collection_name)) {
+        free(collection_name);
         return create_error_response("Collection already exists");
     }
     
@@ -1345,18 +1366,16 @@ char* http_api_create_collection(const char* database_name, const char* collecti
     field_schema_t fields[MAXIMUM_FIELDS];
     int field_count = 0;
     
-    if (!schema_json) {
-        return create_error_response("Schema JSON is required");
-    }
-    
     // Simple JSON parsing for schema
-    const char* schema_start = strstr(schema_json, "\"schema\"");
+    const char* schema_start = strstr(request_body, "\"schema\"");
     if (!schema_start) {
+        free(collection_name);
         return create_error_response("Invalid schema format: missing 'schema' field");
     }
     
     schema_start = strchr(schema_start, '[');
     if (!schema_start) {
+        free(collection_name);
         return create_error_response("Invalid schema format: missing array");
     }
     
@@ -1396,10 +1415,13 @@ char* http_api_create_collection(const char* database_name, const char* collecti
     }
     
     if (field_count == 0) {
+        free(collection_name);
         return create_error_response("No valid fields found in schema");
     }
     
     int result = create_secure_collection(database_name, collection_name, fields, field_count);
+    free(collection_name);
+    
     if (result == 0) {
         return create_success_response("Collection created successfully");
     } else {
@@ -1739,13 +1761,16 @@ void http_route_request(http_client_context_t* context) {
     char* path = context->request.path;
     char* method = context->request.method;
     
+    printf("Routing request: %s %s\n", method, path); // Debug logging
+    
     // Use optimized path parsing when possible
     path_components_t path_components;
     if (parse_api_path_optimized(path, &path_components) == 0) {
         // Route using optimized path components
         if (strcmp(method, "GET") == 0) {
-            if (strcmp(path_components.database_name, "") != 0 && 
-                strcmp(path_components.collection_name, "") == 0) {
+            if (strlen(path_components.database_name) > 0 && 
+                strlen(path_components.collection_name) == 0 &&
+                strlen(path_components.instance_id) == 0) {
                 // GET /api/databases/{database_name} - List collections
                 char* response_json = http_api_list_collections(path_components.database_name);
                 if (response_json) {
@@ -1756,10 +1781,73 @@ void http_route_request(http_client_context_t* context) {
                 }
                 return;
             }
+            else if (strlen(path_components.database_name) > 0 && 
+                     strlen(path_components.collection_name) > 0 &&
+                     strlen(path_components.instance_id) == 0) {
+                // GET /api/databases/{database_name}/collections/{collection_name}/instances
+                char* query = context->request.query_string;
+                char* query_param = NULL;
+                
+                if (query) {
+                    char* query_start = strstr(query, "query=");
+                    if (query_start) {
+                        query_param = query_start + 6;
+                        // Extract just the query value (before any &)
+                        char* amp_pos = strchr(query_param, '&');
+                        if (amp_pos) {
+                            *amp_pos = '\0';
+                        }
+                    }
+                }
+                
+                char* response_json = http_api_list_instances(path_components.database_name, 
+                                                             path_components.collection_name, 
+                                                             query_param);
+                if (response_json) {
+                    http_response_set_json_body(&context->response, response_json);
+                    free(response_json);
+                } else {
+                    http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Failed to list instances\"}");
+                }
+                return;
+            }
+            else if (strstr(path, "/schema") != NULL) {
+                // GET /api/databases/{database_name}/collections/{collection_name}/schema
+                char* response_json = http_api_get_collection_schema(path_components.database_name, 
+                                                                     path_components.collection_name);
+                if (response_json) {
+                    http_response_set_json_body(&context->response, response_json);
+                    free(response_json);
+                } else {
+                    http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Failed to get schema\"}");
+                }
+                return;
+            }
+        }
+        else if (strcmp(method, "POST") == 0) {
+            if (strlen(path_components.database_name) > 0 && 
+                strlen(path_components.collection_name) > 0 &&
+                strlen(path_components.instance_id) == 0) {
+                // POST /api/databases/{database_name}/collections/{collection_name}/instances
+                if (context->request.body) {
+                    char* response_json = http_api_insert_instance(path_components.database_name, 
+                                                                  path_components.collection_name, 
+                                                                  context->request.body);
+                    if (response_json) {
+                        http_response_set_json_body(&context->response, response_json);
+                        free(response_json);
+                    } else {
+                        http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Failed to insert instance\"}");
+                    }
+                } else {
+                    http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Request body is required\"}");
+                }
+                return;
+            }
         }
     }
     
-    // Fallback to original routing for complex paths
+    // Fallback to original routing for other endpoints
     if (strcmp(method, "GET") == 0) {
         if (strcmp(path, "/api/databases") == 0) {
             // List all databases
@@ -1789,7 +1877,7 @@ void http_route_request(http_client_context_t* context) {
                     http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Invalid database name\"}");
                 }
             }
-            else if (strstr(path, "/collections/") != NULL && strstr(path, "/instances") != NULL) {
+            else if (strstr(path, "/collections") != NULL && strstr(path, "/instances") != NULL) {
                 // GET /api/databases/{database_name}/collections/{collection_name}/instances
                 char* database_name = extract_path_parameter(path, "/api/databases");
                 char* temp = extract_path_parameter(path, "/api/databases/");
@@ -1801,6 +1889,11 @@ void http_route_request(http_client_context_t* context) {
                     char* query_start = strstr(query, "query=");
                     if (query_start) {
                         query_param = query_start + 6;
+                        // Extract just the query value
+                        char* amp_pos = strchr(query_param, '&');
+                        if (amp_pos) {
+                            *amp_pos = '\0';
+                        }
                     }
                 }
                 
@@ -1872,16 +1965,10 @@ void http_route_request(http_client_context_t* context) {
             char* database_name = extract_path_parameter(path, "/api/databases");
             
             if (database_name && context->request.body) {
-                char* collection_name = json_get_string_value(context->request.body, "name");
-                if (collection_name) {
-                    char* response_json = http_api_create_collection(database_name, collection_name, context->request.body);
-                    if (response_json) {
-                        http_response_set_json_body(&context->response, response_json);
-                        free(response_json);
-                    }
-                    free(collection_name);
-                } else {
-                    http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Collection name is required\"}");
+                char* response_json = http_api_create_collection(database_name, context->request.body);
+                if (response_json) {
+                    http_response_set_json_body(&context->response, response_json);
+                    free(response_json);
                 }
             } else {
                 http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Database name and request body are required\"}");
@@ -1920,35 +2007,6 @@ void http_route_request(http_client_context_t* context) {
             } else {
                 http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Request body is required\"}");
             }
-        }
-        else {
-            context->response.status_code = 404;
-            http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Endpoint not found\"}");
-        }
-    }
-    else if (strcmp(method, "PUT") == 0) {
-        if (strncmp(path, "/api/databases/", 15) == 0 && strstr(path, "/instances/") != NULL) {
-            // PUT /api/databases/{database_name}/collections/{collection_name}/instances/{instance_id}
-            char* database_name = extract_path_parameter(path, "/api/databases");
-            char* temp = extract_path_parameter(path, "/api/databases/");
-            char* collection_name = extract_path_parameter(temp, "/collections");
-            char* instance_temp = extract_path_parameter(path, "/instances/");
-            char* instance_id = instance_temp;
-            
-            if (database_name && collection_name && instance_id && context->request.body) {
-                char* response_json = http_api_update_instance(database_name, collection_name, instance_id, context->request.body);
-                if (response_json) {
-                    http_response_set_json_body(&context->response, response_json);
-                    free(response_json);
-                }
-            } else {
-                http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Database name, collection name, instance ID, and request body are required\"}");
-            }
-            
-            if (database_name) free(database_name);
-            if (temp) free(temp);
-            if (collection_name) free(collection_name);
-            if (instance_temp) free(instance_temp);
         }
         else {
             context->response.status_code = 404;
