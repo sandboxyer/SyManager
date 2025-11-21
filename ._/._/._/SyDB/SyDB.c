@@ -1768,6 +1768,21 @@ void http_route_request(http_client_context_t* context) {
                 }
                 return;
             }
+
+            else if (strlen(path_components.database_name) > 0 && 
+         strlen(path_components.collection_name) > 0 &&
+         strstr(path, "/schema") != NULL) {
+    // GET /api/databases/{database_name}/collections/{collection_name}/schema
+    char* response_json = http_api_get_collection_schema(path_components.database_name, 
+                                                         path_components.collection_name);
+    if (response_json) {
+        http_response_set_json_body(&context->response, response_json);
+        free(response_json);
+    } else {
+        http_response_set_json_body(&context->response, "{\"success\":false,\"error\":\"Failed to get schema\"}");
+    }
+    return;
+}
             else if (strlen(path_components.database_name) > 0 && 
                      strlen(path_components.collection_name) > 0 &&
                      strlen(path_components.instance_id) == 0) {
