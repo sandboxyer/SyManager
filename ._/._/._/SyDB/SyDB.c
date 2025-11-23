@@ -89,6 +89,7 @@ typedef struct {
     struct sockaddr_in client_address;
     http_request_t request;
     http_response_t response;
+     bool verbose_mode; 
 } http_client_context_t;
 
 // ==================== HIGH-PERFORMANCE THREAD POOL ====================
@@ -148,6 +149,7 @@ typedef struct {
     thread_pool_t* thread_pool;
     file_connection_pool_t* file_connection_pool;
     rate_limiter_t* rate_limiter;
+    bool verbose_mode; 
 } http_server_t;
 
 // ==================== HTTP ROUTES DOCUMENTATION ====================
@@ -511,7 +513,7 @@ int http_parse_request(const char* request_data, size_t request_length, http_req
 int http_send_response(int client_socket, http_response_t* response);
 void* http_client_handler(void* argument);
 void* http_accept_loop(void* argument);
-int http_server_start(int port);
+int http_server_start(int port, bool verbose_mode);
 void http_server_stop();
 void http_server_handle_signal(int signal);
 
@@ -3980,12 +3982,14 @@ void print_secure_usage_information() {
     printf("  sydb list <database_name>\n");
     printf("  sydb list <database_name> <collection_name>\n");
     printf("  sydb --server [port]          # Start HTTP server\n");
+    printf("  sydb --server --verbose       # Start HTTP server with extreme logging\n");
     printf("  sydb --routes                 # Show all HTTP API routes and schemas\n");
     printf("\nField types: string, int, float, bool, array, object\n");
     printf("Add -req for required fields\n");
     printf("Add -idx for indexed fields (improves query performance)\n");
     printf("Query format: field:value,field2:value2 (multiple conditions supported)\n");
     printf("Server mode: Starts HTTP server on specified port (default: 8080)\n");
+    printf("Verbose mode: Extreme logging for server operations and requests\n");
 }
 
 int parse_secure_insert_data_from_arguments(int argument_count, char* argument_values[], int start_index, 
@@ -4278,17 +4282,44 @@ void* http_client_handler(void* client_context_argument) {
     http_client_context_t* client_context = (http_client_context_t*)client_context_argument;
     if (!client_context) return NULL;
     
+    bool verbose_mode = client_context->verbose_mode;
+    
+    if (verbose_mode) {
+        char client_ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_context->client_address.sin_addr, client_ip, sizeof(client_ip));
+        printf("VERBOSE: Client handler started for %s:%d (socket fd=%d)\n", 
+               client_ip, ntohs(client_context->client_address.sin_port), client_context->client_socket);
+        printf("VERBOSE: Request: %s %s\n", client_context->request.method, client_context->request.path);
+    }
+    
     // Route the request
+    if (verbose_mode) {
+        printf("VERBOSE: Routing request to appropriate handler\n");
+    }
     http_route_request(client_context);
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Request processed, status code: %d\n", client_context->response.status_code);
+        printf("VERBOSE: Sending response to client\n");
+    }
     
     // Send response
     http_send_response(client_context->client_socket, &client_context->response);
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Response sent successfully\n");
+        printf("VERBOSE: Cleaning up client context\n");
+    }
     
     // Cleanup
     http_server_free_request(&client_context->request);
     http_server_free_response(&client_context->response);
     close(client_context->client_socket);
     free(client_context);
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Client handler completed\n");
+    }
     
     return NULL;
 }
@@ -4297,7 +4328,18 @@ void* http_accept_loop(void* server_argument) {
     http_server_t* http_server = (http_server_t*)server_argument;
     if (!http_server) return NULL;
     
+    bool verbose_mode = http_server->verbose_mode;
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Accept loop started for server on port %d\n", http_server->port_number);
+        printf("VERBOSE: Server running flag: %s\n", http_server->running_flag ? "true" : "false");
+    }
+    
     while (http_server->running_flag) {
+        if (verbose_mode) {
+            printf("VERBOSE: Accept loop waiting for new connection...\n");
+        }
+        
         struct sockaddr_in client_address;
         socklen_t client_address_length = sizeof(client_address);
         
@@ -4307,9 +4349,20 @@ void* http_accept_loop(void* server_argument) {
         
         if (client_socket < 0) {
             if (http_server->running_flag) {
+                if (verbose_mode) {
+                    printf("VERBOSE: Accept failed: %s\n", strerror(errno));
+                    printf("VERBOSE: Server running flag: %s\n", http_server->running_flag ? "true" : "false");
+                }
                 perror("accept failed");
             }
             continue;
+        }
+        
+        if (verbose_mode) {
+            char client_ip[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_address.sin_addr, client_ip, sizeof(client_ip));
+            printf("VERBOSE: New connection accepted from %s:%d (socket fd=%d)\n", 
+                   client_ip, ntohs(client_address.sin_port), client_socket);
         }
         
         // Set socket timeout
@@ -4319,12 +4372,24 @@ void* http_accept_loop(void* server_argument) {
         setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         
+        if (verbose_mode) {
+            printf("VERBOSE: Socket timeouts set to 30 seconds for fd=%d\n", client_socket);
+        }
+        
         // Check rate limiting
         char client_ip_address[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_address.sin_addr, client_ip_address, sizeof(client_ip_address));
         
+        if (verbose_mode) {
+            printf("VERBOSE: Checking rate limit for client IP: %s\n", client_ip_address);
+        }
+        
         if (!check_rate_limit(http_server->rate_limiter, client_ip_address)) {
             // Rate limited - send 429 Too Many Requests
+            if (verbose_mode) {
+                printf("VERBOSE: Rate limit exceeded for client %s\n", client_ip_address);
+                printf("VERBOSE: Sending 429 Too Many Requests response\n");
+            }
             http_response_t rate_limit_response;
             http_server_initialize_response(&rate_limit_response);
             rate_limit_response.status_code = 429;
@@ -4333,7 +4398,15 @@ void* http_accept_loop(void* server_argument) {
             http_send_response(client_socket, &rate_limit_response);
             http_server_free_response(&rate_limit_response);
             close(client_socket);
+            if (verbose_mode) {
+                printf("VERBOSE: Connection closed for rate-limited client %s\n", client_ip_address);
+            }
             continue;
+        }
+        
+        if (verbose_mode) {
+            printf("VERBOSE: Rate limit check passed for client %s\n", client_ip_address);
+            printf("VERBOSE: Reading request from socket fd=%d\n", client_socket);
         }
         
         // Read request
@@ -4343,19 +4416,46 @@ void* http_accept_loop(void* server_argument) {
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             
+            if (verbose_mode) {
+                printf("VERBOSE: Received %zd bytes from client %s\n", bytes_read, client_ip_address);
+                printf("VERBOSE: Request data (first 500 chars):\n%.500s\n", buffer);
+            }
+            
             http_client_context_t* client_context = malloc(sizeof(http_client_context_t));
             if (client_context) {
                 client_context->client_socket = client_socket;
                 client_context->client_address = client_address;
+                client_context->verbose_mode = verbose_mode; // Pass verbose mode to context
+                
+                if (verbose_mode) {
+                    printf("VERBOSE: Parsing HTTP request\n");
+                }
                 
                 if (http_parse_request(buffer, bytes_read, &client_context->request) == 0) {
+                    if (verbose_mode) {
+                        printf("VERBOSE: Request parsed successfully: %s %s\n", 
+                               client_context->request.method, client_context->request.path);
+                        printf("VERBOSE: Submitting task to thread pool\n");
+                    }
+                    
                     // Submit to thread pool for processing
                     if (thread_pool_submit_task(http_server->thread_pool, client_context) != 0) {
                         // Thread pool submission failed, handle directly
+                        if (verbose_mode) {
+                            printf("VERBOSE: Thread pool submission failed, handling request directly\n");
+                        }
                         http_client_handler(client_context);
+                    } else {
+                        if (verbose_mode) {
+                            printf("VERBOSE: Task submitted to thread pool successfully\n");
+                        }
                     }
                 } else {
                     // Parse failed, send bad request
+                    if (verbose_mode) {
+                        printf("VERBOSE: HTTP request parsing failed\n");
+                        printf("VERBOSE: Sending 400 Bad Request response\n");
+                    }
                     http_response_t bad_request_response;
                     http_server_initialize_response(&bad_request_response);
                     bad_request_response.status_code = 400;
@@ -4365,65 +4465,134 @@ void* http_accept_loop(void* server_argument) {
                     http_server_free_response(&bad_request_response);
                     close(client_socket);
                     free(client_context);
+                    if (verbose_mode) {
+                        printf("VERBOSE: Connection closed after bad request\n");
+                    }
                 }
             } else {
+                if (verbose_mode) {
+                    printf("VERBOSE: Failed to allocate memory for client context\n");
+                }
                 close(client_socket);
             }
         } else {
+            if (verbose_mode) {
+                if (bytes_read == 0) {
+                    printf("VERBOSE: Client disconnected (bytes_read=0) for socket fd=%d\n", client_socket);
+                } else {
+                    printf("VERBOSE: recv failed: %s for socket fd=%d\n", strerror(errno), client_socket);
+                }
+            }
             close(client_socket);
         }
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Accept loop exiting (running_flag=false)\n");
+        printf("VERBOSE: Server shutdown detected\n");
     }
     
     return NULL;
 }
 
-int http_server_start(int port) {
+int http_server_start(int port, bool verbose_mode) {
     if (http_server_instance) {
         fprintf(stderr, "HTTP server is already running\n");
+        if (verbose_mode) {
+            printf("VERBOSE: Server start failed - instance already exists\n");
+        }
         return -1;
     }
     
+    if (verbose_mode) {
+        printf("VERBOSE: Initializing http_server_t structure\n");
+        printf("VERBOSE: Port=%d, Verbose mode=%s\n", port, verbose_mode ? "true" : "false");
+    }
+    
     http_server_t* http_server = malloc(sizeof(http_server_t));
-    if (!http_server) return -1;
+    if (!http_server) {
+        if (verbose_mode) {
+            printf("VERBOSE: Failed to allocate memory for http_server_t\n");
+        }
+        return -1;
+    }
     
     memset(http_server, 0, sizeof(http_server_t));
     http_server->port_number = port;
     http_server->running_flag = true;
+    http_server->verbose_mode = verbose_mode; // Store verbose mode in server instance
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Creating thread pool with %d workers and %d queue capacity\n", 
+               THREAD_POOL_WORKER_COUNT, THREAD_POOL_QUEUE_CAPACITY);
+    }
     
     // Create thread pool
     http_server->thread_pool = create_thread_pool(THREAD_POOL_WORKER_COUNT, THREAD_POOL_QUEUE_CAPACITY);
     if (!http_server->thread_pool) {
+        if (verbose_mode) {
+            printf("VERBOSE: Thread pool creation failed\n");
+        }
         free(http_server);
         return -1;
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Thread pool created successfully\n");
+        printf("VERBOSE: Creating file connection pool with size %d\n", FILE_CONNECTION_POOL_SIZE);
     }
     
     // Create file connection pool
     http_server->file_connection_pool = create_file_connection_pool(FILE_CONNECTION_POOL_SIZE);
     
+    if (verbose_mode) {
+        printf("VERBOSE: Creating rate limiter\n");
+    }
+    
     // Create rate limiter
     http_server->rate_limiter = create_rate_limiter();
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Creating server socket (AF_INET, SOCK_STREAM)\n");
+    }
     
     // Create server socket
     http_server->server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (http_server->server_socket < 0) {
         perror("socket creation failed");
+        if (verbose_mode) {
+            printf("VERBOSE: Socket creation failed: %s\n", strerror(errno));
+        }
         destroy_thread_pool(http_server->thread_pool);
         if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
         if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
         free(http_server);
         return -1;
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Server socket created successfully (fd=%d)\n", http_server->server_socket);
+        printf("VERBOSE: Setting socket options (SO_REUSEADDR)\n");
     }
     
     // Set socket options
     int socket_option = 1;
     if (setsockopt(http_server->server_socket, SOL_SOCKET, SO_REUSEADDR, &socket_option, sizeof(socket_option)) < 0) {
         perror("setsockopt failed");
+        if (verbose_mode) {
+            printf("VERBOSE: setsockopt failed: %s\n", strerror(errno));
+        }
         close(http_server->server_socket);
         destroy_thread_pool(http_server->thread_pool);
         if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
         if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
         free(http_server);
         return -1;
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Socket options set successfully\n");
+        printf("VERBOSE: Binding socket to port %d\n", port);
     }
     
     // Bind socket
@@ -4435,17 +4604,29 @@ int http_server_start(int port) {
     
     if (bind(http_server->server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
         perror("bind failed");
+        if (verbose_mode) {
+            printf("VERBOSE: Bind failed: %s\n", strerror(errno));
+            printf("VERBOSE: Address: INADDR_ANY, Port: %d\n", port);
+        }
         close(http_server->server_socket);
         destroy_thread_pool(http_server->thread_pool);
         if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
         if (http_server->rate_limiter) destroy_rate_limiter(http_server->rate_limiter);
         free(http_server);
         return -1;
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Socket bound successfully to port %d\n", port);
+        printf("VERBOSE: Starting to listen with backlog %d\n", HTTP_SERVER_MAX_CONNECTIONS);
     }
     
     // Listen for connections
     if (listen(http_server->server_socket, HTTP_SERVER_MAX_CONNECTIONS) < 0) {
         perror("listen failed");
+        if (verbose_mode) {
+            printf("VERBOSE: Listen failed: %s\n", strerror(errno));
+        }
         close(http_server->server_socket);
         destroy_thread_pool(http_server->thread_pool);
         if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
@@ -4454,11 +4635,22 @@ int http_server_start(int port) {
         return -1;
     }
     
+    if (verbose_mode) {
+        printf("VERBOSE: Listen successful, server ready to accept connections\n");
+    }
+    
     http_server_instance = http_server;
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Creating accept thread\n");
+    }
     
     // Create accept thread
     if (pthread_create(&http_server->accept_thread, NULL, http_accept_loop, http_server) != 0) {
         perror("pthread_create failed for accept thread");
+        if (verbose_mode) {
+            printf("VERBOSE: pthread_create failed: %s\n", strerror(errno));
+        }
         close(http_server->server_socket);
         destroy_thread_pool(http_server->thread_pool);
         if (http_server->file_connection_pool) destroy_file_connection_pool(http_server->file_connection_pool);
@@ -4468,40 +4660,90 @@ int http_server_start(int port) {
         return -1;
     }
     
+    if (verbose_mode) {
+        printf("VERBOSE: Accept thread created successfully (thread ID: %lu)\n", (unsigned long)http_server->accept_thread);
+        printf("VERBOSE: Server startup completed successfully\n");
+    }
+    
     printf("SYDB HTTP Server started on port %d\n", port);
     printf("Server is running with performance enhancements:\n");
     printf("  - Thread pool: %d workers\n", THREAD_POOL_WORKER_COUNT);
     printf("  - File connection pool: %d connections\n", FILE_CONNECTION_POOL_SIZE);
     printf("  - Rate limiting: %d requests per %d seconds\n", RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS);
+    if (verbose_mode) {
+        printf("  - Verbose logging: ENABLED (extreme detail)\n");
+    }
     printf("Press Ctrl+C to stop the server\n");
     
     return 0;
 }
 
 void http_server_stop() {
-    if (!http_server_instance) return;
+    if (!http_server_instance) {
+        printf("VERBOSE: http_server_stop called but no server instance found\n");
+        return;
+    }
+    
+    bool verbose_mode = http_server_instance->verbose_mode;
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Server shutdown initiated\n");
+        printf("VERBOSE: Setting running_flag to false\n");
+    }
     
     http_server_instance->running_flag = false;
     
     // Close server socket to break accept loop
     if (http_server_instance->server_socket >= 0) {
+        if (verbose_mode) {
+            printf("VERBOSE: Closing server socket (fd=%d)\n", http_server_instance->server_socket);
+        }
         close(http_server_instance->server_socket);
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Waiting for accept thread to finish\n");
     }
     
     // Wait for accept thread to finish
     pthread_join(http_server_instance->accept_thread, NULL);
     
+    if (verbose_mode) {
+        printf("VERBOSE: Accept thread terminated\n");
+        printf("VERBOSE: Destroying thread pool\n");
+    }
+    
     // Cleanup resources
     destroy_thread_pool(http_server_instance->thread_pool);
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Thread pool destroyed\n");
+    }
+    
     if (http_server_instance->file_connection_pool) {
+        if (verbose_mode) {
+            printf("VERBOSE: Destroying file connection pool\n");
+        }
         destroy_file_connection_pool(http_server_instance->file_connection_pool);
     }
+    
     if (http_server_instance->rate_limiter) {
+        if (verbose_mode) {
+            printf("VERBOSE: Destroying rate limiter\n");
+        }
         destroy_rate_limiter(http_server_instance->rate_limiter);
+    }
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Freeing server instance memory\n");
     }
     
     free(http_server_instance);
     http_server_instance = NULL;
+    
+    if (verbose_mode) {
+        printf("VERBOSE: Server shutdown completed successfully\n");
+    }
     
     printf("SYDB HTTP Server stopped\n");
 }
@@ -4520,6 +4762,16 @@ int main(int argument_count, char* argument_values[]) {
         return 1;
     }
     
+    // Check for verbose mode
+    bool verbose_mode = false;
+    for (int arg_index = 1; arg_index < argument_count; arg_index++) {
+        if (strcmp(argument_values[arg_index], "--verbose") == 0) {
+            verbose_mode = true;
+            printf("VERBOSE MODE: Enabled - Extreme logging activated\n");
+            printf("VERBOSE: All server operations will be logged in detail\n");
+        }
+    }
+    
     if (strcmp(argument_values[1], "--routes") == 0) {
         display_http_routes();
         return 0;
@@ -4530,28 +4782,53 @@ int main(int argument_count, char* argument_values[]) {
         int port = HTTP_SERVER_PORT;
         
         if (argument_count > 2) {
-            port = atoi(argument_values[2]);
-            if (port <= 0 || port > 65535) {
-                fprintf(stderr, "Error: Invalid port number %s\n", argument_values[2]);
-                return 1;
+            // Skip --verbose when parsing port
+            if (strcmp(argument_values[2], "--verbose") != 0) {
+                port = atoi(argument_values[2]);
+                if (port <= 0 || port > 65535) {
+                    fprintf(stderr, "Error: Invalid port number %s\n", argument_values[2]);
+                    return 1;
+                }
             }
+        }
+        
+        if (verbose_mode) {
+            printf("VERBOSE: Setting up signal handlers for graceful shutdown\n");
         }
         
         // Setup signal handlers for graceful shutdown
         signal(SIGINT, http_server_handle_signal);
         signal(SIGTERM, http_server_handle_signal);
         
+        if (verbose_mode) {
+            printf("VERBOSE: Creating base directory: %s\n", get_secure_sydb_base_directory_path());
+        }
+        
         create_secure_directory_recursively(get_secure_sydb_base_directory_path());
         
         printf("Starting SYDB HTTP Server on port %d...\n", port);
+        if (verbose_mode) {
+            printf("VERBOSE: Server starting with verbose logging enabled\n");
+        }
         printf("Press Ctrl+C to stop the server\n");
         
-        if (http_server_start(port) == 0) {
+        if (verbose_mode) {
+            printf("VERBOSE: Calling http_server_start with port=%d, verbose_mode=true\n", port);
+        }
+        
+        if (http_server_start(port, verbose_mode) == 0) {
+            if (verbose_mode) {
+                printf("VERBOSE: Server started successfully, entering pause state\n");
+                printf("VERBOSE: Main thread waiting for shutdown signal\n");
+            }
             // Server is running in background threads
             // Wait for shutdown signal
             pause(); // Wait for signal
         } else {
             fprintf(stderr, "Failed to start HTTP server\n");
+            if (verbose_mode) {
+                printf("VERBOSE: Server startup failed with error\n");
+            }
             return 1;
         }
         
