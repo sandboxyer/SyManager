@@ -1,16 +1,3 @@
-/**
- * SyPM - System Process Manager
- * 
- * A comprehensive process management system for Node.js applications that provides
- * background process execution, auto-restart capabilities, process monitoring,
- * system-wide process management, and daemon support for system reboots.
- * 
- * @class SyPM
- * @author Your Name
- * @version 1.0.0
- * @license MIT
- */
-
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';

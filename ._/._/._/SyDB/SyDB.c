@@ -4449,7 +4449,7 @@ void* http_accept_loop(void* server_argument) {
         }
         
         if (verbose_mode) {
-            printf("VERBOSE: Client socket configured with %d second timeouts\n", timeout.tv_sec);
+            printf("VERBOSE: Client socket configured with %ld second timeouts\n", timeout.tv_sec);
         }
         
         // Check rate limiting
@@ -4894,7 +4894,7 @@ void http_server_stop() {
     clock_gettime(CLOCK_REALTIME, &timeout);
     timeout.tv_sec += 5; // 5 second timeout
     
-    pthread_timedjoin_np(http_server_instance->accept_thread, NULL, &timeout);
+    pthread_join(http_server_instance->accept_thread, NULL);
     
     if (verbose_mode) {
         printf("VERBOSE: Accept thread terminated\n");
