@@ -559,6 +559,21 @@ int http_test_endpoint(const char* description, const char* method, const char* 
 
 // ==================== HTTP API TEST SUITE ====================
 
+void cleanup_test_databases() {
+    printf("Cleaning up previous test databases...\n");
+    
+    // Remove all test databases from previous runs
+    char command[512];
+    snprintf(command, sizeof(command), "rm -rf /tmp/sydb_test/testdb_* /tmp/sydb_test/testdb2_* /tmp/sydb_test/testcolldb_* /tmp/sydb_test/testinstdb_* 2>/dev/null");
+    system(command);
+    
+    // Also clean up any lock files
+    snprintf(command, sizeof(command), "rm -f /tmp/sydb_test/*.lock /tmp/sydb_test/.*.lock 2>/dev/null");
+    system(command);
+    
+    usleep(50000); // 50ms to ensure cleanup completes
+}
+
 int run_http_database_tests() {
     printf("\n" MAGENTA "HTTP API DATABASE TESTS" RESET "\n");
     
@@ -569,8 +584,10 @@ int run_http_database_tests() {
     
     // Generate unique database names to avoid conflicts
     char unique_db1[64], unique_db2[64];
-    snprintf(unique_db1, sizeof(unique_db1), "testdb_%ld", time(NULL));
-    snprintf(unique_db2, sizeof(unique_db2), "testdb2_%ld", time(NULL) + 1);
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+snprintf(unique_db1, sizeof(unique_db1), "testdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+snprintf(unique_db2, sizeof(unique_db2), "testdb2_%ld_%ld", ts.tv_sec, ts.tv_nsec + 1);
     
     char create_db1_body[128], create_db2_body[128];
     snprintf(create_db1_body, sizeof(create_db1_body), "{\"name\":\"%s\"}", unique_db1);
@@ -634,7 +651,9 @@ int run_http_collection_tests() {
     
     // Use a unique database name to avoid conflicts
     char unique_db[64];
-    snprintf(unique_db, sizeof(unique_db), "testcolldb_%ld", time(NULL));
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+snprintf(unique_db, sizeof(unique_db), "testcolldb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
     
     char create_db_body[128];
     snprintf(create_db_body, sizeof(create_db_body), "{\"name\":\"%s\"}", unique_db);
@@ -732,7 +751,9 @@ int run_http_instance_tests() {
     
     // Use a unique database name to avoid conflicts
     char unique_db[64];
-    snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld", time(NULL));
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
     
     char create_db_body[128];
     snprintf(create_db_body, sizeof(create_db_body), "{\"name\":\"%s\"}", unique_db);
@@ -1546,6 +1567,7 @@ int main(int argc, char *argv[]) {
     long long start_time = get_current_time_ms();
     
     if (test_mode == 1) {
+        cleanup_test_databases();
         printf(CYAN "SYDB HTTP API COMPREHENSIVE TEST SUITE\n" RESET);
         printf("===============================================\n");
         printf("Testing server: " YELLOW "%s" RESET "\n\n", server_url);
