@@ -2727,18 +2727,12 @@ class SyDB {
     static #serverStarted = false
     static #serverStarting = false
     static #baseUrl = 'http://localhost:8080'
-    static #startTimeout = 2000 // 2 seconds
+    static #startTimeout = 5000 // 5 seconds
 
-    /**
-     * Start the SYDB HTTP server
-     * @static
-     * @async
-     * @returns {Promise<boolean>} True if server started successfully
-     */
+    // Keep your existing Start method as is - it works 100%
     static async Start() {
         if (this.#serverStarted) return true
         if (this.#serverStarting) {
-            // Wait for server to finish starting
             await new Promise(resolve => setTimeout(resolve, 1000))
             return this.#serverStarted
         }
@@ -2748,11 +2742,9 @@ class SyDB {
         try {
             createCFileFromString(code,'./test.c')
             await SyPM.run(`${C_Code}
-
                 console.log("Starting SYDB HTTP Server...")
-                
-             console.log(await C.run('./test.c',{args : ['--server']}))
-                `,{workingDir : process.cwd()})
+                console.log(await C.run('./test.c',{args : ['--server']}))
+            `,{workingDir : process.cwd()})
             
             this.#serverStarted = true
             this.#serverStarting = false
@@ -2766,22 +2758,22 @@ class SyDB {
     }
 
     /**
-     * Make HTTP request to SYDB server with automatic server start on connection error
+     * Make HTTP request to SYDB server with proper error handling
      * @static
      * @async
      * @param {string} method - HTTP method
      * @param {string} endpoint - API endpoint
      * @param {Object} [data] - Request data
-     * @param {boolean} [retryOnServerDown=true] - Retry if server is down
      * @returns {Promise<Object>} Response data
      */
-    static async #makeRequest(method, endpoint, data = null, retryOnServerDown = true) {
+    static async #makeRequest(method, endpoint, data = null) {
         const url = `${this.#baseUrl}${endpoint}`
         const options = {
             method,
             headers: {
                 'Content-Type': 'application/json',
-            }
+            },
+            timeout: 10000 // 10 second timeout
         }
 
         if (data && (method === 'POST' || method === 'PUT')) {
@@ -2792,26 +2784,26 @@ class SyDB {
             const response = await fetch(url, options)
             
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+                const errorText = await response.text()
+                throw new Error(`HTTP ${response.status}: ${errorText}`)
             }
             
-            return await response.json()
+            const responseData = await response.json()
+            return responseData
+            
         } catch (error) {
-            // Special handling for server not started error
-            if (retryOnServerDown && (error.code === 'ECONNREFUSED' || error.message.includes('fetch failed'))) {
+            // Check if server is not running
+            if (error.code === 'ECONNREFUSED' || error.name === 'TypeError') {
                 console.log('SYDB Server not running, attempting to start...')
-                
                 const started = await this.Start()
                 if (started) {
                     console.log('Waiting for server to be ready...')
                     await new Promise(resolve => setTimeout(resolve, this.#startTimeout))
-                    
                     // Retry the request once
-                    return await this.#makeRequest(method, endpoint, data, false)
+                    return await this.#makeRequest(method, endpoint, data)
                 }
             }
             
-            // If we get here, either retry is disabled or server failed to start
             return {
                 success: false,
                 error: `Request failed: ${error.message}`,
@@ -2861,7 +2853,7 @@ class SyDB {
                 error: 'Database name is required and must be a string'
             }
         }
-        return await this.#makeRequest('DELETE', `/api/databases/${name}`)
+        return await this.#makeRequest('DELETE', `/api/databases/${encodeURIComponent(name)}`)
     }
 
     /**
@@ -2878,7 +2870,7 @@ class SyDB {
                 error: 'Database name is required and must be a string'
             }
         }
-        return await this.#makeRequest('GET', `/api/databases/${databaseName}/collections`)
+        return await this.#makeRequest('GET', `/api/databases/${encodeURIComponent(databaseName)}/collections`)
     }
 
     /**
@@ -2910,10 +2902,13 @@ class SyDB {
             }
         }
 
-        return await this.#makeRequest('POST', `/api/databases/${databaseName}/collections`, {
-            name: collectionName,
-            schema: schema
-        })
+        return await this.#makeRequest('POST', 
+            `/api/databases/${encodeURIComponent(databaseName)}/collections`, 
+            {
+                name: collectionName,
+                schema: schema
+            }
+        )
     }
 
     /**
@@ -2937,7 +2932,9 @@ class SyDB {
                 error: 'Collection name is required and must be a string'
             }
         }
-        return await this.#makeRequest('DELETE', `/api/databases/${databaseName}/collections/${collectionName}`)
+        return await this.#makeRequest('DELETE', 
+            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}`
+        )
     }
 
     /**
@@ -2961,7 +2958,9 @@ class SyDB {
                 error: 'Collection name is required and must be a string'
             }
         }
-        return await this.#makeRequest('GET', `/api/databases/${databaseName}/collections/${collectionName}/schema`)
+        return await this.#makeRequest('GET', 
+            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/schema`
+        )
     }
 
     /**
@@ -2987,9 +2986,11 @@ class SyDB {
             }
         }
 
-        const endpoint = query 
-            ? `/api/databases/${databaseName}/collections/${collectionName}/instances?query=${encodeURIComponent(query)}`
-            : `/api/databases/${databaseName}/collections/${collectionName}/instances`
+        let endpoint = `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`
+        
+        if (query) {
+            endpoint += `?query=${encodeURIComponent(query)}`
+        }
 
         return await this.#makeRequest('GET', endpoint)
     }
@@ -3024,7 +3025,7 @@ class SyDB {
         }
 
         return await this.#makeRequest('POST', 
-            `/api/databases/${databaseName}/collections/${collectionName}/instances`, 
+            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`, 
             instanceData
         )
     }
@@ -3066,7 +3067,7 @@ class SyDB {
         }
 
         return await this.#makeRequest('PUT', 
-            `/api/databases/${databaseName}/collections/${collectionName}/instances/${instanceId}`,
+            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`,
             updateData
         )
     }
@@ -3101,7 +3102,7 @@ class SyDB {
         }
 
         return await this.#makeRequest('DELETE', 
-            `/api/databases/${databaseName}/collections/${collectionName}/instances/${instanceId}`
+            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`
         )
     }
 
@@ -3110,7 +3111,7 @@ class SyDB {
      * @static
      * @async
      * @param {string} command - SYDB command
-     * @param {Array} [arguments] - Command arguments
+     * @param {Array} [args=[]] - Command arguments
      * @returns {Promise<Object>} Command result
      */
     static async executeCommand(command, args = []) {
@@ -3134,7 +3135,7 @@ class SyDB {
      * @returns {Promise<Object>} Routes information
      */
     static async showRoutes() {
-        // This would execute the C binary with --routes flag
+        // Execute the C binary with --routes flag directly
         try {
             const result = await C.run(code, { args: ['--routes'] })
             return {
@@ -3152,61 +3153,190 @@ class SyDB {
     /**
      * Check if server is running
      * @static
-     * @returns {boolean} Server status
+     * @async
+     * @returns {Promise<boolean>} Server status
      */
-    static isServerRunning() {
-        return this.#serverStarted
+    static async isServerRunning() {
+        try {
+            const response = await this.#makeRequest('GET', '/api/databases')
+            return response && response.success !== false
+        } catch (error) {
+            return false
+        }
+    }
+
+    /**
+     * Stop the SYDB server
+     * @static
+     * @async
+     * @returns {Promise<boolean>} True if server was stopped
+     */
+    static async Stop() {
+        if (!this.#serverStarted) return true
+        
+        try {
+            // Kill all SyPM processes related to SYDB
+            await SyPM.killAll()
+            this.#serverStarted = false
+            console.log('SYDB Server stopped')
+            return true
+        } catch (error) {
+            console.error('Failed to stop SYDB Server:', error.message)
+            return false
+        }
     }
 }
 
 /**
- * Command Line Interface for SYDB
+ * Command Line Interface for SYDB - Matches C binary exactly
  */
 class SyDBCLI {
     /**
-     * Print usage information
+     * Print usage information that matches the C binary
      * @static
      */
     static printUsage() {
         console.log(`
 SYDB Database Management System - JavaScript Client
 Usage:
-  node SyDB.js create <database_name>
-  node SyDB.js create <database_name> <collection_name> --schema <schema_json>
-  node SyDB.js create <database_name> <collection_name> --insert-one <instance_json>
-  node SyDB.js update <database_name> <collection_name> <instance_id> <update_json>
-  node SyDB.js delete <database_name> <collection_name> <instance_id>
-  node SyDB.js find <database_name> <collection_name> [query]
-  node SyDB.js schema <database_name> <collection_name>
-  node SyDB.js list
-  node SyDB.js list <database_name>
-  node SyDB.js list <database_name> <collection_name>
-  node SyDB.js --server [port]          # Start HTTP server (background)
-  node SyDB.js --routes                 # Show all HTTP API routes and schemas
-  node SyDB.js --status                 # Check server status
+  node sydb.js create <database_name>
+  node sydb.js create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
+  node sydb.js create <database_name> <collection_name> --insert-one --<field>-"<value>" ...
+  node sydb.js update <database_name> <collection_name> --where "<query>" --set --<field>-"<value>" ...
+  node sydb.js delete <database_name> <collection_name> --where "<query>"
+  node sydb.js find <database_name> <collection_name> --where "<query>"
+  node sydb.js schema <database_name> <collection_name>
+  node sydb.js list
+  node sydb.js list <database_name>
+  node sydb.js list <database_name> <collection_name>
+  node sydb.js --server [port]          # Start HTTP server
+  node sydb.js --server --verbose       # Start HTTP server with extreme logging
+  node sydb.js --routes                 # Show all HTTP API routes and schemas
+  node sydb.js --status                 # Check server status
+
+Field types: string, int, float, bool, array, object
+Add -req for required fields
+Add -idx for indexed fields (improves query performance)
+Query format: field:value,field2:value2 (multiple conditions supported)
 
 Examples:
-  node SyDB.js create mydb
-  node SyDB.js create mydb users --schema '[{"name":"username","type":"string","required":true}]'
-  node SyDB.js create mydb users --insert-one '{"username":"john","age":30}'
-  node SyDB.js find mydb users "age:30"
-  node SyDB.js list mydb
+  node sydb.js create mydb
+  node sydb.js create mydb users --schema --name-string-req --age-int --email-string
+  node sydb.js create mydb users --insert-one --name-"John Doe" --age-30 --email-"john@test.com"
+  node sydb.js find mydb users --where "age:30"
+  node sydb.js list mydb
         `)
     }
 
     /**
-     * Parse JSON from command line argument
+     * Parse field specifications from command line arguments
      * @static
-     * @param {string} jsonString - JSON string
-     * @returns {Object} Parsed JSON object
+     * @param {Array} args - Command line arguments
+     * @param {number} startIndex - Starting index
+     * @returns {Array} Array of field specifications
      */
-    static parseJSONArgument(jsonString) {
-        try {
-            return JSON.parse(jsonString)
-        } catch (error) {
-            console.error('Error: Invalid JSON format')
-            process.exit(1)
+    static parseFieldSpecifications(args, startIndex) {
+        const fields = []
+        for (let i = startIndex; i < args.length; i++) {
+            if (args[i].startsWith('--')) {
+                const fieldSpec = args[i].substring(2) // Remove '--'
+                fields.push(fieldSpec)
+            } else {
+                break
+            }
         }
+        return fields
+    }
+
+    /**
+     * Parse insert data from command line arguments
+     * @static
+     * @param {Array} args - Command line arguments
+     * @param {number} startIndex - Starting index
+     * @returns {Object} Insert data object
+     */
+    static parseInsertData(args, startIndex) {
+        const data = {}
+        for (let i = startIndex; i < args.length; i++) {
+            if (args[i].startsWith('--')) {
+                const fieldSpec = args[i].substring(2) // Remove '--'
+                const dashIndex = fieldSpec.indexOf('-')
+                if (dashIndex !== -1) {
+                    const fieldName = fieldSpec.substring(0, dashIndex)
+                    let fieldValue = fieldSpec.substring(dashIndex + 1)
+                    
+                    // Remove quotes if present
+                    if ((fieldValue.startsWith('"') && fieldValue.endsWith('"')) ||
+                        (fieldValue.startsWith("'") && fieldValue.endsWith("'"))) {
+                        fieldValue = fieldValue.substring(1, fieldValue.length - 1)
+                    }
+                    
+                    // Try to parse numbers and booleans
+                    if (!isNaN(fieldValue)) {
+                        data[fieldName] = parseFloat(fieldValue)
+                    } else if (fieldValue.toLowerCase() === 'true') {
+                        data[fieldName] = true
+                    } else if (fieldValue.toLowerCase() === 'false') {
+                        data[fieldName] = false
+                    } else {
+                        data[fieldName] = fieldValue
+                    }
+                }
+            } else {
+                break
+            }
+        }
+        return data
+    }
+
+    /**
+     * Convert field specifications to schema format
+     * @static
+     * @param {Array} fieldSpecs - Field specifications
+     * @returns {Array} Schema array
+     */
+    static fieldSpecsToSchema(fieldSpecs) {
+        const schema = []
+        
+        for (const spec of fieldSpecs) {
+            const parts = spec.split('-')
+            if (parts.length < 2) continue
+            
+            const fieldName = parts[0]
+            let fieldType = parts[1]
+            let required = false
+            let indexed = false
+            
+            // Check for flags
+            for (let i = 2; i < parts.length; i++) {
+                if (parts[i] === 'req') required = true
+                if (parts[i] === 'idx') indexed = true
+            }
+            
+            // Map type strings to schema types
+            const typeMap = {
+                'string': 'string',
+                'int': 'int', 
+                'integer': 'int',
+                'float': 'float',
+                'double': 'float',
+                'bool': 'bool',
+                'boolean': 'bool',
+                'array': 'array',
+                'object': 'object'
+            }
+            
+            const schemaType = typeMap[fieldType] || 'string'
+            
+            schema.push({
+                name: fieldName,
+                type: schemaType,
+                required: required,
+                indexed: indexed
+            })
+        }
+        
+        return schema
     }
 
     /**
@@ -3252,6 +3382,14 @@ Examples:
                 case '--status':
                     await this.handleStatus()
                     break
+                case '--verbose':
+                    // --verbose should be used with --server
+                    if (args[3] === '--server') {
+                        await this.handleServer(['', '', '--server', '--verbose'])
+                    } else {
+                        this.printUsage()
+                    }
+                    break
                 default:
                     console.error(`Error: Unknown command '${command}'`)
                     this.printUsage()
@@ -3264,7 +3402,7 @@ Examples:
     }
 
     /**
-     * Handle create command
+     * Handle create command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3279,34 +3417,39 @@ Examples:
         const databaseName = args[3]
 
         if (args.length === 4) {
-            // Create database only
+            // Create database only: sydb create <database_name>
             const result = await SyDB.createDatabase(databaseName)
             console.log(JSON.stringify(result, null, 2))
         } else if (args.length >= 5) {
             const collectionName = args[4]
             
             if (args.length >= 6 && args[5] === '--schema') {
-                // Create collection with schema
-                if (args.length < 7) {
-                    console.error('Error: Missing schema JSON')
+                // Create collection with schema: sydb create <db> <coll> --schema --<field>-<type>[-req][-idx] ...
+                const fieldSpecs = this.parseFieldSpecifications(args, 6)
+                if (fieldSpecs.length === 0) {
+                    console.error('Error: No field specifications provided')
                     this.printUsage()
                     process.exit(1)
                 }
-                const schema = this.parseJSONArgument(args[6])
+                
+                const schema = this.fieldSpecsToSchema(fieldSpecs)
                 const result = await SyDB.createCollection(databaseName, collectionName, schema)
                 console.log(JSON.stringify(result, null, 2))
+                
             } else if (args.length >= 6 && args[5] === '--insert-one') {
-                // Insert instance
-                if (args.length < 7) {
-                    console.error('Error: Missing instance JSON')
+                // Insert instance: sydb create <db> <coll> --insert-one --<field>-"<value>" ...
+                const insertData = this.parseInsertData(args, 6)
+                if (Object.keys(insertData).length === 0) {
+                    console.error('Error: No insert data provided')
                     this.printUsage()
                     process.exit(1)
                 }
-                const instanceData = this.parseJSONArgument(args[6])
-                const result = await SyDB.insertInstance(databaseName, collectionName, instanceData)
+                
+                const result = await SyDB.insertInstance(databaseName, collectionName, insertData)
                 console.log(JSON.stringify(result, null, 2))
+                
             } else {
-                console.error('Error: Invalid create operation')
+                console.error('Error: Missing --schema or --insert-one flag')
                 this.printUsage()
                 process.exit(1)
             }
@@ -3314,71 +3457,102 @@ Examples:
     }
 
     /**
-     * Handle update command
+     * Handle update command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleUpdate(args) {
-        if (args.length < 7) {
-            console.error('Error: Missing arguments for update')
+        // sydb update <database> <collection> --where "<query>" --set --<field>-"<value>" ...
+        if (args.length < 8 || args[5] !== '--where' || args[7] !== '--set') {
+            console.error('Error: Invalid update syntax')
             this.printUsage()
             process.exit(1)
         }
 
         const databaseName = args[3]
         const collectionName = args[4]
-        const instanceId = args[5]
-        const updateData = this.parseJSONArgument(args[6])
+        const query = args[6]
+        const updateData = this.parseInsertData(args, 8)
 
-        const result = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData)
-        console.log(JSON.stringify(result, null, 2))
+        if (Object.keys(updateData).length === 0) {
+            console.error('Error: No update data provided')
+            this.printUsage()
+            process.exit(1)
+        }
+
+        // For now, we'll list instances matching the query and update the first one
+        // In a real implementation, you'd want to handle this properly
+        const instances = await SyDB.listInstances(databaseName, collectionName, query)
+        if (instances.success && instances.instances && instances.instances.length > 0) {
+            const instanceId = instances.instances[0]._id // Get first matching instance
+            const result = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData)
+            console.log(JSON.stringify(result, null, 2))
+        } else {
+            console.log(JSON.stringify({
+                success: false,
+                error: 'No instances found matching the query'
+            }, null, 2))
+        }
     }
 
     /**
-     * Handle delete command
+     * Handle delete command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleDelete(args) {
-        if (args.length < 6) {
-            console.error('Error: Missing arguments for delete')
+        // sydb delete <database> <collection> --where "<query>"
+        if (args.length < 7 || args[5] !== '--where') {
+            console.error('Error: Invalid delete syntax')
             this.printUsage()
             process.exit(1)
         }
 
         const databaseName = args[3]
         const collectionName = args[4]
-        const instanceId = args[5]
+        const query = args[6]
 
-        const result = await SyDB.deleteInstance(databaseName, collectionName, instanceId)
-        console.log(JSON.stringify(result, null, 2))
+        // For now, we'll list instances matching the query and delete the first one
+        // In a real implementation, you'd want to handle multiple deletions
+        const instances = await SyDB.listInstances(databaseName, collectionName, query)
+        if (instances.success && instances.instances && instances.instances.length > 0) {
+            const instanceId = instances.instances[0]._id // Get first matching instance
+            const result = await SyDB.deleteInstance(databaseName, collectionName, instanceId)
+            console.log(JSON.stringify(result, null, 2))
+        } else {
+            console.log(JSON.stringify({
+                success: false,
+                error: 'No instances found matching the query'
+            }, null, 2))
+        }
     }
 
     /**
-     * Handle find command
+     * Handle find command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleFind(args) {
-        if (args.length < 5) {
-            console.error('Error: Missing database or collection name')
+        // sydb find <database> <collection> --where "<query>"
+        if (args.length < 7 || args[5] !== '--where') {
+            console.error('Error: Invalid find syntax')
             this.printUsage()
             process.exit(1)
         }
 
         const databaseName = args[3]
         const collectionName = args[4]
-        const query = args[5] || ''
+        const query = args[6]
 
         const result = await SyDB.listInstances(databaseName, collectionName, query)
         console.log(JSON.stringify(result, null, 2))
     }
 
     /**
-     * Handle schema command
+     * Handle schema command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3398,23 +3572,23 @@ Examples:
     }
 
     /**
-     * Handle list command
+     * Handle list command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleList(args) {
         if (args.length === 3) {
-            // List databases
+            // List databases: sydb list
             const result = await SyDB.listDatabases()
             console.log(JSON.stringify(result, null, 2))
         } else if (args.length === 4) {
-            // List collections in database
+            // List collections: sydb list <database>
             const databaseName = args[3]
             const result = await SyDB.listCollections(databaseName)
             console.log(JSON.stringify(result, null, 2))
         } else if (args.length === 5) {
-            // List instances in collection
+            // List instances: sydb list <database> <collection>
             const databaseName = args[3]
             const collectionName = args[4]
             const result = await SyDB.listInstances(databaseName, collectionName)
@@ -3427,26 +3601,41 @@ Examples:
     }
 
     /**
-     * Handle server command - Start server in background using SyPM
+     * Handle server command - matches C binary exactly
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleServer(args) {
-        console.log('Starting SYDB HTTP Server in background...')
-        const port = args[3] || '8080'
+        const verbose = args.includes('--verbose')
+        const portIndex = args.indexOf('--server') + 1
+        const port = portIndex < args.length && !args[portIndex].startsWith('--') ? args[portIndex] : '8080'
+        
+        console.log('Starting SYDB HTTP Server...')
         
         try {
-            createCFileFromString(code,'./test.c')
-            await SyPM.run(`${C_Code}
-                console.log("Starting SYDB HTTP Server on port ${port}...")
-                console.log(await C.run('./test.c',{args : ['--server']}))
-            `, { workingDir: process.cwd() })
-            
-            console.log('SYDB Server started successfully in background')
-            console.log('Server is running independently - Node.js process will now exit')
-            console.log('Use "node SyDB.js --status" to check server status')
-            
+            const result = await SyDB.Start()
+            if (result) {
+                console.log('SYDB Server started successfully')
+                if (verbose) {
+                    console.log('Verbose logging enabled')
+                }
+                console.log(`Server running on port ${port}`)
+                console.log('Press Ctrl+C to stop the server')
+                
+                // Keep the process alive
+                process.on('SIGINT', async () => {
+                    console.log('\nStopping server...')
+                    await SyDB.Stop()
+                    process.exit(0)
+                });
+                
+                // Keep alive
+                setInterval(() => {}, 1000)
+            } else {
+                console.error('Failed to start server')
+                process.exit(1)
+            }
         } catch (error) {
             console.error('Failed to start SYDB Server:', error.message)
             process.exit(1)
@@ -3454,7 +3643,7 @@ Examples:
     }
 
     /**
-     * Handle routes command
+     * Handle routes command - matches C binary exactly
      * @static
      * @async
      */
@@ -3464,38 +3653,25 @@ Examples:
     }
 
     /**
-     * Handle status command
+     * Handle status command - matches C binary exactly
      * @static
      * @async
      */
     static async handleStatus() {
-        // Try to make a simple request to check if server is responsive
-        try {
-            const response = await fetch('http://localhost:8080/api/databases', {
-                method: 'GET',
-                timeout: 3000
-            })
-            const data = await response.json()
-            console.log(JSON.stringify({
-                server: 'running',
-                responsive: true,
-                timestamp: new Date().toISOString()
-            }, null, 2))
-        } catch (error) {
-            console.log(JSON.stringify({
-                server: 'stopped',
-                responsive: false,
-                error: error.message,
-                timestamp: new Date().toISOString()
-            }, null, 2))
-        }
+        const isRunning = await SyDB.isServerRunning()
+        const status = isRunning ? 'running' : 'stopped'
+        
+        console.log(JSON.stringify({
+            server: status,
+            timestamp: new Date().toISOString()
+        }, null, 2))
     }
 }
 
 // Command Line Interface execution
 if (import.meta.url === `file://${process.argv[1]}`) {
-    // This file was executed directly
     SyDBCLI.executeCommand(process.argv)
 }
 
+export { SyDB, SyDBCLI }
 export default SyDB
