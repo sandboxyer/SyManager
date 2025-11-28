@@ -3,6 +3,7 @@ import { stdin, stdout } from 'process';
 
 /**
  * TerminalHUD - A framework for creating HUD interfaces in terminal
+ * Optional mouse support: click to focus, double-click to select.
  */
 class TerminalHUD {
   /**
@@ -10,6 +11,7 @@ class TerminalHUD {
    * @param {object} config - Configuration options
    * @param {boolean} config.numberedMenus - Use numbered menus instead of arrow navigation (default: false)
    * @param {string} config.highlightColor - Color for highlighting selected menu option (default: blue)
+   * @param {boolean} config.mouseSupport - Enable mouse click/double-click navigation (default: false)
    */
   constructor(config = {}) {
     this.rl = readline.createInterface({
@@ -21,9 +23,22 @@ class TerminalHUD {
     this.highlightColor = this.getAnsiBackgroundColor(config.highlightColor || 'blue');
     this.lastMenuGenerator = null;
     this.lastSelectedIndex = 0;
+
+    // ✅ Optional mouse support
+    this.mouseSupport = config.mouseSupport || false;
+    this._mouseEventBuffer = '';
+    this._mouseEnabled = false;
+    this._currentMenuState = null;
+    this._lastClick = { time: 0, x: -1, y: -1 };
+    this._DOUBLE_CLICK_DELAY = 300;
+
+    if (this.mouseSupport && !this.numberedMenus) {
+      this._enableMouseTracking();
+    }
   }
 
-  // Helper methods
+  // === Core Helper Methods ===
+
   getAnsiBackgroundColor(color) {
     const colors = {
       red: '\x1b[41m', green: '\x1b[42m', yellow: '\x1b[43m',
@@ -55,15 +70,11 @@ class TerminalHUD {
     stdout.cursorTo(0);
   }
 
-  /**
-   * Ask a question or display menu
-   * @param {string} question - Question to ask
-   * @param {object} config - Configuration
-   * @returns {Promise<string>} User response
-   */
+  // === Public API ===
+
   async ask(question, config = {}) {
     if (config.options) {
-      return this.numberedMenus 
+      return this.numberedMenus
         ? this.displayMenuFromOptions(question, config.options, config)
         : this.displayMenuWithArrows(question, config.options, config);
     }
@@ -72,25 +83,165 @@ class TerminalHUD {
     });
   }
 
-  /**
-   * Display menu with arrow navigation (default)
-   */
-  async displayMenuWithArrows(question, options = [], config = { clear: false }, initialIndex = 0) {
+  async displayMenu(menuGenerator, config = {
+    props: {},
+    clearScreen: true,
+    alert: undefined,
+    alert_emoji: '⚠️',
+    initialSelectedIndex: 0,
+    selectedInc: 0
+  }) {
+    if (config.clearScreen) console.clear();
+    this.startLoading();
+    const menu = await menuGenerator(config.props);
+    this.stopLoading();
+
+    if (config.alert) {
+      console.log(`${config.alert_emoji || '⚠️'}  ${config.alert}\n`);
+    }
+
+    const menuTitle = await menu.title;
+    let initialIndex = menuGenerator === this.lastMenuGenerator
+      ? this.lastSelectedIndex
+      : config.initialSelectedIndex || 0;
+
+    if (config.selectedInc) {
+      initialIndex = Math.max(0, initialIndex + config.selectedInc);
+    }
+   
+    this.lastMenuGenerator = menuGenerator;
+
+    return this.numberedMenus
+      ? this.displayNumberedMenu(menuTitle, menu.options)
+      : this.displayMenuWithArrows(menuTitle, menu.options, config, initialIndex);
+  }
+
+  async pressWait() {
     return new Promise(resolve => {
+      console.log('\nPress any key to continue...');
+      const handler = () => {
+        stdin.setRawMode(false);
+        stdin.removeListener('data', handler);
+        resolve();
+      };
+      stdin.setRawMode(true);
+      stdin.once('data', handler);
+    });
+  }
+
+  close() {
+    this._disableMouseTracking();
+    this.rl.close();
+  }
+
+  // === Menu Display Logic (Enhanced for Mouse) ===
+
+  async displayMenuWithArrows(question, options = [], config = { clear: false }, initialIndex = 0) {
+    if (!this.mouseSupport) {
+      return this._displayMenuWithArrowsOriginal(question, options, config, initialIndex);
+    }
+
+    return new Promise((resolve) => {
+      const normalized = this.normalizeOptions(options);
       if (config.clear) console.clear();
-      
-      const lines = this.normalizeOptions(options);
-      let { line, col } = this.getCoordinatesFromLinearIndex(lines, initialIndex);
+
+      let { line, col } = this.getCoordinatesFromLinearIndex(normalized, initialIndex);
 
       const renderMenu = () => {
         console.clear();
         if (question) console.log(`${question}\n`);
-        
-        lines.forEach((lineOpts, i) => {
+        normalized.forEach((lineOpts, i) => {
           let lineStr = lineOpts.map((opt, j) => {
             const text = typeof opt === 'string' ? opt : opt.name || JSON.stringify(opt);
             if (i === line && j === col) {
-              return this.highlightColor 
+              return this.highlightColor
+                ? `${this.highlightColor}${text}${this.resetColor()}`
+                : `→ ${text}`;
+            }
+            return text;
+          }).join('   ');
+          console.log(lineStr);
+        });
+      };
+
+      const setFocus = (newLine, newCol) => {
+        line = newLine;
+        col = newCol;
+        renderMenu();
+      };
+
+      const select = async () => {
+        cleanup();
+        this.lastSelectedIndex = this.getLinearIndexFromCoordinates(normalized, line, col);
+        const selected = normalized[line][col];
+        if (selected?.action) await selected.action();
+        resolve(selected?.name || selected);
+      };
+
+      const handleKeyPress = async (_, key) => {
+        switch (key.name) {
+          case 'up':
+            if (line > 0) line--;
+            if (col >= normalized[line].length) col = normalized[line].length - 1;
+            break;
+          case 'down':
+            if (line < normalized.length - 1) line++;
+            if (col >= normalized[line].length) col = normalized[line].length - 1;
+            break;
+          case 'left':
+            if (col > 0) col--;
+            break;
+          case 'right':
+            if (col < normalized[line].length - 1) col++;
+            break;
+          case 'return':
+            await select();
+            return;
+        }
+        renderMenu();
+      };
+
+      const cleanup = () => {
+        stdin.removeListener('keypress', handleKeyPress);
+        stdin.setRawMode(false);
+        this._currentMenuState = null;
+      };
+
+      // Setup keyboard input
+      readline.emitKeypressEvents(stdin);
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on('keypress', handleKeyPress);
+
+      // Store menu state for mouse handling
+      this._currentMenuState = {
+        normalized,
+        question,
+        renderMenu,
+        setFocus,
+        select
+      };
+
+      renderMenu();
+    });
+  }
+
+  // Original implementation for fallback or non-mouse mode
+  async _displayMenuWithArrowsOriginal(question, options = [], config = { clear: false }, initialIndex = 0) {
+    return new Promise(resolve => {
+      if (config.clear) console.clear();
+     
+      const normalized = this.normalizeOptions(options);
+      let { line, col } = this.getCoordinatesFromLinearIndex(normalized, initialIndex);
+
+      const renderMenu = () => {
+        console.clear();
+        if (question) console.log(`${question}\n`);
+        normalized.forEach((lineOpts, i) => {
+          let lineStr = lineOpts.map((opt, j) => {
+            const text = typeof opt === 'string' ? opt : opt.name || JSON.stringify(opt);
+            if (i === line && j === col) {
+              return this.highlightColor
                 ? `${this.highlightColor}${text}${this.resetColor()}`
                 : `→ ${text}`;
             }
@@ -102,25 +253,25 @@ class TerminalHUD {
 
       const handleKeyPress = async (_, key) => {
         switch (key.name) {
-          case 'up': 
+          case 'up':
             if (line > 0) line--;
-            if (col >= lines[line].length) col = lines[line].length - 1;
+            if (col >= normalized[line].length) col = normalized[line].length - 1;
             break;
           case 'down':
-            if (line < lines.length - 1) line++;
-            if (col >= lines[line].length) col = lines[line].length - 1;
+            if (line < normalized.length - 1) line++;
+            if (col >= normalized[line].length) col = normalized[line].length - 1;
             break;
           case 'left':
             if (col > 0) col--;
             break;
           case 'right':
-            if (col < lines[line].length - 1) col++;
+            if (col < normalized[line].length - 1) col++;
             break;
           case 'return':
             stdin.removeListener('keypress', handleKeyPress);
             stdin.setRawMode(false);
-            this.lastSelectedIndex = this.getLinearIndexFromCoordinates(lines, line, col);
-            const selected = lines[line][col];
+            this.lastSelectedIndex = this.getLinearIndexFromCoordinates(normalized, line, col);
+            const selected = normalized[line][col];
             if (selected?.action) await selected.action();
             resolve(selected?.name || selected);
             return;
@@ -136,9 +287,6 @@ class TerminalHUD {
     });
   }
 
-  /**
-   * Display numbered menu (when numberedMenus is true)
-   */
   async displayMenuFromOptions(question, options, config = { clear: true }) {
     if (!this.numberedMenus) {
       return this.displayMenuWithArrows(question, options, config);
@@ -156,14 +304,14 @@ class TerminalHUD {
     };
 
     options.forEach(opt => {
-      Array.isArray(opt) 
+      Array.isArray(opt)
         ? opt.forEach(subOpt => printOption(subOpt))
         : printOption(opt);
     });
 
     const choice = parseInt(await this.ask('Choose an option: '));
     const selected = optionMap[choice];
-    
+   
     if (!selected) {
       console.log('Invalid option, try again.');
       return this.displayMenuFromOptions(question, options, config);
@@ -172,67 +320,6 @@ class TerminalHUD {
     if (typeof selected === 'string') return selected;
     if (selected.action) await selected.action();
     return selected.name;
-  }
-
-  // Menu display utilities
-  normalizeOptions(options) {
-    return options.map(opt => {
-      if (Array.isArray(opt)) return opt.map(item => typeof item === 'string' ? { name: item } : item);
-      if (opt?.type === 'options') return opt.value.map(item => typeof item === 'string' ? { name: item } : item);
-      return [typeof opt === 'string' ? { name: opt } : opt];
-    });
-  }
-
-  getCoordinatesFromLinearIndex(lines, index) {
-    let count = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (index < count + lines[i].length) {
-        return { line: i, col: index - count };
-      }
-      count += lines[i].length;
-    }
-    return { 
-      line: lines.length - 1, 
-      col: lines[lines.length - 1].length - 1 
-    };
-  }
-
-  getLinearIndexFromCoordinates(lines, line, col) {
-    return lines.slice(0, line).reduce((sum, l) => sum + l.length, 0) + col;
-  }
-
-  /**
-   * Main menu display method
-   */
-  async displayMenu(menuGenerator, config = { 
-    props: {}, 
-    clearScreen: true, 
-    alert: undefined, 
-    alert_emoji: '⚠️', 
-    initialSelectedIndex: 0,
-    selectedInc : 0 
-  }) {
-    if (config.clearScreen) console.clear();
-    this.startLoading();
-    const menu = await menuGenerator(config.props);
-    this.stopLoading();
-
-    if (config.alert) {
-      console.log(`${config.alert_emoji || '⚠️'}  ${config.alert}\n`);
-    }
-
-    const menuTitle = await menu.title;
-    let initialIndex = menuGenerator === this.lastMenuGenerator 
-      ? this.lastSelectedIndex 
-      : config.initialSelectedIndex || 0;
-
-      if(config.selectedInc){initialIndex = initialIndex + config.selectedInc}
-    
-    this.lastMenuGenerator = menuGenerator;
-
-    return this.numberedMenus
-      ? this.displayNumberedMenu(menuTitle, menu.options)
-      : this.displayMenuWithArrows(menuTitle, menu.options, config, initialIndex);
   }
 
   async displayNumberedMenu(title, options) {
@@ -245,7 +332,7 @@ class TerminalHUD {
       if (opt.type === 'options' && Array.isArray(opt.value)) {
         console.log(opt.value.map(o => `${index++}. ${o.name}`).join(' '));
         opt.value.forEach(o => optionMap[index - opt.value.length + o.value] = o);
-      } 
+      }
       else if (opt.type === 'text' && opt.value) {
         console.log(opt.value);
       }
@@ -268,21 +355,176 @@ class TerminalHUD {
     return selected.name;
   }
 
-  pressWait() {
-    return new Promise(resolve => {
-      console.log('\nPress any key to continue...');
-      const handler = () => {
-        stdin.setRawMode(false);
-        stdin.removeListener('data', handler);
-        resolve();
-      };
-      stdin.setRawMode(true);
-      stdin.once('data', handler);
+  // === Menu Utilities ===
+
+  normalizeOptions(options) {
+    return options.map(opt => {
+      if (Array.isArray(opt)) return opt.map(item => typeof item === 'string' ? { name: item } : item);
+      if (opt?.type === 'options') return opt.value.map(item => typeof item === 'string' ? { name: item } : item);
+      return [typeof opt === 'string' ? { name: opt } : opt];
     });
   }
 
-  close() {
-    this.rl.close();
+  getCoordinatesFromLinearIndex(lines, index) {
+    let count = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (index < count + lines[i].length) {
+        return { line: i, col: index - count };
+      }
+      count += lines[i].length;
+    }
+    return {
+      line: lines.length - 1,
+      col: lines[lines.length - 1].length - 1
+    };
+  }
+
+  getLinearIndexFromCoordinates(lines, line, col) {
+    return lines.slice(0, line).reduce((sum, l) => sum + l.length, 0) + col;
+  }
+
+  // === Mouse Support ===
+
+  _enableMouseTracking() {
+    // Enable mouse tracking for click events only
+    stdout.write('\x1b[?1000h');
+    this._mouseEnabled = true;
+
+    stdin.on('data', (data) => this._handleMouseData(data));
+  }
+
+  _disableMouseTracking() {
+    if (!this._mouseEnabled) return;
+    stdout.write('\x1b[?1000l');
+    this._mouseEnabled = false;
+  }
+
+  _handleMouseData(data) {
+    if (!this._currentMenuState) return;
+
+    const str = data.toString();
+    
+    // Quick check if this is a mouse event
+    if (!str.includes('\x1b[') || (!str.includes('M') && !str.includes('m'))) {
+      return;
+    }
+
+    this._mouseEventBuffer += str;
+
+    // Process SGR mouse events (most common)
+    const sgrMatch = this._mouseEventBuffer.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+    if (sgrMatch) {
+      this._mouseEventBuffer = '';
+      this._handleSGRMouseEvent(sgrMatch);
+      return;
+    }
+
+    // Process X10 mouse events (fallback)
+    const x10Match = this._mouseEventBuffer.match(/\x1b\[M([\x20-\x7F]{3})/);
+    if (x10Match) {
+      this._mouseEventBuffer = '';
+      this._handleX10MouseEvent(x10Match);
+      return;
+    }
+
+    // Clear buffer if it gets too large or doesn't contain valid mouse events
+    if (this._mouseEventBuffer.length > 20) {
+      this._mouseEventBuffer = '';
+    }
+  }
+
+  _handleSGRMouseEvent(match) {
+    const button = parseInt(match[1]);
+    const x = parseInt(match[2]) - 1;
+    const y = parseInt(match[3]) - 1;
+    const eventType = match[4];
+
+    // Only process left mouse button press events
+    if (eventType === 'M' && button === 0) {
+      this._processMouseClick(x, y);
+    }
+  }
+
+  _handleX10MouseEvent(match) {
+    const bytes = match[1];
+    const button = bytes.charCodeAt(0) - 32;
+    const x = bytes.charCodeAt(1) - 33;
+    const y = bytes.charCodeAt(2) - 33;
+
+    // Only process left mouse button events
+    if (button === 0) {
+      this._processMouseClick(x, y);
+    }
+  }
+
+  _processMouseClick(x, y) {
+    if (!this._currentMenuState) return;
+
+    const { normalized, question, setFocus, select } = this._currentMenuState;
+    const clickedIndex = this._findOptionIndexAt(y, x, normalized, question);
+
+    if (clickedIndex === -1) return;
+
+    const { line: targetLine, col: targetCol } = this.getCoordinatesFromLinearIndex(normalized, clickedIndex);
+
+    // Set focus to clicked item immediately
+    setFocus(targetLine, targetCol);
+
+    // Double-click detection with debouncing
+    const now = Date.now();
+    const isDoubleClick = (now - this._lastClick.time < this._DOUBLE_CLICK_DELAY &&
+                          this._lastClick.x === x && 
+                          this._lastClick.y === y);
+
+    if (isDoubleClick) {
+      // Reset click history and execute selection
+      this._lastClick = { time: 0, x: -1, y: -1 };
+      // Small delay to ensure the UI updates before selection
+      setTimeout(() => select(), 50);
+    } else {
+      // Store click for potential double-click
+      this._lastClick = { time: now, x, y };
+    }
+  }
+
+  _findOptionIndexAt(terminalY, terminalX, normalized, question) {
+    // Calculate starting row based on question
+    let startRow = 0;
+    if (question) {
+      // Each line of question + blank line
+      const questionLines = question.split('\n').length;
+      startRow += questionLines + 1;
+    }
+
+    // Check each menu row
+    for (let row = 0; row < normalized.length; row++) {
+      const actualRow = startRow + row;
+      
+      if (actualRow === terminalY) {
+        // Found the correct row, now find the column
+        let currentCol = 0;
+        for (let col = 0; col < normalized[row].length; col++) {
+          const opt = normalized[row][col];
+          const text = typeof opt === 'string' ? opt : opt.name || JSON.stringify(opt);
+          const textWidth = text.length;
+
+          // Check if click is within this option's boundaries
+          // Give some padding for easier clicking
+          const optionStart = currentCol;
+          const optionEnd = currentCol + textWidth;
+          
+          if (terminalX >= optionStart && terminalX <= optionEnd + 2) {
+            // Calculate the linear index
+            return this.getLinearIndexFromCoordinates(normalized, row, col);
+          }
+
+          currentCol += textWidth + 3; // Move to next option (text + "   " separator)
+        }
+        break;
+      }
+    }
+
+    return -1; // No option found at these coordinates
   }
 }
 
