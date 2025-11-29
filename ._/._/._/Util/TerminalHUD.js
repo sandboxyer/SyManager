@@ -31,10 +31,14 @@ class TerminalHUD {
     this._currentMenuState = null;
     this._lastClick = { time: 0, x: -1, y: -1 };
     this._DOUBLE_CLICK_DELAY = 300;
+    this._doubleClickTimeout = null;
+    this._clickInProgress = false;
 
-    if (this.mouseSupport && !this.numberedMenus) {
-      this._enableMouseTracking();
-    }
+    // Track if we're currently in a menu
+    this._inMenu = false;
+
+    // Bind the mouse handler to maintain context
+    this._handleMouseData = this._handleMouseData.bind(this);
   }
 
   // === Core Helper Methods ===
@@ -130,7 +134,7 @@ class TerminalHUD {
   }
 
   close() {
-    this._disableMouseTracking();
+    this._cleanupAll();
     this.rl.close();
   }
 
@@ -171,14 +175,30 @@ class TerminalHUD {
       };
 
       const select = async () => {
+        // Prevent multiple simultaneous selections
+        if (this._clickInProgress) return;
+        
+        this._clickInProgress = true;
         cleanup();
+        
         this.lastSelectedIndex = this.getLinearIndexFromCoordinates(normalized, line, col);
         const selected = normalized[line][col];
-        if (selected?.action) await selected.action();
+        
+        if (selected?.action) {
+          // Execute the action and properly await it
+          const result = selected.action();
+          if (result instanceof Promise) {
+            await result;
+          }
+        }
+        
+        this._clickInProgress = false;
         resolve(selected?.name || selected);
       };
 
       const handleKeyPress = async (_, key) => {
+        if (!this._inMenu) return;
+        
         switch (key.name) {
           case 'up':
             if (line > 0) line--;
@@ -197,21 +217,34 @@ class TerminalHUD {
           case 'return':
             await select();
             return;
+          case 'c':
+            if (key.ctrl) {
+              cleanup();
+              process.exit();
+            }
+            break;
         }
         renderMenu();
       };
 
       const cleanup = () => {
+        this._inMenu = false;
         stdin.removeListener('keypress', handleKeyPress);
         stdin.setRawMode(false);
         this._currentMenuState = null;
+        this._safeDisableMouseTracking();
+        this._resetClickState();
       };
 
-      // Setup keyboard input
+      // Setup for this menu
+      this._inMenu = true;
       readline.emitKeypressEvents(stdin);
       stdin.setRawMode(true);
       stdin.resume();
       stdin.on('keypress', handleKeyPress);
+
+      // Enable mouse tracking for this menu
+      this._safeEnableMouseTracking();
 
       // Store menu state for mouse handling
       this._currentMenuState = {
@@ -219,7 +252,8 @@ class TerminalHUD {
         question,
         renderMenu,
         setFocus,
-        select
+        select,
+        cleanup
       };
 
       renderMenu();
@@ -385,25 +419,75 @@ class TerminalHUD {
 
   // === Mouse Support ===
 
-  _enableMouseTracking() {
-    // Enable mouse tracking for click events only
-    stdout.write('\x1b[?1000h');
-    this._mouseEnabled = true;
+  _safeEnableMouseTracking() {
+    if (this._mouseEnabled) return;
+    
+    try {
+      // Enable mouse tracking for click events only
+      stdout.write('\x1b[?1000h');
+      this._mouseEnabled = true;
 
-    stdin.on('data', (data) => this._handleMouseData(data));
+      // Add the mouse event listener
+      stdin.on('data', this._handleMouseData);
+    } catch (error) {
+      // Silently fail - mouse might not be supported
+      this._mouseEnabled = false;
+    }
   }
 
-  _disableMouseTracking() {
+  _safeDisableMouseTracking() {
     if (!this._mouseEnabled) return;
-    stdout.write('\x1b[?1000l');
-    this._mouseEnabled = false;
+    
+    try {
+      stdout.write('\x1b[?1000l'); // Disable mouse tracking
+      this._mouseEnabled = false;
+
+      // Remove the mouse event listener
+      stdin.removeListener('data', this._handleMouseData);
+    } catch (error) {
+      // Silently fail
+    }
+  }
+
+  _cleanupAll() {
+    // Comprehensive cleanup
+    this._inMenu = false;
+    this._safeDisableMouseTracking();
+    this._resetMouseState();
+    
+    if (this._doubleClickTimeout) {
+      clearTimeout(this._doubleClickTimeout);
+      this._doubleClickTimeout = null;
+    }
+  }
+
+  _resetMouseState() {
+    this._mouseEventBuffer = '';
+    this._currentMenuState = null;
+    this._resetClickState();
+  }
+
+  _resetClickState() {
+    this._lastClick = { time: 0, x: -1, y: -1 };
+    this._clickInProgress = false;
+    
+    if (this._doubleClickTimeout) {
+      clearTimeout(this._doubleClickTimeout);
+      this._doubleClickTimeout = null;
+    }
   }
 
   _handleMouseData(data) {
-    if (!this._currentMenuState) return;
+    // Only process mouse events when in a menu with mouse support
+    if (!this.mouseSupport || !this._inMenu || !this._currentMenuState) {
+      return;
+    }
 
     const str = data.toString();
     
+    // Debug: log mouse events to see what's happening
+    // console.log('Mouse data:', Buffer.from(str).toString('hex'));
+
     // Quick check if this is a mouse event
     if (!str.includes('\x1b[') || (!str.includes('M') && !str.includes('m'))) {
       return;
@@ -420,7 +504,7 @@ class TerminalHUD {
     }
 
     // Process X10 mouse events (fallback)
-    const x10Match = this._mouseEventBuffer.match(/\x1b\[M([\x20-\x7F]{3})/);
+    const x10Match = this._mouseEventBuffer.match(/\x1b\[M([\x00-\xFF]{3})/);
     if (x10Match) {
       this._mouseEventBuffer = '';
       this._handleX10MouseEvent(x10Match);
@@ -439,7 +523,7 @@ class TerminalHUD {
     const y = parseInt(match[3]) - 1;
     const eventType = match[4];
 
-    // Only process left mouse button press events
+    // Only process left mouse button press events (not release)
     if (eventType === 'M' && button === 0) {
       this._processMouseClick(x, y);
     }
@@ -451,14 +535,15 @@ class TerminalHUD {
     const x = bytes.charCodeAt(1) - 33;
     const y = bytes.charCodeAt(2) - 33;
 
-    // Only process left mouse button events
+    // Only process left mouse button events (button code 0 for press, 35 for release)
     if (button === 0) {
       this._processMouseClick(x, y);
     }
   }
 
   _processMouseClick(x, y) {
-    if (!this._currentMenuState) return;
+    // Don't process if click already in progress
+    if (this._clickInProgress) return;
 
     const { normalized, question, setFocus, select } = this._currentMenuState;
     const clickedIndex = this._findOptionIndexAt(y, x, normalized, question);
@@ -467,23 +552,41 @@ class TerminalHUD {
 
     const { line: targetLine, col: targetCol } = this.getCoordinatesFromLinearIndex(normalized, clickedIndex);
 
-    // Set focus to clicked item immediately
+    // Set focus to clicked item immediately (single click behavior)
     setFocus(targetLine, targetCol);
 
-    // Double-click detection with debouncing
+    // Double-click detection with proper debouncing
     const now = Date.now();
     const isDoubleClick = (now - this._lastClick.time < this._DOUBLE_CLICK_DELAY &&
                           this._lastClick.x === x && 
                           this._lastClick.y === y);
 
     if (isDoubleClick) {
-      // Reset click history and execute selection
+      // Reset click history and clear any pending timeout
       this._lastClick = { time: 0, x: -1, y: -1 };
-      // Small delay to ensure the UI updates before selection
-      setTimeout(() => select(), 50);
+      if (this._doubleClickTimeout) {
+        clearTimeout(this._doubleClickTimeout);
+        this._doubleClickTimeout = null;
+      }
+      
+      // Execute selection for double-click
+      select().catch(error => {
+        console.error('Error in menu selection:', error);
+      });
     } else {
       // Store click for potential double-click
       this._lastClick = { time: now, x, y };
+      
+      // Clear any existing timeout
+      if (this._doubleClickTimeout) {
+        clearTimeout(this._doubleClickTimeout);
+      }
+      
+      // Set new timeout to reset click after delay
+      this._doubleClickTimeout = setTimeout(() => {
+        this._lastClick = { time: 0, x: -1, y: -1 };
+        this._doubleClickTimeout = null;
+      }, this._DOUBLE_CLICK_DELAY);
     }
   }
 
