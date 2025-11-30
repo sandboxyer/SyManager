@@ -30,12 +30,14 @@ typedef struct {
     int verification_success;
     long long duration_ms;
     char details[1024];
+    char verbose_output[4096];
 } TestCase;
 
 // Global variables
 char cli_command[32] = "./sydb";
 int test_mode = 0; // 0 = CLI, 1 = HTTP
 char server_url[256] = "http://localhost:8080";
+int verbose_mode = 0; // 0 = normal, 1 = verbose logging
 
 // HTTP Request/Response structures
 typedef struct {
@@ -59,6 +61,7 @@ int count_files_in_directory(const char *path);
 int count_instances_in_collection(const char *database, const char *collection);
 char* get_last_inserted_id(const char *database, const char *collection);
 int execute_command_and_capture(const char *command, char *output, size_t output_size);
+int execute_command_and_capture_verbose(const char *command, char *output, size_t output_size, char *verbose_output, size_t verbose_size);
 int verify_database_structure(const char *database);
 int verify_collection_structure(const char *database, const char *collection);
 int verify_schema_content(const char *database, const char *collection, const char *expected_fields);
@@ -153,21 +156,97 @@ int execute_command_and_capture(const char *command, char *output, size_t output
     return 0;
 }
 
+int execute_command_and_capture_verbose(const char *command, char *output, size_t output_size, char *verbose_output, size_t verbose_size) {
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Executing command: %s\n" RESET, command);
+    }
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Failed to execute command: popen returned NULL\n" RESET);
+        }
+        return -1;
+    }
+    
+    output[0] = '\0';
+    verbose_output[0] = '\0';
+    
+    char buffer[1024];
+    size_t total_verbose_size = 0;
+    
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        // Remove newline for output
+        buffer[strcspn(buffer, "\n")] = '\0';
+        
+        // Store first line in output
+        if (output[0] == '\0') {
+            strncpy(output, buffer, output_size - 1);
+            output[output_size - 1] = '\0';
+        }
+        
+        // Accumulate all output for verbose
+        if (total_verbose_size + strlen(buffer) < verbose_size - 1) {
+            strcat(verbose_output, buffer);
+            strcat(verbose_output, "\n");
+            total_verbose_size += strlen(buffer) + 1;
+        }
+    }
+    
+    int status = pclose(fp);
+    
+    // For verification commands with grep, we need to handle exit status differently
+    // grep returns 0 if pattern found, 1 if not found, 2 on error
+    // We should only return failure on actual command execution errors, not on grep "not found"
+    int result;
+    if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        // If the command contains grep, treat exit code 1 as success (pattern not found is normal)
+        if (strstr(command, "grep") != NULL) {
+            result = (exit_code == 0 || exit_code == 1) ? 0 : -1;
+        } else {
+            result = (exit_code == 0) ? 0 : -1;
+        }
+    } else {
+        result = -1; // Command didn't exit normally
+    }
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Command exit status: %d (raw: %d)\n" RESET, result, status);
+        if (verbose_output[0] != '\0') {
+            printf(YELLOW "  [VERBOSE] Command output:\n%s\n" RESET, verbose_output);
+        } else {
+            printf(YELLOW "  [VERBOSE] Command output: (empty)\n" RESET);
+        }
+    }
+    
+    return result;
+}
+
 int verify_database_structure(const char *database) {
     char path[512];
     snprintf(path, sizeof(path), "/tmp/sydb_test/%s", database);
     
     if (!file_exists(path)) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Database directory doesn't exist: %s\n" RESET, path);
+        }
         printf(RED "  ✗ Database directory doesn't exist\n" RESET);
         return 0;
     }
     
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Database path is not a directory or stat failed: %s\n" RESET, path);
+        }
         printf(RED "  ✗ Database path is not a directory\n" RESET);
         return 0;
     }
     
+    if (verbose_mode) {
+        printf(GREEN "  [VERBOSE] Database directory exists and is valid: %s\n" RESET, path);
+    }
     printf(GREEN "  ✓ Database directory exists and is valid\n" RESET);
     return 1;
 }
@@ -177,6 +256,9 @@ int verify_collection_structure(const char *database, const char *collection) {
     snprintf(path, sizeof(path), "/tmp/sydb_test/%s/%s", database, collection);
     
     if (!file_exists(path)) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Collection directory doesn't exist: %s\n" RESET, path);
+        }
         printf(RED "  ✗ Collection directory doesn't exist\n" RESET);
         return 0;
     }
@@ -185,6 +267,9 @@ int verify_collection_structure(const char *database, const char *collection) {
     char schema_path[512];
     snprintf(schema_path, sizeof(schema_path), "%s/schema.txt", path);
     if (!file_exists(schema_path)) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Schema file doesn't exist: %s\n" RESET, schema_path);
+        }
         printf(RED "  ✗ Schema file doesn't exist\n" RESET);
         return 0;
     }
@@ -193,10 +278,18 @@ int verify_collection_structure(const char *database, const char *collection) {
     char data_path[512];
     snprintf(data_path, sizeof(data_path), "%s/data.sydb", path);
     if (!file_exists(data_path)) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Data file doesn't exist: %s\n" RESET, data_path);
+        }
         printf(RED "  ✗ Data file doesn't exist\n" RESET);
         return 0;
     }
     
+    if (verbose_mode) {
+        printf(GREEN "  [VERBOSE] Collection structure is valid: %s\n" RESET, path);
+        printf(YELLOW "  [VERBOSE] Schema file: %s\n" RESET, schema_path);
+        printf(YELLOW "  [VERBOSE] Data file: %s\n" RESET, data_path);
+    }
     printf(GREEN "  ✓ Collection structure is valid\n" RESET);
     return 1;
 }
@@ -206,17 +299,37 @@ int verify_schema_content(const char *database, const char *collection, const ch
     snprintf(command, sizeof(command), "%s schema %s %s", cli_command, database, collection);
     
     char output[1024];
-    if (execute_command_and_capture(command, output, sizeof(output)) != 0) {
+    char verbose_output[4096];
+    int result;
+    
+    if (verbose_mode) {
+        result = execute_command_and_capture_verbose(command, output, sizeof(output), verbose_output, sizeof(verbose_output));
+    } else {
+        result = execute_command_and_capture(command, output, sizeof(output));
+    }
+    
+    if (result != 0) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Could not read schema, command failed\n" RESET);
+        }
         printf(RED "  ✗ Could not read schema\n" RESET);
         return 0;
     }
     
     // Basic schema verification
     if (strstr(output, "Field") == NULL || strstr(output, "Type") == NULL) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Schema output format incorrect\n" RESET);
+            printf(RED "  [VERBOSE] Output received: %s\n" RESET, output);
+        }
         printf(RED "  ✗ Schema output format incorrect\n" RESET);
         return 0;
     }
     
+    if (verbose_mode) {
+        printf(GREEN "  [VERBOSE] Schema content is valid\n" RESET);
+        printf(YELLOW "  [VERBOSE] Schema output:\n%s\n" RESET, output);
+    }
     printf(GREEN "  ✓ Schema content is valid\n" RESET);
     return 1;
 }
@@ -234,20 +347,58 @@ int execute_test_with_verification(TestCase *test) {
     test->duration_ms = end_time - start_time;
     test->success = (result == 0);
     
+    if (verbose_mode) {
+        printf(YELLOW "\n  [VERBOSE] Command: %s\n" RESET, test->command);
+        printf(YELLOW "  [VERBOSE] Exit code: %d\n" RESET, result);
+        printf(YELLOW "  [VERBOSE] Execution time: %lld ms\n" RESET, test->duration_ms);
+    }
+    
     // Perform verification if command succeeded
     test->verification_success = 1;
     if (test->success && test->verification_command[0] != '\0') {
         char verification_output[1024];
-        if (execute_command_and_capture(test->verification_command, verification_output, sizeof(verification_output)) == 0) {
+        char verbose_output[4096];
+        int verification_result;
+        
+        if (verbose_mode) {
+            verification_result = execute_command_and_capture_verbose(test->verification_command, 
+                                                                   verification_output, 
+                                                                   sizeof(verification_output),
+                                                                   verbose_output,
+                                                                   sizeof(verbose_output));
+            strncpy(test->verbose_output, verbose_output, sizeof(test->verbose_output) - 1);
+        } else {
+            verification_result = execute_command_and_capture(test->verification_command, 
+                                                            verification_output, 
+                                                            sizeof(verification_output));
+        }
+        
+        if (verification_result == 0) {
             if (test->expected_output[0] != '\0') {
                 if (strstr(verification_output, test->expected_output) == NULL) {
                     test->verification_success = 0;
                     strncpy(test->details, verification_output, sizeof(test->details) - 1);
+                    
+                    if (verbose_mode) {
+                        printf(RED "  [VERBOSE] Verification failed - expected pattern not found\n" RESET);
+                        printf(RED "  [VERBOSE] Expected: '%s'\n" RESET, test->expected_output);
+                        printf(RED "  [VERBOSE] Got: '%s'\n" RESET, verification_output);
+                    }
+                } else {
+                    if (verbose_mode) {
+                        printf(GREEN "  [VERBOSE] Verification passed - pattern found\n" RESET);
+                        printf(YELLOW "  [VERBOSE] Expected: '%s'\n" RESET, test->expected_output);
+                        printf(YELLOW "  [VERBOSE] Got: '%s'\n" RESET, verification_output);
+                    }
                 }
             }
         } else {
             test->verification_success = 0;
             strcpy(test->details, "Verification command failed");
+            
+            if (verbose_mode) {
+                printf(RED "  [VERBOSE] Verification command failed with exit code %d\n" RESET, verification_result);
+            }
         }
     }
     
@@ -263,8 +414,24 @@ int execute_test_with_verification(TestCase *test) {
     printf(" %s%4lld ms%s\n", CYAN, test->duration_ms, RESET);
     
     // Print details if verification failed
-    if (!test->verification_success && test->details[0] != '\0') {
-        printf(RED "  Verification failed: %s\n" RESET, test->details);
+    if (!test->verification_success) {
+        if (test->details[0] != '\0') {
+            printf(RED "  Verification failed: %s\n" RESET, test->details);
+        }
+        
+        if (verbose_mode && test->verbose_output[0] != '\0') {
+            printf(YELLOW "  [VERBOSE] Full verification output:\n%s\n" RESET, test->verbose_output);
+        }
+    }
+    
+    if (verbose_mode && !overall_success) {
+        printf(RED "  [VERBOSE] TEST FAILURE ANALYSIS:\n" RESET);
+        printf(RED "  [VERBOSE]   Command success: %s\n" RESET, test->success ? "YES" : "NO");
+        printf(RED "  [VERBOSE]   Verification success: %s\n" RESET, test->verification_success ? "YES" : "NO");
+        printf(RED "  [VERBOSE]   Details: %s\n" RESET, test->details);
+        if (test->verbose_output[0] != '\0') {
+            printf(RED "  [VERBOSE]   Full output captured (%zu bytes)\n" RESET, strlen(test->verbose_output));
+        }
     }
     
     return overall_success;
@@ -279,6 +446,13 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     response->status_code = 0;
     response->body = NULL;
     response->body_length = 0;
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] HTTP Request: %s %s\n" RESET, method, url);
+        if (body) {
+            printf(YELLOW "  [VERBOSE] Request body: %s\n" RESET, body);
+        }
+    }
     
     // Parse URL
     char host[256] = "localhost";
@@ -314,10 +488,17 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
         strcpy(path, url);
     }
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Parsed URL - Host: %s, Port: %d, Path: %s\n" RESET, host, port, path);
+    }
+    
     // Create socket
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Socket creation failed: %s\n" RESET, strerror(errno));
+        }
         free(response);
         return NULL;
     }
@@ -333,6 +514,9 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     struct hostent* server = gethostbyname(host);
     if (!server) {
         fprintf(stderr, "Error: No such host %s\n", host);
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Host resolution failed for: %s\n" RESET, host);
+        }
         close(sockfd);
         free(response);
         return NULL;
@@ -347,9 +531,16 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         fprintf(stderr, "Error connecting to %s:%d: %s\n", host, port, strerror(errno));
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Connection failed to %s:%d: %s\n" RESET, host, port, strerror(errno));
+        }
         close(sockfd);
         free(response);
         return NULL;
+    }
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Connected successfully to %s:%d\n" RESET, host, port);
     }
     
     // Build HTTP request
@@ -386,14 +577,25 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     
     if (request_len >= (int)sizeof(request)) {
         fprintf(stderr, "Error: HTTP request too large\n");
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] HTTP request too large (%d bytes)\n" RESET, request_len);
+        }
         close(sockfd);
         free(response);
         return NULL;
     }
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Sending HTTP request (%d bytes):\n%.*s\n" RESET, 
+               request_len, request_len > 500 ? 500 : request_len, request);
+    }
+    
     // Send request
     if (send(sockfd, request, request_len, 0) < 0) {
         perror("send");
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Send failed: %s\n" RESET, strerror(errno));
+        }
         close(sockfd);
         free(response);
         return NULL;
@@ -414,6 +616,9 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     
     if (received < 0) {
         perror("recv");
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Receive failed: %s\n" RESET, strerror(errno));
+        }
         close(sockfd);
         free(response);
         return NULL;
@@ -421,6 +626,11 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
     
     response_buffer[total_received] = '\0';
     close(sockfd);
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Received %zd bytes response\n" RESET, total_received);
+        printf(YELLOW "  [VERBOSE] Response (first 500 bytes):\n%.500s\n" RESET, response_buffer);
+    }
     
     // Parse HTTP response
     char* status_line = strstr(response_buffer, "HTTP/1.1");
@@ -444,6 +654,11 @@ HttpResponse* http_request(const char* method, const char* url, const char* body
         response->body_length = 0;
     }
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Parsed response - Status: %d, Body length: %zu\n" RESET, 
+               response->status_code, response->body_length);
+    }
+    
     return response;
 }
 
@@ -457,25 +672,62 @@ void http_response_free(HttpResponse* response) {
 }
 
 int verify_http_response(const HttpResponse* response, const char* expected_pattern, int check_success_only) {
-    if (!response) return 0;
+    if (!response) {
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Response is NULL\n" RESET);
+        }
+        return 0;
+    }
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Verifying response - Status: %d, Body length: %zu\n" RESET, 
+               response->status_code, response->body_length);
+        if (response->body) {
+            printf(YELLOW "  [VERBOSE] Response body: %s\n" RESET, response->body);
+        }
+    }
     
     if (check_success_only) {
         // Only check if the response indicates success (true) or proper error handling (false)
-        // This is useful for endpoints that might return success:false with proper error messages
-        return (response->status_code >= 200 && response->status_code < 500) && 
-               response->body && strstr(response->body, "\"success\":") != NULL;
+        int result = (response->status_code >= 200 && response->status_code < 500) && 
+                    response->body && strstr(response->body, "\"success\":") != NULL;
+        
+        if (verbose_mode) {
+            printf(YELLOW "  [VERBOSE] Check success only: %s\n" RESET, result ? "PASS" : "FAIL");
+            printf(YELLOW "  [VERBOSE] Status code check: %d in [200,500)\n" RESET, response->status_code);
+            printf(YELLOW "  [VERBOSE] Has success field: %s\n" RESET, 
+                   (response->body && strstr(response->body, "\"success\":")) ? "YES" : "NO");
+        }
+        
+        return result;
     } else {
         // Check status code and expected pattern
         if (response->status_code < 200 || response->status_code >= 300) {
+            if (verbose_mode) {
+                printf(RED "  [VERBOSE] Status code check failed: %d not in [200,300)\n" RESET, response->status_code);
+            }
             return 0;
         }
         
         // Check for expected pattern in body
         if (expected_pattern && expected_pattern[0] != '\0') {
             if (!response->body || strstr(response->body, expected_pattern) == NULL) {
+                if (verbose_mode) {
+                    printf(RED "  [VERBOSE] Pattern not found in response body\n" RESET);
+                    printf(RED "  [VERBOSE] Expected: '%s'\n" RESET, expected_pattern);
+                    printf(RED "  [VERBOSE] Got: '%s'\n" RESET, response->body ? response->body : "NULL");
+                }
                 return 0;
+            } else {
+                if (verbose_mode) {
+                    printf(GREEN "  [VERBOSE] Pattern found in response body\n" RESET);
+                }
             }
         }
+    }
+    
+    if (verbose_mode) {
+        printf(GREEN "  [VERBOSE] Response verification passed\n" RESET);
     }
     
     return 1;
@@ -545,13 +797,39 @@ int http_test_endpoint(const char* description, const char* method, const char* 
             } else {
                 printf(RED "  Status: %d, No response body\n" RESET, response->status_code);
             }
+            
+            if (verbose_mode) {
+                printf(RED "  [VERBOSE] HTTP TEST FAILURE ANALYSIS:\n" RESET);
+                printf(RED "  [VERBOSE]   Endpoint: %s %s\n" RESET, method, endpoint);
+                printf(RED "  [VERBOSE]   Status Code: %d\n" RESET, response->status_code);
+                printf(RED "  [VERBOSE]   Expected Pattern: '%s'\n" RESET, expected_pattern ? expected_pattern : "NONE");
+                printf(RED "  [VERBOSE]   Check Success Only: %s\n" RESET, check_success_only ? "YES" : "NO");
+                if (response->body) {
+                    printf(RED "  [VERBOSE]   Response Body: %s\n" RESET, response->body);
+                } else {
+                    printf(RED "  [VERBOSE]   Response Body: NULL\n" RESET);
+                }
+            }
         } else {
             printf("[" GREEN "PASS" RESET "] %s%4lld ms%s\n", CYAN, end_time - start_time, RESET);
+            
+            if (verbose_mode) {
+                printf(GREEN "  [VERBOSE] HTTP TEST SUCCESS DETAILS:\n" RESET);
+                printf(GREEN "  [VERBOSE]   Endpoint: %s %s\n" RESET, method, endpoint);
+                printf(GREEN "  [VERBOSE]   Status Code: %d\n" RESET, response->status_code);
+                printf(GREEN "  [VERBOSE]   Response Time: %lld ms\n" RESET, end_time - start_time);
+            }
         }
         http_response_free(response);
     } else {
         printf("[" RED "FAIL" RESET "] %s%4lld ms%s\n", CYAN, end_time - start_time, RESET);
         printf(RED "  No response from server\n" RESET);
+        
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] HTTP TEST FAILURE - NO RESPONSE:\n" RESET);
+            printf(RED "  [VERBOSE]   Endpoint: %s %s\n" RESET, method, endpoint);
+            printf(RED "  [VERBOSE]   Server may be down or unreachable\n" RESET);
+        }
     }
     
     return success;
@@ -561,6 +839,10 @@ int http_test_endpoint(const char* description, const char* method, const char* 
 
 void cleanup_test_databases() {
     printf("Cleaning up previous test databases...\n");
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Cleaning up test directories in /tmp/sydb_test/\n" RESET);
+    }
     
     // Remove all test databases from previous runs
     char command[512];
@@ -572,6 +854,10 @@ void cleanup_test_databases() {
     system(command);
     
     usleep(50000); // 50ms to ensure cleanup completes
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Cleanup completed\n" RESET);
+    }
 }
 
 int run_http_database_tests() {
@@ -584,10 +870,14 @@ int run_http_database_tests() {
     
     // Generate unique database names to avoid conflicts
     char unique_db1[64], unique_db2[64];
-struct timespec ts;
-clock_gettime(CLOCK_MONOTONIC, &ts);
-snprintf(unique_db1, sizeof(unique_db1), "testdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
-snprintf(unique_db2, sizeof(unique_db2), "testdb2_%ld_%ld", ts.tv_sec, ts.tv_nsec + 1);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(unique_db1, sizeof(unique_db1), "testdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+    snprintf(unique_db2, sizeof(unique_db2), "testdb2_%ld_%ld", ts.tv_sec, ts.tv_nsec + 1);
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Using unique database names: %s, %s\n" RESET, unique_db1, unique_db2);
+    }
     
     char create_db1_body[128], create_db2_body[128];
     snprintf(create_db1_body, sizeof(create_db1_body), "{\"name\":\"%s\"}", unique_db1);
@@ -651,9 +941,13 @@ int run_http_collection_tests() {
     
     // Use a unique database name to avoid conflicts
     char unique_db[64];
-struct timespec ts;
-clock_gettime(CLOCK_MONOTONIC, &ts);
-snprintf(unique_db, sizeof(unique_db), "testcolldb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(unique_db, sizeof(unique_db), "testcolldb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Using unique database name: %s\n" RESET, unique_db);
+    }
     
     char create_db_body[128];
     snprintf(create_db_body, sizeof(create_db_body), "{\"name\":\"%s\"}", unique_db);
@@ -662,6 +956,12 @@ snprintf(unique_db, sizeof(unique_db), "testcolldb_%ld_%ld", ts.tv_sec, ts.tv_ns
     HttpResponse* db_response = http_request("POST", "/api/databases", create_db_body, "application/json");
     if (!db_response || !verify_http_response(db_response, "\"success\":true", 0)) {
         printf(RED "  Failed to create test database for collection tests\n" RESET);
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Database creation failed\n" RESET);
+            if (db_response) {
+                printf(RED "  [VERBOSE] Response status: %d, body: %s\n" RESET, db_response->status_code, db_response->body ? db_response->body : "NULL");
+            }
+        }
         http_response_free(db_response);
         return 0;
     }
@@ -751,9 +1051,13 @@ int run_http_instance_tests() {
     
     // Use a unique database name to avoid conflicts
     char unique_db[64];
-struct timespec ts;
-clock_gettime(CLOCK_MONOTONIC, &ts);
-snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_nsec);
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Using unique database name: %s\n" RESET, unique_db);
+    }
     
     char create_db_body[128];
     snprintf(create_db_body, sizeof(create_db_body), "{\"name\":\"%s\"}", unique_db);
@@ -762,6 +1066,9 @@ snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_ns
     HttpResponse* db_response = http_request("POST", "/api/databases", create_db_body, "application/json");
     if (!db_response || !verify_http_response(db_response, "\"success\":true", 0)) {
         printf(RED "  Failed to create test database for instance tests\n" RESET);
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Database creation failed\n" RESET);
+        }
         http_response_free(db_response);
         return 0;
     }
@@ -780,6 +1087,9 @@ snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_ns
     HttpResponse* coll_response = http_request("POST", create_coll_url, users_schema, "application/json");
     if (!coll_response || !verify_http_response(coll_response, "\"success\":true", 0)) {
         printf(RED "  Failed to create test collection for instance tests\n" RESET);
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Collection creation failed\n" RESET);
+        }
         http_response_free(coll_response);
         return 0;
     }
@@ -807,6 +1117,10 @@ snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_ns
             printf("\n%s%-80s" RESET, BLUE, "POST /api/databases/{db}/collections/{coll}/instances - Insert first user");
             printf("[" GREEN "PASS" RESET "] %s%4lld ms%s\n", CYAN, duration, RESET);
             passed++;
+            
+            if (verbose_mode) {
+                printf(GREEN "  [VERBOSE] Inserted user with ID: %s\n" RESET, id1);
+            }
             
             // Test 3: Insert second instance
             const char* user2 = "{\"name\":\"Jane Smith\",\"age\":25,\"email\":\"jane@test.com\"}";
@@ -860,6 +1174,9 @@ snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_ns
                 printf("\n%s%-80s" RESET, BLUE, "POST /api/databases/{db}/collections/{coll}/instances - Insert second user");
                 printf("[" RED "FAIL" RESET "]\n");
                 total++;
+                if (verbose_mode) {
+                    printf(RED "  [VERBOSE] Second user insertion failed\n" RESET);
+                }
             }
             
             free(id1);
@@ -869,6 +1186,9 @@ snprintf(unique_db, sizeof(unique_db), "testinstdb_%ld_%ld", ts.tv_sec, ts.tv_ns
         printf("\n%s%-80s" RESET, BLUE, "POST /api/databases/{db}/collections/{coll}/instances - Insert first user");
         printf("[" RED "FAIL" RESET "]\n");
         total++;
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] First user insertion failed\n" RESET);
+        }
     }
     total++;
     
@@ -947,9 +1267,15 @@ int run_http_error_tests() {
         printf("\n%s%-80s" RESET, BLUE, "PATCH /api/databases/testdb - Method not allowed");
         printf("[" GREEN "PASS" RESET "]\n");
         passed++;
+        if (verbose_mode) {
+            printf(GREEN "  [VERBOSE] Method not allowed handled correctly\n" RESET);
+        }
     } else {
         printf("\n%s%-80s" RESET, BLUE, "PATCH /api/databases/testdb - Method not allowed");
         printf("[" RED "FAIL" RESET "]\n");
+        if (verbose_mode) {
+            printf(RED "  [VERBOSE] Expected 405 Method Not Allowed, got: %d\n" RESET, response ? response->status_code : 0);
+        }
     }
     total++;
     http_response_free(response);
@@ -965,27 +1291,31 @@ int run_http_error_tests() {
 void run_security_tests() {
     printf("\n" MAGENTA "SECURITY TESTS - Path validation and injection prevention" RESET "\n");
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Starting security tests with verbose logging\n" RESET);
+    }
+    
     TestCase security_tests[] = {
         {
             "Prevent directory traversal in database names",
             "%s create '../evil' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/../evil'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Prevent directory traversal in collection names", 
             "%s create testdb '../../evil' --schema --name-string 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/testdb/../../evil'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Reject invalid database names with special chars",
             "%s create 'invalid/name' 2>&1 | grep -i 'invalid\\|error' > /dev/null",
             "test ! -d '/tmp/sydb_test/invalid/name'", 
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         }
     };
     
@@ -1014,6 +1344,10 @@ void run_security_tests() {
 void run_data_integrity_tests() {
     printf("\n" MAGENTA "DATA INTEGRITY TESTS - CRC validation and file structure" RESET "\n");
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Starting data integrity tests\n" RESET);
+    }
+    
     // Create test database and collection first
     char create_db_cmd[256];
     char create_collection_cmd[256];
@@ -1033,14 +1367,14 @@ void run_data_integrity_tests() {
             "echo 'Header check' > /dev/null",
             "hexdump -C /tmp/sydb_test/integritydb/data/data.sydb | head -2 | grep -q 'SYDB'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Data file grows with inserts",
             "%s create integritydb data --insert-one --value-\"test_data_2\" > /dev/null 2>&1",
             "ls -l /tmp/sydb_test/integritydb/data/data.sydb | awk '{print $5}'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         }
     };
     
@@ -1066,6 +1400,10 @@ void run_data_integrity_tests() {
 void run_performance_test() {
     printf("\n" MAGENTA "PERFORMANCE AND SCALABILITY TESTS" RESET "\n");
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Starting performance tests\n" RESET);
+    }
+    
     // Setup performance database
     printf("Setting up performance database...\n");
     char create_db_cmd[256];
@@ -1084,6 +1422,10 @@ void run_performance_test() {
     long long start_time = get_current_time_ms();
     system(single_insert_cmd);
     long long single_insert_time = get_current_time_ms() - start_time;
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Single insert time: %lld ms\n" RESET, single_insert_time);
+    }
     
     // Test 2: Batch insert performance
     int batch_size = 50;
@@ -1106,6 +1448,11 @@ void run_performance_test() {
     long long batch_time = get_current_time_ms() - start_time;
     double avg_batch_time = (double)batch_time / batch_size;
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Batch insert: %d/%d successful, total time: %lld ms, avg: %.2f ms\n" RESET, 
+               success_count, batch_size, batch_time, avg_batch_time);
+    }
+    
     // Test 3: Query performance
     printf("Testing query performance...\n");
     char query_cmd[256];
@@ -1114,6 +1461,10 @@ void run_performance_test() {
     start_time = get_current_time_ms();
     system(query_cmd);
     long long query_time = get_current_time_ms() - start_time;
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Query time: %lld ms\n" RESET, query_time);
+    }
     
     // Test 4: Count verification
     int actual_count = count_instances_in_collection("perfdb", "users");
@@ -1138,48 +1489,52 @@ void run_performance_test() {
 void run_edge_case_tests() {
     printf("\n" MAGENTA "EDGE CASE AND ERROR HANDLING TESTS" RESET "\n");
     
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Starting edge case tests\n" RESET);
+    }
+    
     TestCase edge_tests[] = {
         {
             "Handle duplicate database creation",
             "%s create testdb 2>&1 | grep -i 'exist\\|error' > /dev/null",
             "%s list | grep -c testdb",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Handle duplicate collection creation",
             "%s create testdb users --schema --name-string 2>&1 | grep -i 'exist\\|error' > /dev/null", 
             "%s list testdb | grep -c users",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Handle missing database queries",
             "%s find nonexistentdb users --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
             "echo 'Error handled'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Handle missing collection queries", 
             "%s find testdb nonexistent --where \"name:test\" 2>&1 | grep -i 'exist\\|error' > /dev/null",
             "echo 'Error handled'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Handle malformed queries",
             "%s find testdb users --where \"invalid-query-format\" 2>&1 | grep -i 'error\\|invalid' > /dev/null",
             "echo 'Error handled'", 
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Handle schema validation failures",
             "%s create testdb users --insert-one --invalid-field-\"value\" 2>&1 | grep -i 'error\\|valid' > /dev/null",
             "echo 'Validation worked'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         }
     };
     
@@ -1207,6 +1562,10 @@ void run_edge_case_tests() {
 
 void run_comprehensive_verification() {
     printf("\n" MAGENTA "COMPREHENSIVE STRUCTURE VERIFICATION" RESET "\n");
+    
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Starting comprehensive structure verification\n" RESET);
+    }
     
     int verification_passed = 0;
     int verification_total = 0;
@@ -1238,9 +1597,16 @@ void run_comprehensive_verification() {
 int run_cli_tests() {
     printf(CYAN "SYDB CLI COMPREHENSIVE TEST SUITE\n" RESET);
     printf("===============================================\n");
-    printf("Using command: " YELLOW "%s" RESET "\n\n", cli_command);
+    printf("Using command: " YELLOW "%s" RESET "\n", cli_command);
+    if (verbose_mode) {
+        printf("Verbose mode: " YELLOW "ENABLED" RESET " - Detailed logging for failures\n");
+    }
+    printf("\n");
     
     // Cleanup previous test
+    if (verbose_mode) {
+        printf(YELLOW "  [VERBOSE] Cleaning up previous test data...\n" RESET);
+    }
     system("rm -rf /tmp/sydb_test > /dev/null 2>&1");
     
     // Core functionality tests
@@ -1251,21 +1617,21 @@ int run_cli_tests() {
             "%s create testdb > /dev/null 2>&1",
             "test -d '/tmp/sydb_test/testdb'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Create second database 'testdb2' and verify", 
             "%s create testdb2 > /dev/null 2>&1",
             "test -d '/tmp/sydb_test/testdb2'", 
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "List databases and verify both exist",
             "%s list > /dev/null 2>&1", 
             "%s list | grep -c 'testdb\\|testdb2'",
             "2",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         
         // Collection Operations with deep verification
@@ -1274,21 +1640,21 @@ int run_cli_tests() {
             "%s create testdb users --schema --name-string-req --age-int --email-string > /dev/null 2>&1",
             "test -f '/tmp/sydb_test/testdb/users/schema.txt' && test -f '/tmp/sydb_test/testdb/users/data.sydb'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Create 'products' collection and verify structure",
             "%s create testdb products --schema --name-string-req --price-float > /dev/null 2>&1",
             "test -f '/tmp/sydb_test/testdb/products/schema.txt'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "View users schema and verify output format",
             "%s schema testdb users > /dev/null 2>&1",
             "%s schema testdb users | grep -q 'Field.*Type'",
             "",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         
         // Insert Operations with ID verification and count tracking
@@ -1297,21 +1663,21 @@ int run_cli_tests() {
             "%s create testdb users --insert-one --name-\"John Doe\" --age-30 --email-\"john@test.com\" > /dev/null 2>&1",
             "%s list testdb users | grep -c '\"_id\"'",
             "1",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Insert second user and verify total count",
             "%s create testdb users --insert-one --name-\"Jane Smith\" --age-25 --email-\"jane@test.com\" > /dev/null 2>&1", 
             "%s list testdb users | grep -c '\"_id\"'",
             "2",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Insert product record and verify creation",
             "%s create testdb products --insert-one --name-\"Test Product\" --price-19.99 > /dev/null 2>&1",
             "%s list testdb products | grep -c 'Test Product'",
             "1",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         
         // Query Operations with exact match verification
@@ -1320,21 +1686,21 @@ int run_cli_tests() {
             "%s find testdb users --where \"age:30\" > /dev/null 2>&1",
             "%s find testdb users --where \"age:30\" | grep -c 'John Doe'",
             "1", 
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Query products by name and verify result",
             "%s find testdb products --where \"name:Test Product\" > /dev/null 2>&1",
             "%s find testdb products --where \"name:Test Product\" | grep -c 'Test Product'",
             "1",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Query with non-existent condition returns empty",
             "%s find testdb users --where \"age:999\" > /dev/null 2>&1",
             "%s find testdb users --where \"age:999\" | wc -l",
             "0",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         
         // List Operations with count verification
@@ -1343,21 +1709,21 @@ int run_cli_tests() {
             "%s list testdb > /dev/null 2>&1",
             "%s list testdb | grep -c 'users\\|products'", 
             "2",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "List users and verify record count",
             "%s list testdb users > /dev/null 2>&1",
             "%s list testdb users | grep -c '\"_id\"'",
             "2",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         },
         {
             "Verify UUID format in inserted records",
             "%s list testdb users | head -1 > /dev/null 2>&1",
             "%s list testdb users | head -1 | grep -Eo '\"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\"' | wc -l",
             "1",
-            0, 0, 0, ""
+            0, 0, 0, "", ""
         }
     };
     
@@ -1464,6 +1830,10 @@ void print_http_results(int db_passed, int db_total, int coll_passed, int coll_t
     }
     printf("] %.1f%%\n", (double)err_passed / err_total * 100);
     
+    if (verbose_mode && total_passed < total_tests) {
+        printf("\n" YELLOW "  [VERBOSE] Failed tests detailed in logs above\n" RESET);
+    }
+    
     printf("===============================================\n\n");
 }
 
@@ -1526,6 +1896,11 @@ void print_cli_results(int cli_passed, int cli_total, long long total_time, int 
     }
     printf("] %.1f%%\n", (double)edge_passed / edge_total * 100);
     
+    if (verbose_mode && (cli_passed < cli_total || security_passed < security_total || 
+                        integrity_passed < integrity_total || edge_passed < edge_total)) {
+        printf("\n" YELLOW "  [VERBOSE] Check verbose logs above for detailed failure analysis\n" RESET);
+    }
+    
     printf("===============================================\n\n");
 }
 
@@ -1535,12 +1910,15 @@ void print_usage(const char *program_name) {
     printf("  --cli           Use global 'sydb' command instead of './sydb'\n");
     printf("  --server        Test HTTP API endpoints (requires running server)\n");
     printf("  --url URL       Specify server URL (default: http://localhost:8080)\n");
+    printf("  --verbose       Enable extremely detailed logging for test failures\n");
     printf("  --help, -h      Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s                      # CLI tests with ./sydb\n", program_name);
     printf("  %s --cli                # CLI tests with global 'sydb'\n", program_name);
     printf("  %s --server             # HTTP API tests\n", program_name);
     printf("  %s --server --url http://localhost:8080  # Custom server URL\n", program_name);
+    printf("  %s --verbose            # CLI tests with detailed failure logging\n", program_name);
+    printf("  %s --server --verbose   # HTTP tests with detailed failure logging\n", program_name);
 }
 
 int main(int argc, char *argv[]) {
@@ -1552,6 +1930,9 @@ int main(int argc, char *argv[]) {
             test_mode = 1;
         } else if (strcmp(argv[i], "--url") == 0 && i + 1 < argc) {
             strncpy(server_url, argv[++i], sizeof(server_url) - 1);
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            verbose_mode = 1;
+            printf(YELLOW "Verbose mode enabled - detailed failure logging activated\n" RESET);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -1570,7 +1951,11 @@ int main(int argc, char *argv[]) {
         cleanup_test_databases();
         printf(CYAN "SYDB HTTP API COMPREHENSIVE TEST SUITE\n" RESET);
         printf("===============================================\n");
-        printf("Testing server: " YELLOW "%s" RESET "\n\n", server_url);
+        printf("Testing server: " YELLOW "%s" RESET "\n", server_url);
+        if (verbose_mode) {
+            printf("Verbose mode: " YELLOW "ENABLED" RESET " - Detailed HTTP logging\n");
+        }
+        printf("\n");
         
         // Test server connectivity first
         printf("Testing server connectivity...\n");
@@ -1578,6 +1963,14 @@ int main(int argc, char *argv[]) {
         if (!test_response || test_response->status_code == 0) {
             printf(RED "Error: Cannot connect to server at %s\n" RESET, server_url);
             printf("Make sure the SYDB server is running with: ./sydb --server\n");
+            if (verbose_mode) {
+                printf(RED "  [VERBOSE] Server connectivity test failed\n" RESET);
+                if (test_response) {
+                    printf(RED "  [VERBOSE] Response status: %d\n" RESET, test_response->status_code);
+                } else {
+                    printf(RED "  [VERBOSE] No response received\n" RESET);
+                }
+            }
             http_response_free(test_response);
             return 1;
         }
