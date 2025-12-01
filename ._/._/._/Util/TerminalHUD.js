@@ -25,7 +25,7 @@ class TerminalHUD {
     this.lastSelectedIndex = 0;
 
     // ✅ Optional mouse support
-    this.mouseSupport = config.mouseSupport || false;
+    this.mouseSupport = config.mouseSupport || true;
     this._mouseEventBuffer = '';
     this._mouseEnabled = false;
     this._currentMenuState = null;
@@ -89,25 +89,39 @@ class TerminalHUD {
         ? this.displayMenuFromOptions(question, config.options, config)
         : this.displayMenuWithArrows(question, config.options, config);
     }
-  
-    // Save current state
-    const wasMouseEnabled = this._mouseEnabled;
+
     this._safeDisableMouseTracking();
   
-    // Flush stdin
-    this._flushStdin();
+    if (stdin.isRaw) {
+      stdin.setRawMode(false);
+    }
   
-    // Create a temporary readline interface just for this question
-    const tempRl = readline.createInterface({ input: stdin, output: stdout });
-    return new Promise(resolve => {
-      tempRl.question(`\n${question}`, answer => {
+    if (typeof this._keypressListener === 'function') {
+      stdin.removeListener('keypress', this._keypressListener);
+      this._keypressListener = null;
+    }
+  
+    if (typeof this._handleMouseData === 'function') {
+      stdin.removeListener('data', this._handleMouseData);
+    }
+  
+    this.rl.close();
+  
+    const tempRl = readline.createInterface({
+      input: stdin,
+      output: stdout,
+      terminal: true
+    });
+  
+    return new Promise((resolve) => {
+      tempRl.question(`\n${question}`, (answer) => {
         tempRl.close();
-        // Optionally restore mouse if it was on
-        if (wasMouseEnabled) {
-          // But only if we're still in a menu context
-          // Otherwise, avoid re-enabling outside menus
-          // (you might need extra logic here)
-        }
+  
+        this.rl = readline.createInterface({
+          input: stdin,
+          output: stdout
+        });
+  
         resolve(answer);
       });
     });
