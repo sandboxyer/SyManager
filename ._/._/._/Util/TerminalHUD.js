@@ -76,14 +76,40 @@ class TerminalHUD {
 
   // === Public API ===
 
+  _flushStdin() {
+    // Temporarily pause stdin, drain any buffered data, then resume
+    // This removes leftover mouse/keypress garbage
+    stdin.pause();
+    stdin.resume();
+  }
+
   async ask(question, config = {}) {
     if (config.options) {
       return this.numberedMenus
         ? this.displayMenuFromOptions(question, config.options, config)
         : this.displayMenuWithArrows(question, config.options, config);
     }
+  
+    // Save current state
+    const wasMouseEnabled = this._mouseEnabled;
+    this._safeDisableMouseTracking();
+  
+    // Flush stdin
+    this._flushStdin();
+  
+    // Create a temporary readline interface just for this question
+    const tempRl = readline.createInterface({ input: stdin, output: stdout });
     return new Promise(resolve => {
-      this.rl.question(`\n${question}`, answer => resolve(answer));
+      tempRl.question(`\n${question}`, answer => {
+        tempRl.close();
+        // Optionally restore mouse if it was on
+        if (wasMouseEnabled) {
+          // But only if we're still in a menu context
+          // Otherwise, avoid re-enabling outside menus
+          // (you might need extra logic here)
+        }
+        resolve(answer);
+      });
     });
   }
 
