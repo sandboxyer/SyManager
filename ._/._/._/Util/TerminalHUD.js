@@ -25,7 +25,7 @@ class TerminalHUD {
     this.lastSelectedIndex = 0;
 
     // ✅ Optional mouse support
-    this.mouseSupport = config.mouseSupport || true;
+    this.mouseSupport = config.mouseSupport || false;
     this._mouseEventBuffer = '';
     this._mouseEnabled = false;
     this._currentMenuState = null;
