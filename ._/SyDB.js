@@ -3188,48 +3188,41 @@ class SyDB {
 }
 
 /**
- * Command Line Interface for SYDB - Matches C binary exactly
+ * Command Line Interface for SYDB - Matches C binary EXACTLY
  */
 class SyDBCLI {
     /**
-     * Print usage information that matches the C binary
+     * Print usage information that matches the C binary EXACTLY
      * @static
      */
     static printUsage() {
         console.log(`
-SYDB Database Management System - JavaScript Client
 Usage:
-  node sydb.js create <database_name>
-  node sydb.js create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
-  node sydb.js create <database_name> <collection_name> --insert-one --<field>-"<value>" ...
-  node sydb.js update <database_name> <collection_name> --where "<query>" --set --<field>-"<value>" ...
-  node sydb.js delete <database_name> <collection_name> --where "<query>"
-  node sydb.js find <database_name> <collection_name> --where "<query>"
-  node sydb.js schema <database_name> <collection_name>
-  node sydb.js list
-  node sydb.js list <database_name>
-  node sydb.js list <database_name> <collection_name>
-  node sydb.js --server [port]          # Start HTTP server
-  node sydb.js --server --verbose       # Start HTTP server with extreme logging
-  node sydb.js --routes                 # Show all HTTP API routes and schemas
-  node sydb.js --status                 # Check server status
+  sydb create <database_name>
+  sydb create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
+  sydb create <database_name> <collection_name> --insert-one --<field>-"<value>" ...
+  sydb update <database_name> <collection_name> --where "<query>" --set --<field>-"<value>" ...
+  sydb delete <database_name> <collection_name> --where "<query>"
+  sydb find <database_name> <collection_name> --where "<query>"
+  sydb schema <database_name> <collection_name>
+  sydb list
+  sydb list <database_name>
+  sydb list <database_name> <collection_name>
+  sydb --server [port]          # Start HTTP server
+  sydb --server --verbose       # Start HTTP server with extreme logging
+  sydb --routes                 # Show all HTTP API routes and schemas
 
 Field types: string, int, float, bool, array, object
 Add -req for required fields
 Add -idx for indexed fields (improves query performance)
 Query format: field:value,field2:value2 (multiple conditions supported)
-
-Examples:
-  node sydb.js create mydb
-  node sydb.js create mydb users --schema --name-string-req --age-int --email-string
-  node sydb.js create mydb users --insert-one --name-"John Doe" --age-30 --email-"john@test.com"
-  node sydb.js find mydb users --where "age:30"
-  node sydb.js list mydb
-        `)
+Server mode: Starts HTTP server on specified port (default: 8080)
+Verbose mode: Extreme logging for server operations and requests
+`)
     }
 
     /**
-     * Parse field specifications from command line arguments
+     * Parse field specifications from command line arguments EXACTLY like C binary
      * @static
      * @param {Array} args - Command line arguments
      * @param {number} startIndex - Starting index
@@ -3249,7 +3242,7 @@ Examples:
     }
 
     /**
-     * Parse insert data from command line arguments
+     * Parse insert data from command line arguments EXACTLY like C binary
      * @static
      * @param {Array} args - Command line arguments
      * @param {number} startIndex - Starting index
@@ -3271,16 +3264,7 @@ Examples:
                         fieldValue = fieldValue.substring(1, fieldValue.length - 1)
                     }
                     
-                    // Try to parse numbers and booleans
-                    if (!isNaN(fieldValue)) {
-                        data[fieldName] = parseFloat(fieldValue)
-                    } else if (fieldValue.toLowerCase() === 'true') {
-                        data[fieldName] = true
-                    } else if (fieldValue.toLowerCase() === 'false') {
-                        data[fieldName] = false
-                    } else {
-                        data[fieldName] = fieldValue
-                    }
+                    data[fieldName] = fieldValue
                 }
             } else {
                 break
@@ -3290,7 +3274,7 @@ Examples:
     }
 
     /**
-     * Convert field specifications to schema format
+     * Convert field specifications to schema format EXACTLY like C binary
      * @static
      * @param {Array} fieldSpecs - Field specifications
      * @returns {Array} Schema array
@@ -3303,7 +3287,7 @@ Examples:
             if (parts.length < 2) continue
             
             const fieldName = parts[0]
-            let fieldType = parts[1]
+            const fieldType = parts[1]
             let required = false
             let indexed = false
             
@@ -3313,24 +3297,9 @@ Examples:
                 if (parts[i] === 'idx') indexed = true
             }
             
-            // Map type strings to schema types
-            const typeMap = {
-                'string': 'string',
-                'int': 'int', 
-                'integer': 'int',
-                'float': 'float',
-                'double': 'float',
-                'bool': 'bool',
-                'boolean': 'bool',
-                'array': 'array',
-                'object': 'object'
-            }
-            
-            const schemaType = typeMap[fieldType] || 'string'
-            
             schema.push({
                 name: fieldName,
-                type: schemaType,
+                type: fieldType,
                 required: required,
                 indexed: indexed
             })
@@ -3340,7 +3309,7 @@ Examples:
     }
 
     /**
-     * Execute CLI command
+     * Execute CLI command EXACTLY like C binary
      * @static
      * @async
      * @param {Array} args - Command line arguments
@@ -3349,6 +3318,18 @@ Examples:
         if (args.length < 2) {
             this.printUsage()
             process.exit(1)
+        }
+
+        // Check for server mode first
+        if (args[2] === '--server') {
+            await this.handleServer(args)
+            return
+        }
+        
+        // Check for routes
+        if (args[2] === '--routes') {
+            await this.handleRoutes()
+            return
         }
 
         const command = args[2]
@@ -3373,23 +3354,6 @@ Examples:
                 case 'list':
                     await this.handleList(args)
                     break
-                case '--server':
-                    await this.handleServer(args)
-                    break
-                case '--routes':
-                    await this.handleRoutes()
-                    break
-                case '--status':
-                    await this.handleStatus()
-                    break
-                case '--verbose':
-                    // --verbose should be used with --server
-                    if (args[3] === '--server') {
-                        await this.handleServer(['', '', '--server', '--verbose'])
-                    } else {
-                        this.printUsage()
-                    }
-                    break
                 default:
                     console.error(`Error: Unknown command '${command}'`)
                     this.printUsage()
@@ -3402,7 +3366,7 @@ Examples:
     }
 
     /**
-     * Handle create command - matches C binary exactly
+     * Handle create command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3457,7 +3421,7 @@ Examples:
     }
 
     /**
-     * Handle update command - matches C binary exactly
+     * Handle update command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3481,23 +3445,24 @@ Examples:
             process.exit(1)
         }
 
-        // For now, we'll list instances matching the query and update the first one
-        // In a real implementation, you'd want to handle this properly
-        const instances = await SyDB.listInstances(databaseName, collectionName, query)
-        if (instances.success && instances.instances && instances.instances.length > 0) {
-            const instanceId = instances.instances[0]._id // Get first matching instance
-            const result = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData)
-            console.log(JSON.stringify(result, null, 2))
-        } else {
+        // Find instances matching query
+        const result = await SyDB.listInstances(databaseName, collectionName, query)
+        if (!result.success || !result.instances || result.instances.length === 0) {
             console.log(JSON.stringify({
                 success: false,
                 error: 'No instances found matching the query'
             }, null, 2))
+            return
         }
+
+        // Update first matching instance
+        const instanceId = result.instances[0]._id
+        const updateResult = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData)
+        console.log(JSON.stringify(updateResult, null, 2))
     }
 
     /**
-     * Handle delete command - matches C binary exactly
+     * Handle delete command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3514,23 +3479,24 @@ Examples:
         const collectionName = args[4]
         const query = args[6]
 
-        // For now, we'll list instances matching the query and delete the first one
-        // In a real implementation, you'd want to handle multiple deletions
-        const instances = await SyDB.listInstances(databaseName, collectionName, query)
-        if (instances.success && instances.instances && instances.instances.length > 0) {
-            const instanceId = instances.instances[0]._id // Get first matching instance
-            const result = await SyDB.deleteInstance(databaseName, collectionName, instanceId)
-            console.log(JSON.stringify(result, null, 2))
-        } else {
+        // Find instances matching query
+        const result = await SyDB.listInstances(databaseName, collectionName, query)
+        if (!result.success || !result.instances || result.instances.length === 0) {
             console.log(JSON.stringify({
                 success: false,
                 error: 'No instances found matching the query'
             }, null, 2))
+            return
         }
+
+        // Delete first matching instance
+        const instanceId = result.instances[0]._id
+        const deleteResult = await SyDB.deleteInstance(databaseName, collectionName, instanceId)
+        console.log(JSON.stringify(deleteResult, null, 2))
     }
 
     /**
-     * Handle find command - matches C binary exactly
+     * Handle find command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3548,11 +3514,18 @@ Examples:
         const query = args[6]
 
         const result = await SyDB.listInstances(databaseName, collectionName, query)
-        console.log(JSON.stringify(result, null, 2))
+        if (result.success && result.instances) {
+            // Output each instance on a new line like C binary
+            result.instances.forEach(instance => {
+                console.log(JSON.stringify(instance))
+            })
+        } else {
+            console.log(JSON.stringify(result, null, 2))
+        }
     }
 
     /**
-     * Handle schema command - matches C binary exactly
+     * Handle schema command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3572,7 +3545,7 @@ Examples:
     }
 
     /**
-     * Handle list command - matches C binary exactly
+     * Handle list command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
@@ -3581,18 +3554,32 @@ Examples:
         if (args.length === 3) {
             // List databases: sydb list
             const result = await SyDB.listDatabases()
-            console.log(JSON.stringify(result, null, 2))
+            if (result.success && result.databases) {
+                result.databases.forEach(db => console.log(db))
+            } else {
+                console.log(JSON.stringify(result, null, 2))
+            }
         } else if (args.length === 4) {
             // List collections: sydb list <database>
             const databaseName = args[3]
             const result = await SyDB.listCollections(databaseName)
-            console.log(JSON.stringify(result, null, 2))
+            if (result.success && result.collections) {
+                result.collections.forEach(coll => console.log(coll))
+            } else {
+                console.log(JSON.stringify(result, null, 2))
+            }
         } else if (args.length === 5) {
             // List instances: sydb list <database> <collection>
             const databaseName = args[3]
             const collectionName = args[4]
             const result = await SyDB.listInstances(databaseName, collectionName)
-            console.log(JSON.stringify(result, null, 2))
+            if (result.success && result.instances) {
+                result.instances.forEach(instance => {
+                    console.log(JSON.stringify(instance))
+                })
+            } else {
+                console.log(JSON.stringify(result, null, 2))
+            }
         } else {
             console.error('Error: Invalid list operation')
             this.printUsage()
@@ -3601,15 +3588,22 @@ Examples:
     }
 
     /**
-     * Handle server command - matches C binary exactly
+     * Handle server command - matches C binary EXACTLY
      * @static
      * @async
      * @param {Array} args - Command arguments
      */
     static async handleServer(args) {
         const verbose = args.includes('--verbose')
-        const portIndex = args.indexOf('--server') + 1
-        const port = portIndex < args.length && !args[portIndex].startsWith('--') ? args[portIndex] : '8080'
+        let port = 8080
+        
+        // Find port argument if provided
+        for (let i = 2; i < args.length; i++) {
+            if (args[i] === '--server' && i + 1 < args.length && !args[i + 1].startsWith('--')) {
+                port = parseInt(args[i + 1])
+                break
+            }
+        }
         
         console.log('Starting SYDB HTTP Server...')
         
@@ -3643,28 +3637,13 @@ Examples:
     }
 
     /**
-     * Handle routes command - matches C binary exactly
+     * Handle routes command - matches C binary EXACTLY
      * @static
      * @async
      */
     static async handleRoutes() {
         const result = await SyDB.showRoutes()
-        console.log(JSON.stringify(result, null, 2))
-    }
-
-    /**
-     * Handle status command - matches C binary exactly
-     * @static
-     * @async
-     */
-    static async handleStatus() {
-        const isRunning = await SyDB.isServerRunning()
-        const status = isRunning ? 'running' : 'stopped'
-        
-        console.log(JSON.stringify({
-            server: status,
-            timestamp: new Date().toISOString()
-        }, null, 2))
+        console.log(result.routes || result.error || 'No routes information available')
     }
 }
 
