@@ -21,6 +21,15 @@
             }
             })
             }
+
+            final.options.push({
+                name : 'Ask Double Test',
+                action : async () => {
+                console.log(`\n ${await HUD.ask('Value 1 : ')}`)
+                console.log(`\n ${await HUD.ask('Value 2 : ')}`)
+                HUD.displayMenu(MiscMenu)
+            }
+            })
     
         final.options.push({
             name : '<- Voltar',
