@@ -547,39 +547,48 @@ void http_route_request(http_client_context_t* context);
 // ==================== HIGH-PERFORMANCE IMPLEMENTATIONS ====================
 
 // High-performance JSON array building - O(n) instead of O(n²)
+
 char* build_json_array_high_performance(char** items, int item_count) {
     if (!items || item_count <= 0) {
         return strdup("[]");
     }
     
-    // Calculate total size needed in single pass
+    // Check if first item looks like JSON (starts with {)
+    bool items_are_json = (item_count > 0 && items[0] && items[0][0] == '{');
+    
+    // Calculate total size needed
     size_t total_size = 3; // "[]" + null terminator
-    for (int item_index = 0; item_index < item_count; item_index++) {
-        if (items[item_index]) {
-            total_size += strlen(items[item_index]) + 3; // ,""
+    for (int i = 0; i < item_count; i++) {
+        if (items[i]) {
+            if (items_are_json) {
+                total_size += strlen(items[i]) + 1; // No extra quotes for JSON objects
+            } else {
+                total_size += strlen(items[i]) + 3; // ,""
+            }
         }
     }
     
-    // Allocate exactly the needed size
     char* result_string = malloc(total_size);
-    if (!result_string) {
-        return NULL;
-    }
+    if (!result_string) return NULL;
     
-    // Build JSON in single pass without repeated scanning
     char* current_position = result_string;
     *current_position++ = '[';
     
-    for (int item_index = 0; item_index < item_count; item_index++) {
-        if (items[item_index]) {
-            if (item_index > 0) {
+    for (int i = 0; i < item_count; i++) {
+        if (items[i]) {
+            if (i > 0) {
                 *current_position++ = ',';
             }
-            *current_position++ = '"';
             
-            // Use stpcpy for efficient string copying (returns pointer to end)
-            current_position = stpcpy(current_position, items[item_index]);
-            *current_position++ = '"';
+            if (!items_are_json) {
+                *current_position++ = '"';
+            }
+            
+            current_position = stpcpy(current_position, items[i]);
+            
+            if (!items_are_json) {
+                *current_position++ = '"';
+            }
         }
     }
     
