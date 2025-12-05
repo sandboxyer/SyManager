@@ -2276,8 +2276,43 @@ bool validate_path_component(const char* component) {
     if (strcmp(component, ".") == 0) return false;
     if (strcmp(component, "..") == 0) return false;
     
-    for (size_t char_index = 0; char_index < strlen(component); char_index++) {
-        if (component[char_index] < 32 || component[char_index] == 127) return false;
+    // Allow: letters (both cases), numbers, underscores, hyphens
+    // Reject: control characters, spaces, and problematic special characters
+    for (size_t character_index = 0; character_index < strlen(component); character_index++) {
+        char current_character = component[character_index];
+        
+        // Reject control characters and delete character
+        if (current_character < 32 || current_character == 127) return false;
+        
+        // Reject spaces (can cause issues in command line and URLs)
+        if (current_character == ' ') return false;
+        
+        // Reject problematic special characters that could cause issues
+        // in shell commands, URLs, or JSON
+        if (current_character == '$' || current_character == '&' || 
+            current_character == '*' || current_character == '?' || 
+            current_character == '!' || current_character == '@' || 
+            current_character == '#' || current_character == '%' || 
+            current_character == '^' || current_character == '(' || 
+            current_character == ')' || current_character == '[' || 
+            current_character == ']' || current_character == '{' || 
+            current_character == '}' || current_character == '|' || 
+            current_character == ';' || current_character == ':' || 
+            current_character == '\'' || current_character == '"' || 
+            current_character == '<' || current_character == '>' || 
+            current_character == '`' || current_character == '~') {
+            return false;
+        }
+        
+        // Allow: letters, numbers, underscores, hyphens, dots
+        // These are safe for filesystems, URLs, and JSON
+        if (!((current_character >= 'a' && current_character <= 'z') || 
+              (current_character >= 'A' && current_character <= 'Z') || 
+              (current_character >= '0' && current_character <= '9') || 
+              current_character == '_' || current_character == '-' || 
+              current_character == '.')) {
+            return false;
+        }
     }
     
     return true;
@@ -2295,12 +2330,13 @@ bool validate_field_name(const char* field_name) {
     if (!field_name || strlen(field_name) == 0) return false;
     if (strlen(field_name) >= MAXIMUM_FIELD_LENGTH) return false;
     
-    for (size_t char_index = 0; char_index < strlen(field_name); char_index++) {
-        char current_char = field_name[char_index];
-        if (!((current_char >= 'a' && current_char <= 'z') || 
-              (current_char >= 'A' && current_char <= 'Z') || 
-              (current_char >= '0' && current_char <= '9') || 
-              current_char == '_')) {
+    // Field names have stricter requirements - only alphanumeric and underscore
+    for (size_t character_index = 0; character_index < strlen(field_name); character_index++) {
+        char current_character = field_name[character_index];
+        if (!((current_character >= 'a' && current_character <= 'z') || 
+              (current_character >= 'A' && current_character <= 'Z') || 
+              (current_character >= '0' && current_character <= '9') || 
+              current_character == '_')) {
             return false;
         }
     }
@@ -3466,42 +3502,43 @@ char** list_all_secure_databases(int* database_count) {
     }
     
     struct dirent* directory_entry;
-    int count = 0;
+    int total_directory_count = 0;
     while ((directory_entry = readdir(directory)) != NULL) {
         if (directory_entry->d_type == DT_DIR && 
             strcmp(directory_entry->d_name, ".") != 0 && 
             strcmp(directory_entry->d_name, "..") != 0) {
-            count++;
+            total_directory_count++;
         }
     }
     rewinddir(directory);
     
-    if (count == 0) {
+    if (total_directory_count == 0) {
         closedir(directory);
         *database_count = 0;
         return NULL;
     }
     
-    char** databases = malloc(count * sizeof(char*));
+    char** databases = malloc(total_directory_count * sizeof(char*));
     if (!databases) {
         closedir(directory);
         *database_count = 0;
         return NULL;
     }
     
-    int index = 0;
-    while ((directory_entry = readdir(directory)) != NULL && index < count) {
+    int valid_database_count = 0;
+    while ((directory_entry = readdir(directory)) != NULL && valid_database_count < total_directory_count) {
         if (directory_entry->d_type == DT_DIR && 
             strcmp(directory_entry->d_name, ".") != 0 && 
             strcmp(directory_entry->d_name, "..") != 0) {
             
             if (!validate_database_name(directory_entry->d_name)) {
+                // Skip invalid names but continue processing
                 continue;
             }
             
-            databases[index] = strdup(directory_entry->d_name);
-            if (!databases[index]) {
-                for (int i = 0; i < index; i++) {
+            databases[valid_database_count] = strdup(directory_entry->d_name);
+            if (!databases[valid_database_count]) {
+                for (int i = 0; i < valid_database_count; i++) {
                     free(databases[i]);
                 }
                 free(databases);
@@ -3509,12 +3546,21 @@ char** list_all_secure_databases(int* database_count) {
                 *database_count = 0;
                 return NULL;
             }
-            index++;
+            valid_database_count++;
         }
     }
     closedir(directory);
     
-    *database_count = count;
+    // Important: Use the actual count of valid databases, not the total directory count
+    *database_count = valid_database_count;
+    
+    // If no valid databases were found, cleanup and return NULL
+    if (valid_database_count == 0) {
+        free(databases);
+        *database_count = 0;
+        return NULL;
+    }
+    
     return databases;
 }
 
@@ -3627,31 +3673,31 @@ char** list_secure_collections_in_database(const char* database_name, int* colle
     }
     
     struct dirent* directory_entry;
-    int count = 0;
+    int total_directory_count = 0;
     while ((directory_entry = readdir(directory)) != NULL) {
         if (directory_entry->d_type == DT_DIR && 
             strcmp(directory_entry->d_name, ".") != 0 && 
             strcmp(directory_entry->d_name, "..") != 0) {
-            count++;
+            total_directory_count++;
         }
     }
     rewinddir(directory);
     
-    if (count == 0) {
+    if (total_directory_count == 0) {
         closedir(directory);
         *collection_count = 0;
         return NULL;
     }
     
-    char** collections = malloc(count * sizeof(char*));
+    char** collections = malloc(total_directory_count * sizeof(char*));
     if (!collections) {
         closedir(directory);
         *collection_count = 0;
         return NULL;
     }
     
-    int index = 0;
-    while ((directory_entry = readdir(directory)) != NULL && index < count) {
+    int valid_collection_count = 0;
+    while ((directory_entry = readdir(directory)) != NULL && valid_collection_count < total_directory_count) {
         if (directory_entry->d_type == DT_DIR && 
             strcmp(directory_entry->d_name, ".") != 0 && 
             strcmp(directory_entry->d_name, "..") != 0) {
@@ -3660,9 +3706,9 @@ char** list_secure_collections_in_database(const char* database_name, int* colle
                 continue;
             }
             
-            collections[index] = strdup(directory_entry->d_name);
-            if (!collections[index]) {
-                for (int i = 0; i < index; i++) {
+            collections[valid_collection_count] = strdup(directory_entry->d_name);
+            if (!collections[valid_collection_count]) {
+                for (int i = 0; i < valid_collection_count; i++) {
                     free(collections[i]);
                 }
                 free(collections);
@@ -3670,12 +3716,20 @@ char** list_secure_collections_in_database(const char* database_name, int* colle
                 *collection_count = 0;
                 return NULL;
             }
-            index++;
+            valid_collection_count++;
         }
     }
     closedir(directory);
     
-    *collection_count = count;
+    // Use actual count of valid collections
+    *collection_count = valid_collection_count;
+    
+    if (valid_collection_count == 0) {
+        free(collections);
+        *collection_count = 0;
+        return NULL;
+    }
+    
     return collections;
 }
 
