@@ -29,6 +29,7 @@ declare -A NODE_ENTRY_POINTS=(
   ["SyManager.js"]="sy"
   ["._/SyPM.js"]="sypm"
   ["._/SyDB.js"]="sydb"
+  ["pkg-cli.js"]="pkg"  # Added generic pkg command
   # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
 )
 
@@ -40,7 +41,8 @@ declare -A COMMAND_WORKING_DIR=(
   # Default behavior is "global" if not specified
   ["sy"]="global"           # Uses installation directory
   ["sypm"]="caller"         # Uses caller's current directory
-   ["sydb"]="global" 
+  ["sydb"]="global"
+  ["pkg"]="caller"          # pkg always uses caller's directory
 )
 
 # PRESERVATION WHITELIST (OPTIONAL - files to keep during updates)
@@ -92,6 +94,10 @@ show_help() {
   for command in "${!COMMAND_WORKING_DIR[@]}"; do
     echo "  $command: ${COMMAND_WORKING_DIR[$command]}"
   done
+  echo
+  echo "Generic pkg command features:"
+  echo "  pkg run <script>          Run npm script from any package.json"
+  echo "  pkg version <type|ver>    Update version (major|minor|patch|X.Y.Z) and git commit"
   exit 0
 }
 
@@ -209,8 +215,290 @@ extract_archive() {
   tar -xzf "$archive_file" -C "$extract_dir" --strip-components=1 2>/dev/null
 }
 
+create_pkg_cli() {
+  local install_dir="$1"
+  local pkg_cli_path="$install_dir/pkg-cli.js"
+  
+  log_message "Creating generic pkg CLI utility with ES modules..."
+  
+  # Always remove existing pkg-cli.js to ensure fresh creation
+  if [[ -f "$pkg_cli_path" ]]; then
+    rm -f "$pkg_cli_path"
+  fi
+  
+  # Create the generic pkg CLI JavaScript file with ES module syntax
+  cat > "$pkg_cli_path" << 'PKG_EOF'
+#!/usr/bin/env node
+
+import fs from 'fs';
+import path from 'path';
+import { execSync, spawn } from 'child_process';
+import { createInterface } from 'readline';
+import { fileURLToPath } from 'url';
+
+// Get the caller's current working directory
+const callerCwd = process.cwd();
+const packageJsonPath = path.join(callerCwd, 'package.json');
+
+function readPackageJson() {
+  try {
+    const content = fs.readFileSync(packageJsonPath, 'utf8');
+    return JSON.parse(content);
+  } catch (error) {
+    console.error(`Error reading package.json: ${error.message}`);
+    console.error(`Make sure you're in a project directory with a package.json file`);
+    process.exit(1);
+  }
+}
+
+async function runScript(scriptName) {
+  const packageJson = readPackageJson();
+  
+  if (!packageJson.scripts || !packageJson.scripts[scriptName]) {
+    console.error(`Script "${scriptName}" not found in package.json`);
+    console.error(`Available scripts: ${Object.keys(packageJson.scripts || {}).join(', ') || 'None'}`);
+    process.exit(1);
+  }
+  
+  const command = packageJson.scripts[scriptName];
+  console.log(`Running: ${command}`);
+  
+  try {
+    // Use spawn to preserve colors and real-time output
+    const child = spawn(command, {
+      shell: true,
+      stdio: 'inherit',
+      cwd: callerCwd
+    });
+    
+    return new Promise((resolve, reject) => {
+      child.on('close', (code) => {
+        process.exit(code);
+      });
+      
+      child.on('error', (error) => {
+        console.error(`Error running script: ${error.message}`);
+        process.exit(1);
+      });
+    });
+  } catch (error) {
+    console.error(`Error running script: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+function bumpVersion(bumpType) {
+  const packageJson = readPackageJson();
+  const currentVersion = packageJson.version || '0.0.0';
+  
+  // Parse current version
+  const versionParts = currentVersion.split('.');
+  if (versionParts.length < 3) {
+    console.error(`Invalid current version format: ${currentVersion}`);
+    console.error('Expected format: major.minor.patch');
+    process.exit(1);
+  }
+  
+  let major = parseInt(versionParts[0]) || 0;
+  let minor = parseInt(versionParts[1]) || 0;
+  let patch = parseInt(versionParts[2]) || 0;
+  
+  // Handle prerelease versions
+  const prereleaseMatch = versionParts[2].match(/^(\d+)(-.+)?$/);
+  if (prereleaseMatch) {
+    patch = parseInt(prereleaseMatch[1]) || 0;
+  }
+  
+  // Bump version based on type
+  let newVersion;
+  switch (bumpType) {
+    case 'major':
+      major += 1;
+      minor = 0;
+      patch = 0;
+      newVersion = `${major}.${minor}.${patch}`;
+      break;
+      
+    case 'minor':
+      minor += 1;
+      patch = 0;
+      newVersion = `${major}.${minor}.${patch}`;
+      break;
+      
+    case 'patch':
+      patch += 1;
+      newVersion = `${major}.${minor}.${patch}`;
+      break;
+      
+    default:
+      // Assume it's a direct version string
+      const versionRegex = /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/;
+      if (!versionRegex.test(bumpType)) {
+        console.error(`Invalid version: ${bumpType}`);
+        console.error('Use: major, minor, patch, or X.Y.Z format');
+        process.exit(1);
+      }
+      newVersion = bumpType;
+  }
+  
+  return updateVersion(currentVersion, newVersion);
+}
+
+async function updateVersion(oldVersion, newVersion) {
+  const packageJson = readPackageJson();
+  packageJson.version = newVersion;
+  
+  try {
+    // Update package.json
+    fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    console.log(`Updated version from ${oldVersion} to ${newVersion}`);
+    
+    // Git operations
+    try {
+      // Check if we're in a git repository
+      execSync('git rev-parse --is-inside-work-tree', { cwd: callerCwd, stdio: 'ignore' });
+      
+      // Add package.json to git
+      execSync('git add package.json', { cwd: callerCwd, stdio: 'pipe' });
+      
+      // Create commit
+      const commitMessage = `${newVersion}`;
+      execSync(`git commit -m "${commitMessage}"`, { cwd: callerCwd, stdio: 'pipe' });
+      
+      console.log(`Git commit created: ${commitMessage}`);
+      
+      /*
+      // Ask if user wants to create a git tag
+      console.log(`Would you like to create a git tag v${newVersion}? (y/N)`);
+      
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+      
+      return new Promise((resolve) => {
+        rl.question('> ', (answer) => {
+          if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
+            try {
+              execSync(`git tag -a v${newVersion} -m "Version ${newVersion}"`, { 
+                cwd: callerCwd, 
+                stdio: 'pipe' 
+              });
+              console.log(`Created git tag: v${newVersion}`);
+            } catch (tagError) {
+              console.error(`Error creating git tag: ${tagError.message}`);
+            }
+          }
+          rl.close();
+          resolve();
+        });
+      });
+       */
+      
+    } catch (gitError) {
+      console.log('Not a git repository or git not available. Skipping git operations.');
+    }
+    
+  } catch (error) {
+    console.error(`Error updating version: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+function showHelp() {
+  console.log(`
+pkg - Generic package.json utility
+
+Usage: pkg <command> [options]
+
+Commands:
+  run <script>          Run any script from package.json
+  version <type|ver>    Update version and create git commit
+  
+Arguments:
+  For 'run' command:
+    <script>            Script name from package.json scripts section
+  
+  For 'version' command:
+    major               Bump major version (X+1.0.0)
+    minor               Bump minor version (X.Y+1.0)
+    patch               Bump patch version (X.Y.Z+1)
+    <X.Y.Z>             Set specific version (e.g., 1.2.3)
+    <X.Y.Z-prerelease>  Set version with prerelease tag
+
+Examples:
+  pkg run test          Run the 'test' script from package.json
+  pkg run build         Run the 'build' script from package.json
+  pkg version patch     Bump patch version (1.2.3 -> 1.2.4)
+  pkg version minor     Bump minor version (1.2.3 -> 1.3.0)
+  pkg version major     Bump major version (1.2.3 -> 2.0.0)
+  pkg version 2.1.0     Set version to 2.1.0
+  pkg version 1.0.0-beta.1  Set version to 1.0.0-beta.1
+
+Working directory: ${callerCwd}
+  `);
+}
+
+// Main CLI logic
+async function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.length === 0) {
+    showHelp();
+    process.exit(0);
+  }
+  
+  const command = args[0];
+  
+  switch (command) {
+    case 'run':
+      if (args.length < 2) {
+        console.error('Usage: pkg run <script-name>');
+        process.exit(1);
+      }
+      await runScript(args[1]);
+      break;
+      
+    case 'version':
+      if (args.length < 2) {
+        console.error('Usage: pkg version <type|version>');
+        console.error('Type: major, minor, patch, or specific version X.Y.Z');
+        process.exit(1);
+      }
+      await bumpVersion(args[1]);
+      break;
+      
+    case 'help':
+    case '--help':
+    case '-h':
+      showHelp();
+      break;
+      
+    default:
+      console.error(`Unknown command: ${command}`);
+      console.error('Use "pkg help" for usage information');
+      process.exit(1);
+  }
+}
+
+// Run the CLI
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(`Unhandled error: ${error.message}`);
+    process.exit(1);
+  });
+}
+PKG_EOF
+  
+  chmod +x "$pkg_cli_path"
+  log_message "Created generic pkg CLI utility at $pkg_cli_path"
+}
+
 create_command_links() {
   local install_dir="$1"
+  
+  # Create pkg CLI in the installation directory
+  create_pkg_cli "$install_dir"
   
   for src in "${!NODE_ENTRY_POINTS[@]}"; do
     local src_path="$install_dir/$src"
@@ -218,6 +506,7 @@ create_command_links() {
     local dest_path="$BIN_DIR/$command_name"
     local working_dir="${COMMAND_WORKING_DIR[$command_name]:-global}"
     
+    # Ensure source file exists
     [[ ! -f "$src_path" ]] && continue
     chmod +x "$src_path" 2>/dev/null || true
     
@@ -287,7 +576,14 @@ if [[ -d "$INSTALL_DIR" ]]; then
   echo "Choose: 1=Update, 2=Remove, 3=Exit"
   read -p "Enter choice: " choice
   case "$choice" in
-    1) mv -f "$INSTALL_DIR" "$BACKUP_DIR"; remove_links ;;
+    1) 
+      # Always remove old pkg-cli.js during update to ensure fresh creation
+      if [[ -f "$INSTALL_DIR/pkg-cli.js" ]]; then
+        rm -f "$INSTALL_DIR/pkg-cli.js"
+      fi
+      mv -f "$INSTALL_DIR" "$BACKUP_DIR"; 
+      remove_links 
+      ;;
     2) remove_links; rm -rf "$INSTALL_DIR"; exit 0 ;;
     3) exit 0 ;;
     *) exit 1 ;;
@@ -316,10 +612,30 @@ done
 
 echo
 echo "Working directory configuration:"
-for command in "${NODE_ENTRY_POINTS[@]}"; do
-  local working_dir="${COMMAND_WORKING_DIR[$command]:-global}"
+for command in "${!COMMAND_WORKING_DIR[@]}"; do
+  local working_dir="${COMMAND_WORKING_DIR[$command]}"
   echo "  $command: $working_dir"
 done
+
+echo
+echo "Generic pkg command features:"
+echo "  pkg run <script>          - Run any script from package.json"
+echo "  pkg version <type|ver>    - Update version and create git commit"
+echo
+echo "pkg version supports:"
+echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
+echo "  • minor    - Bump minor version (1.2.3 → 1.3.0)"
+echo "  • major    - Bump major version (1.2.3 → 2.0.0)"
+echo "  • X.Y.Z    - Set specific version"
+echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
+echo
+echo "Examples:"
+echo "  pkg run test              # Runs 'test' script from package.json"
+echo "  pkg run build             # Runs 'build' script from package.json"
+echo "  pkg version patch         # Bumps patch version and commits"
+echo "  pkg version 1.2.3         # Sets version to 1.2.3 and commits"
+echo
+echo "Note: pkg works from any directory with a package.json file"
 
 echo
 if [[ "$LOCAL_DIR_MODE" == true ]]; then
