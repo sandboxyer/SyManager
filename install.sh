@@ -351,7 +351,6 @@ async function updateVersion(oldVersion, newVersion) {
   try {
     // Update package.json
     fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
-    console.log(`Updated version from ${oldVersion} to ${newVersion}`);
     
     // Git operations
     try {
@@ -365,36 +364,14 @@ async function updateVersion(oldVersion, newVersion) {
       const commitMessage = `${newVersion}`;
       execSync(`git commit -m "${commitMessage}"`, { cwd: callerCwd, stdio: 'pipe' });
       
-      console.log(`Git commit created: ${commitMessage}`);
+      console.log(`${commitMessage}`);
       
-      /*
-      // Ask if user wants to create a git tag
-      console.log(`Would you like to create a git tag v${newVersion}? (y/N)`);
-      
-      const rl = createInterface({
-        input: process.stdin,
-        output: process.stdout
-      });
-      
-      return new Promise((resolve) => {
-        rl.question('> ', (answer) => {
-          if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
-            try {
               execSync(`git tag -a v${newVersion} -m "Version ${newVersion}"`, { 
                 cwd: callerCwd, 
                 stdio: 'pipe' 
               });
-              console.log(`Created git tag: v${newVersion}`);
-            } catch (tagError) {
-              console.error(`Error creating git tag: ${tagError.message}`);
-            }
-          }
-          rl.close();
-          resolve();
-        });
-      });
-       */
-      
+              //console.log(`Created git tag: v${newVersion}`);
+           
     } catch (gitError) {
       console.log('Not a git repository or git not available. Skipping git operations.');
     }
