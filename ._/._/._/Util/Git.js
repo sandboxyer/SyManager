@@ -1,25 +1,18 @@
 #!/usr/bin/env node
 
 import { exec } from 'child_process';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import readline from 'readline';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 class Git {
     static #isExecuting = false;
-    static #rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
+    static #rl = null;
 
     /**
      * Initialize Git class - main entry point
      */
-    static async init() {
+    static async init(readlineInterface = null) {
+        // Store the provided readline interface
+        this.#rl = readlineInterface;
+        
         this.#isExecuting = import.meta.url === `file://${process.argv[1]}` || 
                            process.argv[1] && process.argv[1].includes('Git.js');
         
@@ -381,19 +374,35 @@ Examples:
      */
     static #question(query) {
         return new Promise((resolve) => {
-            this.#rl.question(query, (answer) => {
-                resolve(answer);
-            });
+            if (this.#rl) {
+                // Use the provided readline interface
+                this.#rl.question(query, (answer) => {
+                    resolve(answer);
+                });
+            } else {
+                // Fallback to simple prompt
+                process.stdout.write(query);
+                process.stdin.once('data', (data) => {
+                    resolve(data.toString().trim());
+                });
+            }
         });
     }
 
     /**
-     * Close readline interface
+     * Set readline interface (for external use)
+     */
+    static setReadlineInterface(readlineInterface) {
+        this.#rl = readlineInterface;
+    }
+
+    /**
+     * Cleanup method
      */
     static close() {
-        if (this.#rl) {
-            this.#rl.close();
-        }
+        // Don't close the readline interface as it might be used elsewhere
+        // Just clean up our reference
+        this.#rl = null;
     }
 }
 

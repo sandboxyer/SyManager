@@ -25,7 +25,7 @@ class TerminalHUD {
     this.lastSelectedIndex = 0;
 
     // ✅ Optional mouse support
-    this.mouseSupport = config.mouseSupport || false;
+    this.mouseSupport = config.mouseSupport || true;
     this._mouseEventBuffer = '';
     this._mouseEnabled = false;
     this._currentMenuState = null;
@@ -76,11 +76,27 @@ class TerminalHUD {
 
   // === Public API ===
 
-  _flushStdin() {
-    // Temporarily pause stdin, drain any buffered data, then resume
-    // This removes leftover mouse/keypress garbage
-    stdin.pause();
-    stdin.resume();
+  _resetTerminalModes() {
+    // Write all terminal reset commands
+    stdout.write('\x1b[?1000l'); // Disable mouse tracking
+    stdout.write('\x1b[?1002l'); // Disable mouse drag tracking
+    stdout.write('\x1b[?1003l'); // Disable all mouse tracking
+    stdout.write('\x1b[?1006l'); // Disable SGR mouse mode
+    stdout.write('\x1b[?25h');   // Show cursor
+    stdout.write(''); // Force flush
+  }
+
+  _cleanupMouseSupport() {
+    // Only cleanup if mouse was enabled
+    if (this._mouseEnabled) {
+      this._resetTerminalModes();
+      stdin.removeListener('data', this._handleMouseData);
+      this._mouseEnabled = false;
+      this._mouseEventBuffer = '';
+    }
+    
+    // Reset click state
+    this._resetClickState();
   }
 
   async ask(question, config = {}) {
@@ -90,38 +106,40 @@ class TerminalHUD {
         : this.displayMenuWithArrows(question, config.options, config);
     }
 
-    this._safeDisableMouseTracking();
-  
+    // If we're in a menu, cleanup mouse support first
+    if (this._inMenu) {
+      this._cleanupMouseSupport();
+      this._inMenu = false;
+    }
+
+    // Remove keypress listeners if any
+    stdin.removeAllListeners('keypress');
+    
+    // Ensure raw mode is off
     if (stdin.isRaw) {
       stdin.setRawMode(false);
     }
-  
-    if (typeof this._keypressListener === 'function') {
-      stdin.removeListener('keypress', this._keypressListener);
-      this._keypressListener = null;
+
+    // Close current readline interface if it exists
+    if (this.rl) {
+      this.rl.close();
     }
-  
-    if (typeof this._handleMouseData === 'function') {
-      stdin.removeListener('data', this._handleMouseData);
-    }
-  
-    this.rl.close();
-  
-    const tempRl = readline.createInterface({
-      input: stdin,
-      output: stdout,
-      terminal: true
-    });
-  
+
+    // Create a new clean readline interface
     return new Promise((resolve) => {
-      tempRl.question(`\n${question}`, (answer) => {
-        tempRl.close();
-  
+      this.rl = readline.createInterface({
+        input: stdin,
+        output: stdout,
+        terminal: true
+      });
+
+      this.rl.question(`\n${question}`, (answer) => {
+        this.rl.close();
+        // Restore interface for future use
         this.rl = readline.createInterface({
           input: stdin,
           output: stdout
         });
-  
         resolve(answer);
       });
     });
@@ -161,13 +179,36 @@ class TerminalHUD {
   }
 
   async pressWait() {
+    // Cleanup mouse support if active
+    if (this._inMenu) {
+      this._cleanupMouseSupport();
+      this._inMenu = false;
+    }
+
+    // Remove any existing listeners
+    stdin.removeAllListeners('keypress');
+    stdin.removeAllListeners('data');
+    
+    // Ensure raw mode is off initially
+    if (stdin.isRaw) {
+      stdin.setRawMode(false);
+    }
+
     return new Promise(resolve => {
       console.log('\nPress any key to continue...');
-      const handler = () => {
+      
+      const handler = (data) => {
         stdin.setRawMode(false);
         stdin.removeListener('data', handler);
+        
+        // Handle Ctrl+C
+        if (data && data.toString() === '\x03') {
+          process.exit(0);
+        }
+        
         resolve();
       };
+      
       stdin.setRawMode(true);
       stdin.once('data', handler);
     });
@@ -175,7 +216,9 @@ class TerminalHUD {
 
   close() {
     this._cleanupAll();
-    this.rl.close();
+    if (this.rl) {
+      this.rl.close();
+    }
   }
 
   // === Menu Display Logic (Enhanced for Mouse) ===
@@ -219,21 +262,30 @@ class TerminalHUD {
         if (this._clickInProgress) return;
         
         this._clickInProgress = true;
-        cleanup();
         
+        // Get selected item before cleanup
         this.lastSelectedIndex = this.getLinearIndexFromCoordinates(normalized, line, col);
         const selected = normalized[line][col];
         
-        if (selected?.action) {
-          // Execute the action and properly await it
-          const result = selected.action();
-          if (result instanceof Promise) {
-            await result;
-          }
-        }
+        // Clean up menu state immediately
+        this._cleanupMenuState();
         
-        this._clickInProgress = false;
-        resolve(selected?.name || selected);
+        try {
+          if (selected?.action) {
+            // Execute the action
+            const result = selected.action();
+            if (result instanceof Promise) {
+              await result;
+            }
+          }
+          
+          resolve(selected?.name || selected);
+        } catch (error) {
+          console.error('Error in menu action:', error);
+          resolve(null);
+        } finally {
+          this._clickInProgress = false;
+        }
       };
 
       const handleKeyPress = async (_, key) => {
@@ -259,7 +311,7 @@ class TerminalHUD {
             return;
           case 'c':
             if (key.ctrl) {
-              cleanup();
+              this._cleanupMenuState();
               process.exit();
             }
             break;
@@ -267,24 +319,8 @@ class TerminalHUD {
         renderMenu();
       };
 
-      const cleanup = () => {
-        this._inMenu = false;
-        stdin.removeListener('keypress', handleKeyPress);
-        stdin.setRawMode(false);
-        this._currentMenuState = null;
-        this._safeDisableMouseTracking();
-        this._resetClickState();
-      };
-
       // Setup for this menu
-      this._inMenu = true;
-      readline.emitKeypressEvents(stdin);
-      stdin.setRawMode(true);
-      stdin.resume();
-      stdin.on('keypress', handleKeyPress);
-
-      // Enable mouse tracking for this menu
-      this._safeEnableMouseTracking();
+      this._setupMenuState(handleKeyPress);
 
       // Store menu state for mouse handling
       this._currentMenuState = {
@@ -292,12 +328,43 @@ class TerminalHUD {
         question,
         renderMenu,
         setFocus,
-        select,
-        cleanup
+        select
       };
 
       renderMenu();
     });
+  }
+
+  _setupMenuState(keyPressHandler) {
+    this._inMenu = true;
+    
+    // Remove any existing listeners
+    stdin.removeAllListeners('keypress');
+    
+    readline.emitKeypressEvents(stdin);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('keypress', keyPressHandler);
+
+    // Enable mouse tracking for this menu
+    this._safeEnableMouseTracking();
+  }
+
+  _cleanupMenuState() {
+    this._inMenu = false;
+    
+    // Remove keypress listener
+    stdin.removeAllListeners('keypress');
+    
+    // Disable raw mode
+    if (stdin.isRaw) {
+      stdin.setRawMode(false);
+    }
+    
+    // Cleanup mouse support
+    this._cleanupMouseSupport();
+    
+    this._currentMenuState = null;
   }
 
   // Original implementation for fallback or non-mouse mode
@@ -460,51 +527,29 @@ class TerminalHUD {
   // === Mouse Support ===
 
   _safeEnableMouseTracking() {
-    if (this._mouseEnabled) return;
+    if (this._mouseEnabled || !this._inMenu) return;
     
     try {
-      // Enable mouse tracking for click events only
-      stdout.write('\x1b[?1000h');
+      // Enable mouse tracking
+      stdout.write('\x1b[?1000h'); // Enable X10 mouse mode
+      stdout.write('\x1b[?1006h'); // Enable SGR mouse mode for better compatibility
       this._mouseEnabled = true;
 
       // Add the mouse event listener
       stdin.on('data', this._handleMouseData);
     } catch (error) {
-      // Silently fail - mouse might not be supported
       this._mouseEnabled = false;
-    }
-  }
-
-  _safeDisableMouseTracking() {
-    if (!this._mouseEnabled) return;
-    
-    try {
-      stdout.write('\x1b[?1000l'); // Disable mouse tracking
-      this._mouseEnabled = false;
-
-      // Remove the mouse event listener
-      stdin.removeListener('data', this._handleMouseData);
-    } catch (error) {
-      // Silently fail
     }
   }
 
   _cleanupAll() {
-    // Comprehensive cleanup
     this._inMenu = false;
-    this._safeDisableMouseTracking();
-    this._resetMouseState();
+    this._cleanupMouseSupport();
     
     if (this._doubleClickTimeout) {
       clearTimeout(this._doubleClickTimeout);
       this._doubleClickTimeout = null;
     }
-  }
-
-  _resetMouseState() {
-    this._mouseEventBuffer = '';
-    this._currentMenuState = null;
-    this._resetClickState();
   }
 
   _resetClickState() {
@@ -518,24 +563,20 @@ class TerminalHUD {
   }
 
   _handleMouseData(data) {
-    // Only process mouse events when in a menu with mouse support
     if (!this.mouseSupport || !this._inMenu || !this._currentMenuState) {
       return;
     }
 
     const str = data.toString();
     
-    // Debug: log mouse events to see what's happening
-    // console.log('Mouse data:', Buffer.from(str).toString('hex'));
-
-    // Quick check if this is a mouse event
+    // Check if this is a mouse event
     if (!str.includes('\x1b[') || (!str.includes('M') && !str.includes('m'))) {
       return;
     }
 
     this._mouseEventBuffer += str;
 
-    // Process SGR mouse events (most common)
+    // Process SGR mouse events
     const sgrMatch = this._mouseEventBuffer.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
     if (sgrMatch) {
       this._mouseEventBuffer = '';
@@ -543,7 +584,7 @@ class TerminalHUD {
       return;
     }
 
-    // Process X10 mouse events (fallback)
+    // Process X10 mouse events
     const x10Match = this._mouseEventBuffer.match(/\x1b\[M([\x00-\xFF]{3})/);
     if (x10Match) {
       this._mouseEventBuffer = '';
@@ -551,7 +592,6 @@ class TerminalHUD {
       return;
     }
 
-    // Clear buffer if it gets too large or doesn't contain valid mouse events
     if (this._mouseEventBuffer.length > 20) {
       this._mouseEventBuffer = '';
     }
@@ -563,7 +603,6 @@ class TerminalHUD {
     const y = parseInt(match[3]) - 1;
     const eventType = match[4];
 
-    // Only process left mouse button press events (not release)
     if (eventType === 'M' && button === 0) {
       this._processMouseClick(x, y);
     }
@@ -575,14 +614,12 @@ class TerminalHUD {
     const x = bytes.charCodeAt(1) - 33;
     const y = bytes.charCodeAt(2) - 33;
 
-    // Only process left mouse button events (button code 0 for press, 35 for release)
     if (button === 0) {
       this._processMouseClick(x, y);
     }
   }
 
   _processMouseClick(x, y) {
-    // Don't process if click already in progress
     if (this._clickInProgress) return;
 
     const { normalized, question, setFocus, select } = this._currentMenuState;
@@ -592,37 +629,30 @@ class TerminalHUD {
 
     const { line: targetLine, col: targetCol } = this.getCoordinatesFromLinearIndex(normalized, clickedIndex);
 
-    // Set focus to clicked item immediately (single click behavior)
     setFocus(targetLine, targetCol);
 
-    // Double-click detection with proper debouncing
     const now = Date.now();
     const isDoubleClick = (now - this._lastClick.time < this._DOUBLE_CLICK_DELAY &&
                           this._lastClick.x === x && 
                           this._lastClick.y === y);
 
     if (isDoubleClick) {
-      // Reset click history and clear any pending timeout
       this._lastClick = { time: 0, x: -1, y: -1 };
       if (this._doubleClickTimeout) {
         clearTimeout(this._doubleClickTimeout);
         this._doubleClickTimeout = null;
       }
       
-      // Execute selection for double-click
       select().catch(error => {
         console.error('Error in menu selection:', error);
       });
     } else {
-      // Store click for potential double-click
       this._lastClick = { time: now, x, y };
       
-      // Clear any existing timeout
       if (this._doubleClickTimeout) {
         clearTimeout(this._doubleClickTimeout);
       }
       
-      // Set new timeout to reset click after delay
       this._doubleClickTimeout = setTimeout(() => {
         this._lastClick = { time: 0, x: -1, y: -1 };
         this._doubleClickTimeout = null;
@@ -631,43 +661,36 @@ class TerminalHUD {
   }
 
   _findOptionIndexAt(terminalY, terminalX, normalized, question) {
-    // Calculate starting row based on question
     let startRow = 0;
     if (question) {
-      // Each line of question + blank line
       const questionLines = question.split('\n').length;
       startRow += questionLines + 1;
     }
 
-    // Check each menu row
     for (let row = 0; row < normalized.length; row++) {
       const actualRow = startRow + row;
       
       if (actualRow === terminalY) {
-        // Found the correct row, now find the column
         let currentCol = 0;
         for (let col = 0; col < normalized[row].length; col++) {
           const opt = normalized[row][col];
           const text = typeof opt === 'string' ? opt : opt.name || JSON.stringify(opt);
           const textWidth = text.length;
 
-          // Check if click is within this option's boundaries
-          // Give some padding for easier clicking
           const optionStart = currentCol;
           const optionEnd = currentCol + textWidth;
           
           if (terminalX >= optionStart && terminalX <= optionEnd + 2) {
-            // Calculate the linear index
             return this.getLinearIndexFromCoordinates(normalized, row, col);
           }
 
-          currentCol += textWidth + 3; // Move to next option (text + "   " separator)
+          currentCol += textWidth + 3;
         }
         break;
       }
     }
 
-    return -1; // No option found at these coordinates
+    return -1;
   }
 }
 
