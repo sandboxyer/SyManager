@@ -3,7 +3,7 @@ import { stdin, stdout } from 'process';
 
 /**
  * TerminalHUD - A framework for creating HUD interfaces in terminal
- * Optional mouse support: click to focus, double-click to select.
+ * Optional mouse support: click to focus, double-click to select, wheel to navigate.
  */
 class TerminalHUD {
   /**
@@ -12,6 +12,7 @@ class TerminalHUD {
    * @param {boolean} config.numberedMenus - Use numbered menus instead of arrow navigation (default: false)
    * @param {string} config.highlightColor - Color for highlighting selected menu option (default: blue)
    * @param {boolean} config.mouseSupport - Enable mouse click/double-click navigation (default: false)
+   * @param {boolean} config.mouseWheel - Enable mouse wheel navigation (default: true when mouseSupport is true)
    */
   constructor(config = {}) {
     this.rl = readline.createInterface({
@@ -26,6 +27,7 @@ class TerminalHUD {
 
     // ✅ Optional mouse support
     this.mouseSupport = config.mouseSupport || true;
+    this.mouseWheel = config.mouseWheel !== undefined ? config.mouseWheel : this.mouseSupport;
     this._mouseEventBuffer = '';
     this._mouseEnabled = false;
     this._currentMenuState = null;
@@ -33,6 +35,10 @@ class TerminalHUD {
     this._DOUBLE_CLICK_DELAY = 300;
     this._doubleClickTimeout = null;
     this._clickInProgress = false;
+    
+    // Mouse wheel state
+    this._wheelAccumulator = 0;
+    this._WHEEL_THRESHOLD = 1; // Number of wheel events needed to trigger navigation
 
     // Track if we're currently in a menu
     this._inMenu = false;
@@ -97,6 +103,9 @@ class TerminalHUD {
     
     // Reset click state
     this._resetClickState();
+    
+    // Reset wheel accumulator
+    this._wheelAccumulator = 0;
   }
 
   async ask(question, config = {}) {
@@ -328,7 +337,9 @@ class TerminalHUD {
         question,
         renderMenu,
         setFocus,
-        select
+        select,
+        currentLine: line,
+        currentCol: col
       };
 
       renderMenu();
@@ -365,6 +376,7 @@ class TerminalHUD {
     this._cleanupMouseSupport();
     
     this._currentMenuState = null;
+    this._wheelAccumulator = 0;
   }
 
   // Original implementation for fallback or non-mouse mode
@@ -524,15 +536,21 @@ class TerminalHUD {
     return lines.slice(0, line).reduce((sum, l) => sum + l.length, 0) + col;
   }
 
-  // === Mouse Support ===
+  // === Mouse Support (Enhanced with Wheel) ===
 
   _safeEnableMouseTracking() {
     if (this._mouseEnabled || !this._inMenu) return;
     
     try {
-      // Enable mouse tracking
-      stdout.write('\x1b[?1000h'); // Enable X10 mouse mode
-      stdout.write('\x1b[?1006h'); // Enable SGR mouse mode for better compatibility
+      // Enable mouse tracking with wheel support
+      // ?1000h - Enable X10 mouse mode (basic mouse tracking)
+      // ?1002h - Enable cell motion mouse tracking (for drag events)
+      // ?1003h - Enable all motion mouse tracking (for hover and wheel)
+      // ?1006h - Enable SGR mouse mode for extended coordinates
+      stdout.write('\x1b[?1000h'); // Enable basic mouse tracking
+      stdout.write('\x1b[?1002h'); // Enable cell motion tracking
+      stdout.write('\x1b[?1003h'); // Enable all motion tracking (includes wheel)
+      stdout.write('\x1b[?1006h'); // Enable SGR mouse mode
       this._mouseEnabled = true;
 
       // Add the mouse event listener
@@ -576,7 +594,7 @@ class TerminalHUD {
 
     this._mouseEventBuffer += str;
 
-    // Process SGR mouse events
+    // Process SGR mouse events (modern terminal mouse protocol)
     const sgrMatch = this._mouseEventBuffer.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
     if (sgrMatch) {
       this._mouseEventBuffer = '';
@@ -584,7 +602,7 @@ class TerminalHUD {
       return;
     }
 
-    // Process X10 mouse events
+    // Process X10 mouse events (legacy terminal mouse protocol)
     const x10Match = this._mouseEventBuffer.match(/\x1b\[M([\x00-\xFF]{3})/);
     if (x10Match) {
       this._mouseEventBuffer = '';
@@ -592,6 +610,7 @@ class TerminalHUD {
       return;
     }
 
+    // Clear buffer if it gets too long (malformed data)
     if (this._mouseEventBuffer.length > 20) {
       this._mouseEventBuffer = '';
     }
@@ -603,7 +622,14 @@ class TerminalHUD {
     const y = parseInt(match[3]) - 1;
     const eventType = match[4];
 
-    if (eventType === 'M' && button === 0) {
+    // Check for mouse wheel events first (button codes 64 and 65 for wheel up/down in SGR mode)
+    if (button & 64) {
+      // Wheel event in SGR mode
+      const isWheelDown = (button & 1) === 1;
+      this._processMouseWheel(x, y, isWheelDown ? 'down' : 'up');
+    }
+    // Check for left click (button code 0 with eventType 'M')
+    else if (eventType === 'M' && button === 0) {
       this._processMouseClick(x, y);
     }
   }
@@ -614,7 +640,13 @@ class TerminalHUD {
     const x = bytes.charCodeAt(1) - 33;
     const y = bytes.charCodeAt(2) - 33;
 
-    if (button === 0) {
+    // Check for mouse wheel events in X10 mode (button codes 96 and 97 for wheel up/down)
+    if (button >= 96 && button <= 97) {
+      const isWheelDown = button === 97;
+      this._processMouseWheel(x, y, isWheelDown ? 'down' : 'up');
+    }
+    // Check for left click (button code 0)
+    else if (button === 0) {
       this._processMouseClick(x, y);
     }
   }
@@ -657,6 +689,56 @@ class TerminalHUD {
         this._lastClick = { time: 0, x: -1, y: -1 };
         this._doubleClickTimeout = null;
       }, this._DOUBLE_CLICK_DELAY);
+    }
+  }
+
+  _processMouseWheel(x, y, direction) {
+    if (!this._currentMenuState || !this.mouseWheel || this._clickInProgress) {
+      return;
+    }
+
+    const { normalized, setFocus, currentLine, currentCol } = this._currentMenuState;
+    
+    // Accumulate wheel events to smooth out navigation
+    this._wheelAccumulator += (direction === 'down' ? 1 : -1);
+    
+    // Only navigate when threshold is reached
+    if (Math.abs(this._wheelAccumulator) >= this._WHEEL_THRESHOLD) {
+      let newLine = currentLine;
+      let newCol = currentCol;
+      
+      if (direction === 'down') {
+        // Move down (next item)
+        const linearIndex = this.getLinearIndexFromCoordinates(normalized, currentLine, currentCol);
+        const totalItems = normalized.reduce((sum, line) => sum + line.length, 0);
+        
+        if (linearIndex < totalItems - 1) {
+          const newLinearIndex = linearIndex + 1;
+          const coords = this.getCoordinatesFromLinearIndex(normalized, newLinearIndex);
+          newLine = coords.line;
+          newCol = coords.col;
+        }
+      } else {
+        // Move up (previous item)
+        const linearIndex = this.getLinearIndexFromCoordinates(normalized, currentLine, currentCol);
+        
+        if (linearIndex > 0) {
+          const newLinearIndex = linearIndex - 1;
+          const coords = this.getCoordinatesFromLinearIndex(normalized, newLinearIndex);
+          newLine = coords.line;
+          newCol = coords.col;
+        }
+      }
+      
+      // Update the menu state with new position
+      this._currentMenuState.currentLine = newLine;
+      this._currentMenuState.currentCol = newCol;
+      
+      // Set focus to new position
+      setFocus(newLine, newCol);
+      
+      // Reset accumulator
+      this._wheelAccumulator = 0;
     }
   }
 
