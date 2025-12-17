@@ -251,7 +251,7 @@ function readPackageJson() {
   }
 }
 
-async function runScript(scriptName) {
+async function runScript(scriptName, ...scriptArgs) {
   const packageJson = readPackageJson();
   
   if (!packageJson.scripts || !packageJson.scripts[scriptName]) {
@@ -261,11 +261,22 @@ async function runScript(scriptName) {
   }
   
   const command = packageJson.scripts[scriptName];
-  console.log(`Running: ${command}`);
+  
+  // Check if the script uses npm run or similar pattern
+  let fullCommand;
+  if (command.startsWith('npm ') || command.startsWith('yarn ') || command.startsWith('pnpm ')) {
+    // For npm/yarn/pnpm commands, append our args
+    fullCommand = `${command} ${scriptArgs.join(' ')}`.trim();
+  } else {
+    // For other commands, pass args directly
+    fullCommand = `${command} ${scriptArgs.join(' ')}`.trim();
+  }
+  
+  console.log(`Running: ${fullCommand}`);
   
   try {
     // Use spawn to preserve colors and real-time output
-    const child = spawn(command, {
+    const child = spawn(fullCommand, {
       shell: true,
       stdio: 'inherit',
       cwd: callerCwd
@@ -389,27 +400,30 @@ pkg - Generic package.json utility
 Usage: pkg <command> [options]
 
 Commands:
-  run <script>          Run any script from package.json
-  version <type|ver>    Update version and create git commit
+  run <script> [args...]  Run any script from package.json with arguments
+  version <type|ver>      Update version and create git commit
   
 Arguments:
   For 'run' command:
-    <script>            Script name from package.json scripts section
+    <script>              Script name from package.json scripts section
+    [args...]            Arguments to pass to the script
   
   For 'version' command:
-    major               Bump major version (X+1.0.0)
-    minor               Bump minor version (X.Y+1.0)
-    patch               Bump patch version (X.Y.Z+1)
-    <X.Y.Z>             Set specific version (e.g., 1.2.3)
-    <X.Y.Z-prerelease>  Set version with prerelease tag
+    major                 Bump major version (X+1.0.0)
+    minor                 Bump minor version (X.Y+1.0)
+    patch                 Bump patch version (X.Y.Z+1)
+    <X.Y.Z>               Set specific version (e.g., 1.2.3)
+    <X.Y.Z-prerelease>    Set version with prerelease tag
 
 Examples:
-  pkg run test          Run the 'test' script from package.json
-  pkg run build         Run the 'build' script from package.json
-  pkg version patch     Bump patch version (1.2.3 -> 1.2.4)
-  pkg version minor     Bump minor version (1.2.3 -> 1.3.0)
-  pkg version major     Bump major version (1.2.3 -> 2.0.0)
-  pkg version 2.1.0     Set version to 2.1.0
+  pkg run test            Run the 'test' script from package.json
+  pkg run build           Run the 'build' script from package.json
+  pkg run dev --port 3000 Run 'dev' script with --port argument
+  pkg run test --watch    Run 'test' script with --watch argument
+  pkg version patch       Bump patch version (1.2.3 -> 1.2.4)
+  pkg version minor       Bump minor version (1.2.3 -> 1.3.0)
+  pkg version major       Bump major version (1.2.3 -> 2.0.0)
+  pkg version 2.1.0       Set version to 2.1.0
   pkg version 1.0.0-beta.1  Set version to 1.0.0-beta.1
 
 Working directory: ${callerCwd}
@@ -428,12 +442,12 @@ async function main() {
   const command = args[0];
   
   switch (command) {
-    case 'run':
+      case 'run':
       if (args.length < 2) {
-        console.error('Usage: pkg run <script-name>');
+        console.error('Usage: pkg run <script-name> [script-args...]');
         process.exit(1);
       }
-      await runScript(args[1]);
+      await runScript(args[1], ...args.slice(2));
       break;
       
     case 'version':
@@ -596,8 +610,8 @@ done
 
 echo
 echo "Generic pkg command features:"
-echo "  pkg run <script>          - Run any script from package.json"
-echo "  pkg version <type|ver>    - Update version and create git commit"
+echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
+echo "  pkg version <type|ver>       - Update version and create git commit"
 echo
 echo "pkg version supports:"
 echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
@@ -607,10 +621,12 @@ echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
 echo
 echo "Examples:"
-echo "  pkg run test              # Runs 'test' script from package.json"
-echo "  pkg run build             # Runs 'build' script from package.json"
-echo "  pkg version patch         # Bumps patch version and commits"
-echo "  pkg version 1.2.3         # Sets version to 1.2.3 and commits"
+echo "  pkg run test                    # Runs 'test' script from package.json"
+echo "  pkg run build                   # Runs 'build' script from package.json"
+echo "  pkg run dev --port 3000         # Runs 'dev' script with --port argument"
+echo "  pkg run test --watch --verbose  # Runs 'test' script with multiple args"
+echo "  pkg version patch               # Bumps patch version and commits"
+echo "  pkg version 1.2.3               # Sets version to 1.2.3 and commits"
 echo
 echo "Note: pkg works from any directory with a package.json file"
 
