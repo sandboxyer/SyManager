@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # =============================================================================
 # GENERIC INSTALLATION TEMPLATE
@@ -22,37 +22,29 @@ MAIN_SOURCE_DIR="$REPO_DIR"                         # Root of your project files
 # ARCHIVE_DIR="$REPO_DIR/archives"                  # Uncomment if using archives like pm2
 
 # NODE.JS COMMAND MAPPING (REQUIRED - define your commands)
-declare -A NODE_ENTRY_POINTS=(
-  # Format: ["path/to/your/file.js"]="command-name"
-  # Example: ["src/cli/main.js"]="myapp"
-  # Add your specific entry points below:
-  ["SyManager.js"]="sy"
-  ["._/SyPM.js"]="sypm"
-  ["._/SyDB.js"]="sydb"
-  ["pkg-cli.js"]="pkg"  # Added generic pkg command
-  # ["vendor/pm2/bin/pm2"]="pm2"                    # Uncomment if using pm2
-)
+# Using space-separated lists for ash compatibility (no associative arrays)
+NODE_ENTRY_POINTS_SRC="SyManager.js ._/SyPM.js ._/SyDB.js pkg-cli.js"
+NODE_ENTRY_POINTS_CMD="sy sypm sydb pkg"
 
 # COMMAND WORKING DIRECTORY CONFIGURATION
 # Set to "caller" to use the directory where command was called from
 # Set to "global" to use the installation directory (default)
-declare -A COMMAND_WORKING_DIR=(
-  # Format: ["command-name"]="caller|global"
-  # Default behavior is "global" if not specified
-  ["sy"]="global"           # Uses installation directory
-  ["sypm"]="caller"         # Uses caller's current directory
-  ["sydb"]="global"
-  ["pkg"]="caller"          # pkg always uses caller's directory
-)
+# Using case statements for ash compatibility
+get_command_working_dir() {
+    command="$1"
+    case "$command" in
+        "sy") echo "global" ;;
+        "sypm") echo "caller" ;;
+        "sydb") echo "global" ;;
+        "pkg") echo "caller" ;;
+        *) echo "global" ;;
+    esac
+}
 
 # PRESERVATION WHITELIST (OPTIONAL - files to keep during updates)
-declare -a PRESERVATION_WHITELIST=(
-  # Add files/directories to preserve during updates:
-  # "config"
-  # "data"
-  # "models"
-  # "user-settings.json"
-)
+PRESERVATION_WHITELIST=""
+# To add files/directories, use space-separated list:
+# PRESERVATION_WHITELIST="config data models user-settings.json"
 
 # =============================================================================
 # ADVANCED CONFIGURATION (Usually don't need changes)
@@ -71,169 +63,191 @@ PRESERVE_DATA=true
 # PM2_EXTRACT_DIR="$INSTALL_DIR/vendor/pm2"         # Uncomment if using pm2
 
 # =============================================================================
-# FUNCTION DEFINITIONS (No changes needed normally)
+# FUNCTION DEFINITIONS (Ash-compatible versions)
 # =============================================================================
 
 show_help() {
-  echo "Usage: $0 [OPTIONS]"
-  echo "Install $PROJECT_NAME - $PROJECT_DESCRIPTION"
-  echo
-  echo "Options:"
-  echo "  -h, --help       Show this help"
-  echo "  -log             Enable installation logging"
-  echo "  --skip-debs      Skip .deb package installation"
-  echo "  --local-dir      Run commands from current directory"
-  echo "  --no-preserve    Don't preserve files during update"
-  echo
-  echo "Commands will be created for:"
-  for dest in "${NODE_ENTRY_POINTS[@]}"; do
-    echo "  $dest"
-  done
-  echo
-  echo "Working directory configuration:"
-  for command in "${!COMMAND_WORKING_DIR[@]}"; do
-    echo "  $command: ${COMMAND_WORKING_DIR[$command]}"
-  done
-  echo
-  echo "Generic pkg command features:"
-  echo "  pkg run <script>          Run npm script from any package.json"
-  echo "  pkg version <type|ver>    Update version (major|minor|patch|X.Y.Z) and git commit"
-  exit 0
+    echo "Usage: $0 [OPTIONS]"
+    echo "Install $PROJECT_NAME - $PROJECT_DESCRIPTION"
+    echo
+    echo "Options:"
+    echo "  -h, --help       Show this help"
+    echo "  -log             Enable installation logging"
+    echo "  --skip-debs      Skip .deb package installation"
+    echo "  --local-dir      Run commands from current directory"
+    echo "  --no-preserve    Don't preserve files during update"
+    echo
+    echo "Commands will be created for:"
+    for cmd in $NODE_ENTRY_POINTS_CMD; do
+        echo "  $cmd"
+    done
+    echo
+    echo "Working directory configuration:"
+    for cmd in $NODE_ENTRY_POINTS_CMD; do
+        working_dir=$(get_command_working_dir "$cmd")
+        echo "  $cmd: $working_dir"
+    done
+    echo
+    echo "Generic pkg command features:"
+    echo "  pkg run <script>          Run npm script from any package.json"
+    echo "  pkg version <type|ver>    Update version (major|minor|patch|X.Y.Z) and git commit"
+    exit 0
 }
 
 detect_ubuntu_variant() {
-  if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q ubuntu-desktop; then
-    echo "desktop"
-  else
-    echo "server"
-  fi
+    if command -v dpkg >/dev/null 2>&1 && dpkg -l 2>/dev/null | grep -q ubuntu-desktop; then
+        echo "desktop"
+    else
+        echo "server"
+    fi
 }
 
 log_message() {
-  local message="$1"
-  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  
-  if [[ "$LOG_MODE" == true ]]; then
-    echo "[$timestamp] $message" | tee -a "$LOG_FILE"
-  else
-    echo "[$timestamp] $message"
-  fi
+    message="$1"
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    if [ "$LOG_MODE" = true ]; then
+        echo "[$timestamp] $message" | tee -a "$LOG_FILE"
+    else
+        echo "[$timestamp] $message"
+    fi
 }
 
 show_progress() {
-  local message="$1"
-  local pid="$2"
-  
-  while kill -0 $pid 2>/dev/null; do
-    echo -ne "$message (press 'x' to skip)\r"
-    read -t 1 -n 1 -s input || true
-    if [[ $input == "x" ]]; then
-      echo -e "\nSkipping step..."
-      kill $pid 2>/dev/null
-      break
+    message="$1"
+    pid="$2"
+    
+    # Simple progress indicator without fancy input
+    if [ -t 0 ]; then
+        while kill -0 $pid 2>/dev/null; do
+            printf "%s...\r" "$message"
+            sleep 1
+        done
+        wait $pid 2>/dev/null || true
+        printf "\n%s completed.\n" "$message"
+    else
+        wait $pid 2>/dev/null || true
+        printf "%s completed.\n" "$message"
     fi
-  done
-  wait $pid 2>/dev/null
-  echo -e "\n$message completed."
 }
 
 install_debs() {
-  [[ "$SKIP_DEBS" == true ]] && return 0
-  [[ -z "$DEB_DIR" ]] && return 0
+    [ "$SKIP_DEBS" = true ] && return 0
+    [ -z "$DEB_DIR" ] && return 0
 
-  local variant=$(detect_ubuntu_variant)
-  local deb_dir="$DEB_DIR"
-  
-  [[ "$variant" == "server" && -n "$DEB_SERVER_DIR" ]] && deb_dir="$DEB_SERVER_DIR"
-  [[ ! -d "$deb_dir" ]] && return 0
+    variant=$(detect_ubuntu_variant)
+    deb_dir="$DEB_DIR"
+    
+    [ "$variant" = "server" ] && [ -n "$DEB_SERVER_DIR" ] && deb_dir="$DEB_SERVER_DIR"
+    [ ! -d "$deb_dir" ] && return 0
 
-  local deb_files=("$deb_dir"/*.deb)
-  [[ ${#deb_files[@]} -eq 0 ]] && return 0
+    # Find .deb files
+    deb_files=""
+    for file in "$deb_dir"/*.deb; do
+        [ -e "$file" ] && deb_files="$deb_files $file"
+    done
+    
+    [ -z "$deb_files" ] && return 0
 
-  log_message "Installing .deb packages..."
-  if [[ "$LOG_MODE" == true ]]; then
-    sudo dpkg -i "${deb_files[@]}" 2>&1 | tee -a "$LOG_FILE" &
-  else
-    sudo dpkg -i "${deb_files[@]}" > /dev/null 2>&1 &
-  fi
-  
-  show_progress "Installing packages" $!
-  return $?
+    log_message "Installing .deb packages..."
+    if [ "$LOG_MODE" = true ]; then
+        sudo dpkg -i $deb_files 2>&1 | tee -a "$LOG_FILE" &
+    else
+        sudo dpkg -i $deb_files > /dev/null 2>&1 &
+    fi
+    
+    show_progress "Installing packages" $!
+    return $?
 }
 
 copy_files() {
-  local src_dir="$1"
-  local dest_dir="$2"
+    src_dir="$1"
+    dest_dir="$2"
 
-  mkdir -p "$dest_dir"
-  log_message "Copying files to $dest_dir..."
+    mkdir -p "$dest_dir"
+    log_message "Copying files to $dest_dir..."
 
-  if [[ "$LOG_MODE" == true ]]; then
-    rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" 2>&1 | tee -a "$LOG_FILE" &
-  else
-    rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" > /dev/null 2>&1 &
-  fi
-
-  show_progress "Copying files" $!
-  return $?
+    # Create a simple copy function without rsync
+    copy_with_progress() {
+        # Count total files for progress (approx)
+        total_files=0
+        if [ -d "$src_dir" ]; then
+            # Simple file count - won't work perfectly for complex structures but good enough
+            total_files=$(find "$src_dir" -type f -not -path '*/\.git/*' | wc -l)
+        fi
+        
+        # Copy files recursively
+        if [ "$LOG_MODE" = true ]; then
+            (cd "$src_dir" && find . -type f -not -path '*/\.git/*' -exec cp --parents {} "$dest_dir" \; 2>&1 | tee -a "$LOG_FILE") &
+        else
+            (cd "$src_dir" && find . -type f -not -path '*/\.git/*' -exec cp --parents {} "$dest_dir" \; > /dev/null 2>&1) &
+        fi
+        
+        echo $!
+    }
+    
+    pid=$(copy_with_progress)
+    show_progress "Copying files" $pid
+    return $?
 }
 
 remove_links() {
-  for dest in "${NODE_ENTRY_POINTS[@]}"; do
-    local dest_path="$BIN_DIR/$dest"
-    [[ -L "$dest_path" ]] && rm -f "$dest_path"
-  done
+    # Convert space-separated list to lines for processing
+    echo "$NODE_ENTRY_POINTS_CMD" | tr ' ' '\n' | while read cmd; do
+        [ -z "$cmd" ] && continue
+        dest_path="$BIN_DIR/$cmd"
+        [ -L "$dest_path" ] && rm -f "$dest_path"
+    done
 }
 
 preserve_files_from_backup() {
-  [[ "$PRESERVE_DATA" == false ]] && return 0
-  [[ ! -d "$BACKUP_DIR" ]] && return 0
+    [ "$PRESERVE_DATA" = false ] && return 0
+    [ ! -d "$BACKUP_DIR" ] && return 0
 
-  log_message "Restoring preserved files..."
-  for item in "${PRESERVATION_WHITELIST[@]}"; do
-    local source_path="$BACKUP_DIR/$item"
-    local dest_path="$INSTALL_DIR/$item"
+    log_message "Restoring preserved files..."
+    for item in $PRESERVATION_WHITELIST; do
+        source_path="$BACKUP_DIR/$item"
+        dest_path="$INSTALL_DIR/$item"
+        
+        if [ -e "$source_path" ]; then
+            mkdir -p "$(dirname "$dest_path")"
+            [ -e "$dest_path" ] && rm -rf "$dest_path"
+            mv -f "$source_path" "$dest_path" 2>/dev/null || true
+        fi
+    done
     
-    if [[ -e "$source_path" ]]; then
-      mkdir -p "$(dirname "$dest_path")"
-      [[ -e "$dest_path" ]] && rm -rf "$dest_path"
-      mv -f "$source_path" "$dest_path" 2>/dev/null || true
-    fi
-  done
-  
-  rm -rf "$BACKUP_DIR"
+    rm -rf "$BACKUP_DIR"
 }
 
 extract_archive() {
-  local archive_file="$1"
-  local extract_dir="$2"
-  
-  [[ ! -f "$archive_file" ]] && return 0
+    archive_file="$1"
+    extract_dir="$2"
+    
+    [ ! -f "$archive_file" ] && return 0
 
-  log_message "Extracting $(basename $archive_file)..."
-  mkdir -p "$extract_dir"
-  tar -xzf "$archive_file" -C "$extract_dir" --strip-components=1 2>/dev/null
+    log_message "Extracting $(basename $archive_file)..."
+    mkdir -p "$extract_dir"
+    tar -xzf "$archive_file" -C "$extract_dir" --strip-components=1 2>/dev/null
 }
 
 create_pkg_cli() {
-  local install_dir="$1"
-  local pkg_cli_path="$install_dir/pkg-cli.js"
-  
-  log_message "Creating generic pkg CLI utility with ES modules..."
-  
-  # Always remove existing pkg-cli.js to ensure fresh creation
-  if [[ -f "$pkg_cli_path" ]]; then
-    rm -f "$pkg_cli_path"
-  fi
-  
-  # Create the generic pkg CLI JavaScript file with ES module syntax
-  cat > "$pkg_cli_path" << 'PKG_EOF'
+    install_dir="$1"
+    pkg_cli_path="$install_dir/pkg-cli.js"
+    
+    log_message "Creating generic pkg CLI utility with ES modules..."
+    
+    # Always remove existing pkg-cli.js to ensure fresh creation
+    if [ -f "$pkg_cli_path" ]; then
+        rm -f "$pkg_cli_path"
+    fi
+    
+    # Create the generic pkg CLI JavaScript file with ES module syntax
+    cat > "$pkg_cli_path" << 'PKG_EOF'
 #!/usr/bin/env node
 
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
-import { createInterface } from 'readline';
 import { fileURLToPath } from 'url';
 
 // Get the caller's current working directory
@@ -377,11 +391,11 @@ async function updateVersion(oldVersion, newVersion) {
       
       console.log(`${commitMessage}`);
       
-              execSync(`git tag -a v${newVersion} -m "Version ${newVersion}"`, { 
-                cwd: callerCwd, 
-                stdio: 'pipe' 
-              });
-              //console.log(`Created git tag: v${newVersion}`);
+      execSync(`git tag -a v${newVersion} -m "Version ${newVersion}"`, { 
+        cwd: callerCwd, 
+        stdio: 'pipe' 
+      });
+      //console.log(`Created git tag: v${newVersion}`);
            
     } catch (gitError) {
       console.log('Not a git repository or git not available. Skipping git operations.');
@@ -480,68 +494,84 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
 }
 PKG_EOF
-  
-  chmod +x "$pkg_cli_path"
-  log_message "Created generic pkg CLI utility at $pkg_cli_path"
+    
+    chmod +x "$pkg_cli_path"
+    log_message "Created generic pkg CLI utility at $pkg_cli_path"
 }
 
 create_command_links() {
-  local install_dir="$1"
-  
-  # Create pkg CLI in the installation directory
-  create_pkg_cli "$install_dir"
-  
-  for src in "${!NODE_ENTRY_POINTS[@]}"; do
-    local src_path="$install_dir/$src"
-    local command_name="${NODE_ENTRY_POINTS[$src]}"
-    local dest_path="$BIN_DIR/$command_name"
-    local working_dir="${COMMAND_WORKING_DIR[$command_name]:-global}"
+    install_dir="$1"
     
-    # Ensure source file exists
-    [[ ! -f "$src_path" ]] && continue
-    chmod +x "$src_path" 2>/dev/null || true
+    # Create pkg CLI in the installation directory
+    create_pkg_cli "$install_dir"
     
-    if [[ "$LOCAL_DIR_MODE" == true ]]; then
-      [[ -L "$dest_path" ]] && rm -f "$dest_path"
-      ln -sf "$src_path" "$dest_path"
-    else
-      local wrapper_path="$install_dir/wrappers/$command_name"
-      mkdir -p "$(dirname "$wrapper_path")"
-      
-      # Create wrapper based on working directory configuration
-      if [[ "$working_dir" == "caller" ]]; then
-        # Use caller's current directory
-        cat > "$wrapper_path" <<EOF
-#!/bin/bash
+    # Create arrays from space-separated lists
+    src_list="$NODE_ENTRY_POINTS_SRC"
+    cmd_list="$NODE_ENTRY_POINTS_CMD"
+    
+    # Process each command
+    idx=1
+    for src in $src_list; do
+        # Get corresponding command name
+        command_name=$(echo "$cmd_list" | tr ' ' '\n' | sed -n "${idx}p")
+        [ -z "$command_name" ] && continue
+        
+        src_path="$install_dir/$src"
+        dest_path="$BIN_DIR/$command_name"
+        working_dir=$(get_command_working_dir "$command_name")
+        
+        # Ensure source file exists
+        if [ ! -f "$src_path" ]; then
+            log_message "Warning: Source file not found: $src_path"
+            idx=$((idx + 1))
+            continue
+        fi
+        
+        chmod +x "$src_path" 2>/dev/null || true
+        
+        if [ "$LOCAL_DIR_MODE" = true ]; then
+            [ -L "$dest_path" ] && rm -f "$dest_path"
+            ln -sf "$src_path" "$dest_path"
+        else
+            wrapper_path="$install_dir/wrappers/$command_name"
+            mkdir -p "$(dirname "$wrapper_path")"
+            
+            # Create wrapper based on working directory configuration
+            if [ "$working_dir" = "caller" ]; then
+                # Use caller's current directory
+                cat > "$wrapper_path" <<EOF
+#!/bin/sh
 # Working directory: caller's current directory
 exec node "$src_path" "\$@"
 EOF
-      else
-        # Use global installation directory (default)
-        cat > "$wrapper_path" <<EOF
-#!/bin/bash
+            else
+                # Use global installation directory (default)
+                cat > "$wrapper_path" <<EOF
+#!/bin/sh
 cd "$install_dir" || exit 1
 exec node "$src_path" "\$@"
 EOF
-      fi
-      
-      chmod +x "$wrapper_path"
-      [[ -L "$dest_path" ]] && rm -f "$dest_path"
-      ln -sf "$wrapper_path" "$dest_path"
-      
-      log_message "Created command '$command_name' with working directory: $working_dir"
-    fi
-  done
+            fi
+            
+            chmod +x "$wrapper_path"
+            [ -L "$dest_path" ] && rm -f "$dest_path"
+            ln -sf "$wrapper_path" "$dest_path"
+            
+            log_message "Created command '$command_name' with working directory: $working_dir"
+        fi
+        
+        idx=$((idx + 1))
+    done
 }
 
 cleanup() {
-  sudo dpkg --configure -a > /dev/null 2>&1 || true
+    sudo dpkg --configure -a > /dev/null 2>&1 || true
 }
 
 interrupt_handler() {
-  log_message "Installation interrupted. Cleaning up..."
-  cleanup
-  exit 1
+    log_message "Installation interrupted. Cleaning up..."
+    cleanup
+    exit 1
 }
 
 # =============================================================================
@@ -550,35 +580,37 @@ interrupt_handler() {
 
 trap interrupt_handler INT TERM
 
+# Parse command line arguments
 for arg in "$@"; do
-  case "$arg" in
-    -h|--help) show_help ;;
-    -log) LOG_MODE=true; touch "$LOG_FILE" ;;
-    --skip-debs) SKIP_DEBS=true ;;
-    --local-dir) LOCAL_DIR_MODE=true ;;
-    --no-preserve) PRESERVE_DATA=false ;;
-  esac
+    case "$arg" in
+        -h|--help) show_help ;;
+        -log) LOG_MODE=true; touch "$LOG_FILE" 2>/dev/null || true ;;
+        --skip-debs) SKIP_DEBS=true ;;
+        --local-dir) LOCAL_DIR_MODE=true ;;
+        --no-preserve) PRESERVE_DATA=false ;;
+    esac
 done
 
 log_message "Starting $PROJECT_NAME installation..."
 
-if [[ -d "$INSTALL_DIR" ]]; then
-  log_message "Existing installation found."
-  echo "Choose: 1=Update, 2=Remove, 3=Exit"
-  read -p "Enter choice: " choice
-  case "$choice" in
-    1) 
-      # Always remove old pkg-cli.js during update to ensure fresh creation
-      if [[ -f "$INSTALL_DIR/pkg-cli.js" ]]; then
-        rm -f "$INSTALL_DIR/pkg-cli.js"
-      fi
-      mv -f "$INSTALL_DIR" "$BACKUP_DIR"; 
-      remove_links 
-      ;;
-    2) remove_links; rm -rf "$INSTALL_DIR"; exit 0 ;;
-    3) exit 0 ;;
-    *) exit 1 ;;
-  esac
+if [ -d "$INSTALL_DIR" ]; then
+    log_message "Existing installation found."
+    printf "Choose: 1=Update, 2=Remove, 3=Exit\n"
+    printf "Enter choice: "
+    read choice
+    case "$choice" in
+        1) 
+            # Always remove old pkg-cli.js during update to ensure fresh creation
+            if [ -f "$INSTALL_DIR/pkg-cli.js" ]; then
+                rm -f "$INSTALL_DIR/pkg-cli.js"
+            fi
+            mv -f "$INSTALL_DIR" "$BACKUP_DIR"
+            remove_links 
+            ;;
+        2) remove_links; rm -rf "$INSTALL_DIR"; exit 0 ;;
+        3) exit 0 ;;
+        *) exit 1 ;;
+    esac
 fi
 
 # Main installation steps
@@ -588,38 +620,38 @@ copy_files "$MAIN_SOURCE_DIR" "$INSTALL_DIR"
 preserve_files_from_backup
 
 # Extract archives if configured
-[[ -n "$PM2_TAR_GZ" ]] && extract_archive "$PM2_TAR_GZ" "$PM2_EXTRACT_DIR"
+[ -n "$PM2_TAR_GZ" ] && extract_archive "$PM2_TAR_GZ" "$PM2_EXTRACT_DIR"
 
 create_command_links "$INSTALL_DIR"
 cleanup
 
 log_message "$PROJECT_NAME installation completed!"
 
-echo
+printf "\n"
 echo "Available commands:"
-for command in "${NODE_ENTRY_POINTS[@]}"; do
-  echo "  $command"
+for cmd in $NODE_ENTRY_POINTS_CMD; do
+    echo "  $cmd"
 done
 
-echo
+printf "\n"
 echo "Working directory configuration:"
-for command in "${!COMMAND_WORKING_DIR[@]}"; do
-  local working_dir="${COMMAND_WORKING_DIR[$command]}"
-  echo "  $command: $working_dir"
+for cmd in $NODE_ENTRY_POINTS_CMD; do
+    working_dir=$(get_command_working_dir "$cmd")
+    echo "  $cmd: $working_dir"
 done
 
-echo
+printf "\n"
 echo "Generic pkg command features:"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
-echo
+printf "\n"
 echo "pkg version supports:"
 echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
 echo "  • minor    - Bump minor version (1.2.3 → 1.3.0)"
 echo "  • major    - Bump major version (1.2.3 → 2.0.0)"
 echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
-echo
+printf "\n"
 echo "Examples:"
 echo "  pkg run test                    # Runs 'test' script from package.json"
 echo "  pkg run build                   # Runs 'build' script from package.json"
@@ -627,13 +659,13 @@ echo "  pkg run dev --port 3000         # Runs 'dev' script with --port argument
 echo "  pkg run test --watch --verbose  # Runs 'test' script with multiple args"
 echo "  pkg version patch               # Bumps patch version and commits"
 echo "  pkg version 1.2.3               # Sets version to 1.2.3 and commits"
-echo
+printf "\n"
 echo "Note: pkg works from any directory with a package.json file"
 
-echo
-if [[ "$LOCAL_DIR_MODE" == true ]]; then
-  echo "Commands run from current directory"
+printf "\n"
+if [ "$LOCAL_DIR_MODE" = true ]; then
+    echo "Commands run from current directory"
 else
-  echo "Installation directory: $INSTALL_DIR"
-  echo "Node.js processes start in configured working directories (see above)"
+    echo "Installation directory: $INSTALL_DIR"
+    echo "Node.js processes start in configured working directories (see above)"
 fi
