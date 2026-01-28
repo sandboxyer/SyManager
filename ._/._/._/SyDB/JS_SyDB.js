@@ -8,10 +8,6 @@ import crypto from 'crypto';
 import http from 'http';
 import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 class JS_SyDB {
     // ==================== CONSTANTS AND CONFIGURATION ====================
