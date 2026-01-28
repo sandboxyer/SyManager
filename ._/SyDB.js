@@ -5,6 +5,8 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
+import http from 'http';
+import { EventEmitter } from 'events';
 
 // C.js raw code below
 
@@ -24,13 +26,6 @@ const code = `#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#inc
 // JS_SyDB.js - Pure Node.js implementation of SYDB database system
 // Exact replica of the C version functionality in ES6 class
 // Zero dependencies, using only native Node.js modules
-
-import fs from 'fs';
-import path from 'path';
-import crypto from 'crypto';
-import http from 'http';
-import { EventEmitter } from 'events';
-
 
 class JS_SyDB {
     // ==================== CONSTANTS AND CONFIGURATION ====================
