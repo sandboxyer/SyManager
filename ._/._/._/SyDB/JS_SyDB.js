@@ -1,4 +1,4 @@
-// JS_Sydb.js - Pure Node.js implementation of SYDB database system
+// JS_SyDB.js - Pure Node.js implementation of SYDB database system
 // Exact replica of the C version functionality in ES6 class
 // Zero dependencies, using only native Node.js modules
 
@@ -13,7 +13,7 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-class JS_Sydb {
+class JS_SyDB {
     // ==================== CONSTANTS AND CONFIGURATION ====================
     static MAXIMUM_NAME_LENGTH = 256;
     static MAXIMUM_FIELD_LENGTH = 64;
@@ -558,7 +558,7 @@ class JS_Sydb {
                 const testingLimit = 1000;
 
                 // Check if rate limit window has expired
-                if (currentTime - clientEntry.rateLimitWindowStart >= JS_Sydb.RATE_LIMIT_WINDOW_SECONDS) {
+                if (currentTime - clientEntry.rateLimitWindowStart >= JS_SyDB.RATE_LIMIT_WINDOW_SECONDS) {
                     clientEntry.requestCount = 1;
                     clientEntry.rateLimitWindowStart = currentTime;
                     requestAllowed = true;
@@ -604,7 +604,7 @@ class JS_Sydb {
         const databaseNameEnd = currentPosition.indexOf('/');
         if (databaseNameEnd === -1) {
             // Only database name provided
-            if (currentPosition.length >= JS_Sydb.MAXIMUM_NAME_LENGTH || currentPosition.length === 0) {
+            if (currentPosition.length >= JS_SyDB.MAXIMUM_NAME_LENGTH || currentPosition.length === 0) {
                 return null;
             }
             components.databaseName = currentPosition;
@@ -612,7 +612,7 @@ class JS_Sydb {
         }
 
         const databaseNameLength = databaseNameEnd;
-        if (databaseNameLength >= JS_Sydb.MAXIMUM_NAME_LENGTH || databaseNameLength === 0) {
+        if (databaseNameLength >= JS_SyDB.MAXIMUM_NAME_LENGTH || databaseNameLength === 0) {
             return null;
         }
         components.databaseName = currentPosition.substring(0, databaseNameLength);
@@ -632,7 +632,7 @@ class JS_Sydb {
             const collectionNameEnd = currentPosition.indexOf('/');
             if (collectionNameEnd === -1) {
                 // Only collection name provided
-                if (currentPosition.length >= JS_Sydb.MAXIMUM_NAME_LENGTH || currentPosition.length === 0) {
+                if (currentPosition.length >= JS_SyDB.MAXIMUM_NAME_LENGTH || currentPosition.length === 0) {
                     return null;
                 }
                 components.collectionName = currentPosition;
@@ -640,7 +640,7 @@ class JS_Sydb {
             }
 
             const collectionNameLength = collectionNameEnd;
-            if (collectionNameLength >= JS_Sydb.MAXIMUM_NAME_LENGTH || collectionNameLength === 0) {
+            if (collectionNameLength >= JS_SyDB.MAXIMUM_NAME_LENGTH || collectionNameLength === 0) {
                 return null;
             }
             components.collectionName = currentPosition.substring(0, collectionNameLength);
@@ -652,7 +652,7 @@ class JS_Sydb {
                 currentPosition = currentPosition.substring(10);
 
                 // Extract instance ID
-                if (currentPosition.length >= JS_Sydb.UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE || currentPosition.length === 0) {
+                if (currentPosition.length >= JS_SyDB.UNIVERSALLY_UNIQUE_IDENTIFIER_SIZE || currentPosition.length === 0) {
                     return null;
                 }
                 components.instanceId = currentPosition;
@@ -679,7 +679,7 @@ class JS_Sydb {
         console.log("SYDB HTTP Server Available Routes:");
         console.log("===================================\n");
 
-        for (const route of JS_Sydb.HTTP_ROUTES) {
+        for (const route of JS_SyDB.HTTP_ROUTES) {
             console.log(`Method: ${route.method}`);
             console.log(`Path: ${route.path}`);
             console.log(`Description: ${route.description}`);
@@ -744,7 +744,7 @@ class JS_Sydb {
 
     validatePathComponent(component) {
         if (!component || component.length === 0) return false;
-        if (component.length >= JS_Sydb.MAXIMUM_NAME_LENGTH) return false;
+        if (component.length >= JS_SyDB.MAXIMUM_NAME_LENGTH) return false;
 
         if (component.includes('/')) return false;
         if (component.includes('\\')) return false;
@@ -786,7 +786,7 @@ class JS_Sydb {
 
     validateFieldName(fieldName) {
         if (!fieldName || fieldName.length === 0) return false;
-        if (fieldName.length >= JS_Sydb.MAXIMUM_FIELD_LENGTH) return false;
+        if (fieldName.length >= JS_SyDB.MAXIMUM_FIELD_LENGTH) return false;
 
         // Field names have stricter requirements - only alphanumeric and underscore
         for (let i = 0; i < fieldName.length; i++) {
@@ -889,11 +889,11 @@ class JS_Sydb {
     getSecureSydbBaseDirectoryPath() {
         const environmentDirectory = process.env.SYDB_BASE_DIR;
         
-        if (environmentDirectory && environmentDirectory.length < JS_Sydb.MAXIMUM_PATH_LENGTH) {
+        if (environmentDirectory && environmentDirectory.length < JS_SyDB.MAXIMUM_PATH_LENGTH) {
             return environmentDirectory;
         } else {
             // FIXED: Use /var/lib/sydb like C version, not current directory
-            return JS_Sydb.SYDB_BASE_DIRECTORY;
+            return JS_SyDB.SYDB_BASE_DIRECTORY;
         }
     }
 
@@ -1010,7 +1010,7 @@ class JS_Sydb {
         }
 
         const basePath = this.getSecureSydbBaseDirectoryPath();
-        const filePath = path.join(basePath, databaseName, collectionName, `data${JS_Sydb.DATA_FILE_EXTENSION}`);
+        const filePath = path.join(basePath, databaseName, collectionName, `data${JS_SyDB.DATA_FILE_EXTENSION}`);
 
         try {
             // Ensure directory exists
@@ -1051,8 +1051,8 @@ class JS_Sydb {
         if (!dataFile) return -1;
 
         const fileHeader = {
-            magicNumber: JS_Sydb.FILE_MAGIC_NUMBER,
-            versionNumber: JS_Sydb.FILE_VERSION_NUMBER,
+            magicNumber: JS_SyDB.FILE_MAGIC_NUMBER,
+            versionNumber: JS_SyDB.FILE_VERSION_NUMBER,
             recordCount: 0,
             fileSize: 128, // Size of file header
             freeOffset: 128,
@@ -1140,7 +1140,7 @@ class JS_Sydb {
     deserializeFileHeader(buffer) {
         try {
             const magicNumber = buffer.readUInt32BE(0);
-            if (magicNumber !== JS_Sydb.FILE_MAGIC_NUMBER) {
+            if (magicNumber !== JS_SyDB.FILE_MAGIC_NUMBER) {
                 if (this.verboseMode) {
                     console.error('Invalid magic number:', magicNumber);
                 }
@@ -1418,33 +1418,33 @@ class JS_Sydb {
     // ==================== COLLECTION OPERATIONS ====================
 
     parseSecureFieldTypeFromString(typeString) {
-        if (!typeString) return JS_Sydb.FIELD_TYPE.NULL;
+        if (!typeString) return JS_SyDB.FIELD_TYPE.NULL;
 
         // MUST MATCH C VERSION EXACTLY
         const typeMap = {
-            'string': JS_Sydb.FIELD_TYPE.STRING,
-            'int': JS_Sydb.FIELD_TYPE.INTEGER,
-            'integer': JS_Sydb.FIELD_TYPE.INTEGER,
-            'float': JS_Sydb.FIELD_TYPE.FLOAT,
-            'bool': JS_Sydb.FIELD_TYPE.BOOLEAN,
-            'boolean': JS_Sydb.FIELD_TYPE.BOOLEAN,
-            'array': JS_Sydb.FIELD_TYPE.ARRAY,
-            'object': JS_Sydb.FIELD_TYPE.OBJECT
+            'string': JS_SyDB.FIELD_TYPE.STRING,
+            'int': JS_SyDB.FIELD_TYPE.INTEGER,
+            'integer': JS_SyDB.FIELD_TYPE.INTEGER,
+            'float': JS_SyDB.FIELD_TYPE.FLOAT,
+            'bool': JS_SyDB.FIELD_TYPE.BOOLEAN,
+            'boolean': JS_SyDB.FIELD_TYPE.BOOLEAN,
+            'array': JS_SyDB.FIELD_TYPE.ARRAY,
+            'object': JS_SyDB.FIELD_TYPE.OBJECT
         };
 
-        return typeMap[typeString.toLowerCase()] || JS_Sydb.FIELD_TYPE.NULL;
+        return typeMap[typeString.toLowerCase()] || JS_SyDB.FIELD_TYPE.NULL;
     }
 
     convertSecureFieldTypeToString(fieldType) {
         // MUST MATCH C VERSION EXACTLY
         const reverseMap = {
-            [JS_Sydb.FIELD_TYPE.STRING]: 'string',
-            [JS_Sydb.FIELD_TYPE.INTEGER]: 'int',
-            [JS_Sydb.FIELD_TYPE.FLOAT]: 'float',
-            [JS_Sydb.FIELD_TYPE.BOOLEAN]: 'bool',
-            [JS_Sydb.FIELD_TYPE.ARRAY]: 'array',
-            [JS_Sydb.FIELD_TYPE.OBJECT]: 'object',
-            [JS_Sydb.FIELD_TYPE.NULL]: 'null'
+            [JS_SyDB.FIELD_TYPE.STRING]: 'string',
+            [JS_SyDB.FIELD_TYPE.INTEGER]: 'int',
+            [JS_SyDB.FIELD_TYPE.FLOAT]: 'float',
+            [JS_SyDB.FIELD_TYPE.BOOLEAN]: 'bool',
+            [JS_SyDB.FIELD_TYPE.ARRAY]: 'array',
+            [JS_SyDB.FIELD_TYPE.OBJECT]: 'object',
+            [JS_SyDB.FIELD_TYPE.NULL]: 'null'
         };
 
         return reverseMap[fieldType] || 'null';
@@ -1555,7 +1555,7 @@ class JS_Sydb {
     // ==================== INSTANCE OPERATIONS ====================
 
     buildSecureInstanceJsonFromFieldsAndValues(fieldNames, fieldValues, fieldCount) {
-        if (!fieldNames || !fieldValues || fieldCount <= 0 || fieldCount > JS_Sydb.MAXIMUM_FIELDS) {
+        if (!fieldNames || !fieldValues || fieldCount <= 0 || fieldCount > JS_SyDB.MAXIMUM_FIELDS) {
             return null;
         }
 
@@ -2451,8 +2451,8 @@ class JS_Sydb {
 
         // Create thread pool
         this.threadPool = this.createThreadPool(
-            JS_Sydb.THREAD_POOL_WORKER_COUNT,
-            JS_Sydb.THREAD_POOL_QUEUE_CAPACITY
+            JS_SyDB.THREAD_POOL_WORKER_COUNT,
+            JS_SyDB.THREAD_POOL_QUEUE_CAPACITY
         );
 
         if (!this.threadPool) {
@@ -2464,7 +2464,7 @@ class JS_Sydb {
         }
 
         // Create file connection pool
-        this.fileConnectionPool = this.createFileConnectionPool(JS_Sydb.FILE_CONNECTION_POOL_SIZE);
+        this.fileConnectionPool = this.createFileConnectionPool(JS_SyDB.FILE_CONNECTION_POOL_SIZE);
 
         if (this.verboseMode) {
             console.log('File connection pool created');
@@ -2553,9 +2553,9 @@ class JS_Sydb {
 
                 console.log(`SYDB HTTP Server started on port ${port}`);
                 console.log('Server is running with performance enhancements:');
-                console.log(`  - Thread pool: ${JS_Sydb.THREAD_POOL_WORKER_COUNT} workers`);
-                console.log(`  - File connection pool: ${JS_Sydb.FILE_CONNECTION_POOL_SIZE} connections`);
-                console.log(`  - Rate limiting: ${JS_Sydb.RATE_LIMIT_MAX_REQUESTS} requests per ${JS_Sydb.RATE_LIMIT_WINDOW_SECONDS} seconds`);
+                console.log(`  - Thread pool: ${JS_SyDB.THREAD_POOL_WORKER_COUNT} workers`);
+                console.log(`  - File connection pool: ${JS_SyDB.FILE_CONNECTION_POOL_SIZE} connections`);
+                console.log(`  - Rate limiting: ${JS_SyDB.RATE_LIMIT_MAX_REQUESTS} requests per ${JS_SyDB.RATE_LIMIT_WINDOW_SECONDS} seconds`);
                 
                 if (verboseMode) {
                     console.log('  - Verbose logging: ENABLED (extreme detail)');
@@ -2627,19 +2627,19 @@ class JS_Sydb {
 
     printSecureUsageInformation() {
         console.log("Usage:");
-        console.log("  node JS_Sydb.js create <database_name>");
-        console.log("  node JS_Sydb.js create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...");
-        console.log("  node JS_Sydb.js create <database_name> <collection_name> --insert-one --<field>-\"<value>\" ...");
-        console.log("  node JS_Sydb.js update <database_name> <collection_name> --where \"<query>\" --set --<field>-\"<value>\" ...");
-        console.log("  node JS_Sydb.js delete <database_name> <collection_name> --where \"<query>\"");
-        console.log("  node JS_Sydb.js find <database_name> <collection_name> --where \"<query>\"");
-        console.log("  node JS_Sydb.js schema <database_name> <collection_name>");
-        console.log("  node JS_Sydb.js list");
-        console.log("  node JS_Sydb.js list <database_name>");
-        console.log("  node JS_Sydb.js list <database_name> <collection_name>");
-        console.log("  node JS_Sydb.js --server [port]          # Start HTTP server");
-        console.log("  node JS_Sydb.js --server --verbose       # Start HTTP server with extreme logging");
-        console.log("  node JS_Sydb.js --routes                 # Show all HTTP API routes and schemas");
+        console.log("  node JS_SyDB.js create <database_name>");
+        console.log("  node JS_SyDB.js create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...");
+        console.log("  node JS_SyDB.js create <database_name> <collection_name> --insert-one --<field>-\"<value>\" ...");
+        console.log("  node JS_SyDB.js update <database_name> <collection_name> --where \"<query>\" --set --<field>-\"<value>\" ...");
+        console.log("  node JS_SyDB.js delete <database_name> <collection_name> --where \"<query>\"");
+        console.log("  node JS_SyDB.js find <database_name> <collection_name> --where \"<query>\"");
+        console.log("  node JS_SyDB.js schema <database_name> <collection_name>");
+        console.log("  node JS_SyDB.js list");
+        console.log("  node JS_SyDB.js list <database_name>");
+        console.log("  node JS_SyDB.js list <database_name> <collection_name>");
+        console.log("  node JS_SyDB.js --server [port]          # Start HTTP server");
+        console.log("  node JS_SyDB.js --server --verbose       # Start HTTP server with extreme logging");
+        console.log("  node JS_SyDB.js --routes                 # Show all HTTP API routes and schemas");
         console.log("\nField types: string, int, float, bool, array, object");
         console.log("Add -req for required fields");
         console.log("Add -idx for indexed fields (improves query performance)");
@@ -2674,7 +2674,7 @@ class JS_Sydb {
 
         // Check for server mode
         if (commandArgs[0] === '--server') {
-            let port = JS_Sydb.HTTP_SERVER_PORT;
+            let port = JS_SyDB.HTTP_SERVER_PORT;
             
             if (commandArgs.length > 1) {
                 // Skip --verbose when parsing port
@@ -2763,7 +2763,7 @@ class JS_Sydb {
             }
         } else if (commandArgs[0] === 'find') {
             if (commandArgs.length < 6 || commandArgs[4] !== '--where') {
-                console.error("Error: Invalid find syntax. Use: node JS_Sydb.js find <database> <collection> --where \"query\"");
+                console.error("Error: Invalid find syntax. Use: node JS_SyDB.js find <database> <collection> --where \"query\"");
                 this.printSecureUsageInformation();
                 return 1;
             }
@@ -2859,11 +2859,11 @@ class JS_Sydb {
 }
 
 // Export the class
-export default JS_Sydb;
+export default JS_SyDB;
 
 // If running as main script
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    const sydb = new JS_Sydb();
+    const sydb = new JS_SyDB();
     sydb.runCommand(process.argv).then(code => {
         if (code !== undefined && typeof code === 'number') {
             process.exit(code);
