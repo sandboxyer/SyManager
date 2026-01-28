@@ -479,6 +479,7 @@ class PackScan extends EventEmitter {
 
 export default PackScan;
 
+/*
 let scanner = PackScan.getInstance()
 
 scanner.on('found', (packageInfo) => {
@@ -490,3 +491,4 @@ scanner.on('found', (packageInfo) => {
   });
 
   await PackScan.scanEntireSystem()
+*/
