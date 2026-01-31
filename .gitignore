@@ -8,3 +8,4 @@ test
 test.c
 tests
 sypm_temp_*
+log.json

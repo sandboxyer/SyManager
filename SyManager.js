@@ -13,13 +13,15 @@ static APP =  SyAPP
 
 }
 
-export default SyManager
-
+let HUD
 
 if (import.meta.url.endsWith(process.argv[1]) || process.argv[1] === import.meta.url.replace('file://', '')) {
     let args = process.argv.slice(2)
     if (args.length === 0) {
-        let HUD = new TerminalHUD()
+        HUD = new TerminalHUD()
         HUD.displayMenu(MainMenu)
+   
     }
-}
+}   
+
+export default HUD
