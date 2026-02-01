@@ -6,16 +6,20 @@ import EventEmitter from 'events';
  * TerminalHUD - A framework for creating HUD interfaces in terminal
  * Optional mouse support: click to focus, double-click to select, wheel to navigate.
  * Now extends EventEmitter for event-driven architecture.
+ * 
+ * @class TerminalHUD
+ * @extends {EventEmitter}
  */
 class TerminalHUD extends EventEmitter {
   /**
-   * Constructor
+   * Creates an instance of TerminalHUD
+   * @constructor
    * @param {object} configuration - Configuration options
-   * @param {boolean} configuration.numberedMenus - Use numbered menus instead of arrow navigation (default: false)
-   * @param {string} configuration.highlightColor - Color for highlighting selected menu option (default: blue)
-   * @param {boolean} configuration.mouseSupport - Enable mouse click/double-click navigation (default: false)
-   * @param {boolean} configuration.mouseWheel - Enable mouse wheel navigation (default: true when mouseSupport is true)
-   * @param {boolean} configuration.enableEvents - Enable event emission (default: true)
+   * @param {boolean} [configuration.numberedMenus=false] - Use numbered menus instead of arrow navigation
+   * @param {string} [configuration.highlightColor='blue'] - Color for highlighting selected menu option
+   * @param {boolean} [configuration.mouseSupport=true] - Enable mouse click/double-click navigation
+   * @param {boolean} [configuration.mouseWheel] - Enable mouse wheel navigation (defaults to mouseSupport value)
+   * @param {boolean} [configuration.enableEvents=true] - Enable event emission
    */
   constructor(configuration = {}) {
     super(); // Initialize EventEmitter
@@ -86,7 +90,12 @@ class TerminalHUD extends EventEmitter {
     };
   }
 
-  // Event Emission Helper
+  /**
+   * Emits an event with the given name and data
+   * @private
+   * @param {string} eventName - The name of the event to emit
+   * @param {object} [eventData={}] - Additional data to include with the event
+   */
   emitEvent(eventName, eventData = {}) {
     if (this.enableEvents && this.listenerCount(eventName) > 0) {
       this.emit(eventName, {
@@ -106,6 +115,12 @@ class TerminalHUD extends EventEmitter {
 
   // Core Helper Methods
 
+  /**
+   * Gets ANSI background color code for a given color name
+   * @private
+   * @param {string} color - Color name (red, green, yellow, blue, magenta, cyan, white)
+   * @returns {string} ANSI escape sequence for the background color
+   */
   getAnsiBackgroundColor(color) {
     const colors = {
       red: '\x1b[41m',
@@ -119,10 +134,19 @@ class TerminalHUD extends EventEmitter {
     return colors[color] || '';
   }
 
+  /**
+   * Resets terminal colors to default
+   * @private
+   * @returns {string} ANSI reset sequence
+   */
   resetColor() {
     return '\x1b[0m';
   }
 
+  /**
+   * Starts a loading animation in the terminal
+   * @private
+   */
   startLoading() {
     this.isLoading = true;
     
@@ -138,6 +162,10 @@ class TerminalHUD extends EventEmitter {
     }, 500);
   }
 
+  /**
+   * Stops the loading animation
+   * @private
+   */
   stopLoading() {
     this.isLoading = false;
     clearInterval(this.loadingInterval);
@@ -150,6 +178,10 @@ class TerminalHUD extends EventEmitter {
 
   // Public API
 
+  /**
+   * Resets terminal modes to default state
+   * @private
+   */
   resetTerminalModes() {
     // Write all terminal reset commands
     stdout.write('\x1b[?1000l'); // Disable mouse tracking
@@ -160,6 +192,10 @@ class TerminalHUD extends EventEmitter {
     stdout.write(''); // Force flush
   }
 
+  /**
+   * Cleans up mouse support features
+   * @private
+   */
   cleanupMouseSupport() {
     // Only cleanup if mouse was enabled
     if (this.isMouseEnabled) {
@@ -176,6 +212,26 @@ class TerminalHUD extends EventEmitter {
     this.wheelAccumulator = 0;
   }
 
+  /**
+   * Asks a question to the user
+   * @async
+   * @param {string} question - The question to ask
+   * @param {object} [configuration={}] - Configuration options
+   * @param {Array<string|object>} [configuration.options] - Menu options for selection
+   * @param {string} [configuration.alert] - Alert message to display
+   * @param {string} [configuration.alertEmoji='⚠️'] - Emoji for alert message
+   * @param {boolean} [configuration.clearScreen=true] - Whether to clear screen before display
+   * @param {number} [configuration.initialSelectedIndex=0] - Initial selected index
+   * @param {number} [configuration.selectedIncrement=0] - Increment to apply to selected index
+   * @param {any} [configuration.props] - Additional properties to pass to menu generator
+   * @returns {Promise<string|any>} The user's answer or selected option
+   * 
+   * @emits TerminalHUD#question:ask
+   * @emits TerminalHUD#question:answer
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:selection
+   * @emits TerminalHUD#menu:navigation
+   */
   async ask(question, configuration = {}) {
     // Emit question ask event
     this.emitEvent(this.eventTypes.QUESTION_ASK, {
@@ -236,6 +292,25 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
+  /**
+   * Displays a menu generated by a menu generator function
+   * @async
+   * @param {Function} menuGenerator - Function that generates menu content
+   * @param {object} [configuration={}] - Configuration options
+   * @param {any} [configuration.props] - Properties to pass to menu generator
+   * @param {boolean} [configuration.clearScreen=true] - Whether to clear screen
+   * @param {string} [configuration.alert] - Alert message to display
+   * @param {string} [configuration.alertEmoji='⚠️'] - Emoji for alert message
+   * @param {number} [configuration.initialSelectedIndex=0] - Initial selected index
+   * @param {number} [configuration.selectedIncrement=0] - Increment to apply to selected index
+   * @returns {Promise<string|any>} The selected option
+   * 
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:selection
+   * @emits TerminalHUD#menu:navigation
+   * @emits TerminalHUD#loading:start
+   * @emits TerminalHUD#loading:stop
+   */
   async displayMenu(menuGenerator, configuration = {
     props: {},
     clearScreen: true,
@@ -269,6 +344,14 @@ class TerminalHUD extends EventEmitter {
       : this.displayMenuWithArrows(menuTitle, menu.options, configuration, initialIndex);
   }
 
+  /**
+   * Waits for any key press
+   * @async
+   * @returns {Promise<void>}
+   * 
+   * @emits TerminalHUD#press:wait
+   * @emits TerminalHUD#key:press
+   */
   async pressWait() {
     // Emit press wait event
     this.emitEvent(this.eventTypes.PRESS_WAIT);
@@ -314,6 +397,11 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
+  /**
+   * Closes the TerminalHUD instance and cleans up resources
+   * 
+   * @emits TerminalHUD#menu:close
+   */
   close() {
     // Emit menu close event if in menu
     if (this.isInMenu) {
@@ -328,6 +416,25 @@ class TerminalHUD extends EventEmitter {
 
   // Menu Display Logic (Enhanced for Mouse)
 
+  /**
+   * Displays a menu with arrow key navigation and optional mouse support
+   * @async
+   * @private
+   * @param {string} question - The menu title/question
+   * @param {Array<string|object>} options - Menu options
+   * @param {object} [configuration={}] - Configuration options
+   * @param {boolean} [configuration.clear=false] - Whether to clear screen
+   * @param {number} [initialIndex=0] - Initial selected index
+   * @returns {Promise<string|any>} The selected option
+   * 
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:navigation
+   * @emits TerminalHUD#menu:selection
+   * @emits TerminalHUD#key:press
+   * @emits TerminalHUD#mouse:click
+   * @emits TerminalHUD#mouse:doubleclick
+   * @emits TerminalHUD#mouse:wheel
+   */
   async displayMenuWithArrows(question, options = [], configuration = { clear: false }, initialIndex = 0) {
     // Emit menu display event
     this.emitEvent(this.eventTypes.MENU_DISPLAY, {
@@ -495,6 +602,11 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
+  /**
+   * Sets up the menu state and event listeners
+   * @private
+   * @param {Function} keyPressHandler - Function to handle key press events
+   */
   setupMenuState(keyPressHandler) {
     this.isInMenu = true;
     
@@ -510,6 +622,10 @@ class TerminalHUD extends EventEmitter {
     this.safeEnableMouseTracking();
   }
 
+  /**
+   * Cleans up menu state and event listeners
+   * @private
+   */
   cleanupMenuState() {
     this.isInMenu = false;
     
@@ -528,7 +644,22 @@ class TerminalHUD extends EventEmitter {
     this.wheelAccumulator = 0;
   }
 
-  // Original implementation for fallback or non-mouse mode
+  /**
+   * Displays a menu with arrow key navigation (original implementation without mouse support)
+   * @async
+   * @private
+   * @param {string} question - The menu title/question
+   * @param {Array<string|object>} options - Menu options
+   * @param {object} [configuration={}] - Configuration options
+   * @param {boolean} [configuration.clear=false] - Whether to clear screen
+   * @param {number} [initialIndex=0] - Initial selected index
+   * @returns {Promise<string|any>} The selected option
+   * 
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:navigation
+   * @emits TerminalHUD#menu:selection
+   * @emits TerminalHUD#key:press
+   */
   async displayMenuWithArrowsOriginal(question, options = [], configuration = { clear: false }, initialIndex = 0) {
     // Emit menu display event
     this.emitEvent(this.eventTypes.MENU_DISPLAY, {
@@ -631,6 +762,19 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
+  /**
+   * Displays a menu with numbered options
+   * @async
+   * @private
+   * @param {string} question - The menu title/question
+   * @param {Array<string|object>} options - Menu options
+   * @param {object} [configuration={}] - Configuration options
+   * @param {boolean} [configuration.clear=true] - Whether to clear screen
+   * @returns {Promise<string|any>} The selected option
+   * 
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:selection
+   */
   async displayMenuFromOptions(question, options, configuration = { clear: true }) {
     if (!this.numberedMenus) {
       return this.displayMenuWithArrows(question, options, configuration);
@@ -683,6 +827,17 @@ class TerminalHUD extends EventEmitter {
     return selected.name;
   }
 
+  /**
+   * Displays a numbered menu with special option types
+   * @async
+   * @private
+   * @param {string} title - The menu title
+   * @param {Array<object>} options - Menu options with type property
+   * @returns {Promise<string|any>} The selected option
+   * 
+   * @emits TerminalHUD#menu:display
+   * @emits TerminalHUD#menu:selection
+   */
   async displayNumberedMenu(title, options) {
     // Emit menu display event
     this.emitEvent(this.eventTypes.MENU_DISPLAY, {
@@ -733,6 +888,12 @@ class TerminalHUD extends EventEmitter {
 
   // Menu Utilities
 
+  /**
+   * Normalizes menu options to a consistent format
+   * @private
+   * @param {Array<string|object|Array<string|object>>} options - Menu options
+   * @returns {Array<Array<object>>} Normalized options in 2D array format
+   */
   normalizeOptions(options) {
     return options.map(option => {
       if (Array.isArray(option)) return option.map(item => typeof item === 'string' ? { name: item } : item);
@@ -741,6 +902,13 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
+  /**
+   * Converts linear index to 2D coordinates
+   * @private
+   * @param {Array<Array<object>>} lines - 2D array of options
+   * @param {number} index - Linear index
+   * @returns {{line: number, column: number}} 2D coordinates
+   */
   getCoordinatesFromLinearIndex(lines, index) {
     let count = 0;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
@@ -755,12 +923,24 @@ class TerminalHUD extends EventEmitter {
     };
   }
 
+  /**
+   * Converts 2D coordinates to linear index
+   * @private
+   * @param {Array<Array<object>>} lines - 2D array of options
+   * @param {number} line - Row index
+   * @param {number} column - Column index
+   * @returns {number} Linear index
+   */
   getLinearIndexFromCoordinates(lines, line, column) {
     return lines.slice(0, line).reduce((sum, currentLine) => sum + currentLine.length, 0) + column;
   }
 
-  // Helper methods for event data
-  
+  /**
+   * Sanitizes options for event emission (removes functions)
+   * @private
+   * @param {Array<string|object|Array<string|object>>} options - Menu options
+   * @returns {Array<object|Array<object>>} Sanitized options
+   */
   sanitizeOptionsForEvent(options) {
     return options.map(option => {
       if (typeof option === 'string') {
@@ -773,6 +953,12 @@ class TerminalHUD extends EventEmitter {
     });
   }
   
+  /**
+   * Gets safe option data for event emission
+   * @private
+   * @param {string|object} option - Menu option
+   * @returns {object|null} Safe option data without functions
+   */
   getOptionDataForEvent(option) {
     if (!option) return null;
     
@@ -800,6 +986,10 @@ class TerminalHUD extends EventEmitter {
 
   // Mouse Support (Enhanced with Wheel)
 
+  /**
+   * Safely enables mouse tracking
+   * @private
+   */
   safeEnableMouseTracking() {
     if (this.isMouseEnabled || !this.isInMenu) return;
     
@@ -818,6 +1008,10 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Cleans up all resources
+   * @private
+   */
   cleanupAll() {
     this.isInMenu = false;
     this.cleanupMouseSupport();
@@ -828,6 +1022,10 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Resets mouse click state
+   * @private
+   */
   resetClickState() {
     this.lastMouseClick = { time: 0, x: -1, y: -1 };
     this.isClickInProgress = false;
@@ -838,6 +1036,11 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Handles mouse data from terminal
+   * @private
+   * @param {Buffer|string} data - Raw mouse event data
+   */
   handleMouseData(data) {
     if (!this.mouseSupport || !this.isInMenu || !this.currentMenuState) {
       return;
@@ -874,6 +1077,11 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Handles SGR (Standard Generalized Representation) mouse events
+   * @private
+   * @param {Array<string>} match - Regex match groups
+   */
   handleSGRMouseEvent(match) {
     const button = parseInt(match[1]);
     const x = parseInt(match[2]) - 1;
@@ -909,6 +1117,11 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Handles X10 mouse events (legacy protocol)
+   * @private
+   * @param {Array<string>} match - Regex match groups
+   */
   handleX10MouseEvent(match) {
     const bytes = match[1];
     const button = bytes.charCodeAt(0) - 32;
@@ -943,6 +1156,12 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Processes mouse click events
+   * @private
+   * @param {number} x - X coordinate of click
+   * @param {number} y - Y coordinate of click
+   */
   processMouseClick(x, y) {
     if (this.isClickInProgress) return;
 
@@ -991,6 +1210,13 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Processes mouse wheel events for navigation
+   * @private
+   * @param {number} x - X coordinate of wheel event
+   * @param {number} y - Y coordinate of wheel event
+   * @param {'up'|'down'} direction - Wheel direction
+   */
   processMouseWheel(x, y, direction) {
     if (!this.currentMenuState || !this.mouseWheel || this.isClickInProgress) {
       return;
@@ -1041,6 +1267,15 @@ class TerminalHUD extends EventEmitter {
     }
   }
 
+  /**
+   * Finds the menu option index at given terminal coordinates
+   * @private
+   * @param {number} terminalY - Terminal Y coordinate
+   * @param {number} terminalX - Terminal X coordinate
+   * @param {Array<Array<object>>} normalizedOptions - Normalized menu options
+   * @param {string} question - Menu question/title
+   * @returns {number} Index of the option or -1 if not found
+   */
   findOptionIndexAtCoordinates(terminalY, terminalX, normalizedOptions, question) {
     let startRow = 0;
     if (question) {
@@ -1075,14 +1310,159 @@ class TerminalHUD extends EventEmitter {
   }
 }
 
+// Event type definitions for JSDoc
+
+/**
+ * Event emitted when a menu is displayed
+ * @event TerminalHUD#menu:display
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {string} question - Menu question/title
+ * @property {Array<object|Array<object>>} options - Menu options (sanitized)
+ * @property {object} configuration - Configuration object
+ * @property {number} [initialIndex] - Initial selected index
+ * @property {'arrow'|'arrow-original'|'numbered'|'numbered-from-options'} menuType - Type of menu displayed
+ */
+
+/**
+ * Event emitted when a menu option is selected
+ * @event TerminalHUD#menu:selection
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {number} index - Linear index of selected option
+ * @property {number} line - Row index of selected option
+ * @property {number} column - Column index of selected option
+ * @property {object} selected - Selected option data (sanitized)
+ * @property {string} question - Menu question/title
+ * @property {'keyboard'|'mouse'|'numbered'} source - Source of selection
+ * @property {object} [customData] - Custom data from option
+ * @property {object} [metadata] - Metadata from option
+ */
+
+/**
+ * Event emitted when navigating through menu options
+ * @event TerminalHUD#menu:navigation
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {number} line - New row index
+ * @property {number} column - New column index
+ * @property {number} linearIndex - New linear index
+ * @property {string} question - Menu question/title
+ */
+
+/**
+ * Event emitted when a menu is closed
+ * @event TerminalHUD#menu:close
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ */
+
+/**
+ * Event emitted when asking a question
+ * @event TerminalHUD#question:ask
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {string} question - The question being asked
+ * @property {object} configuration - Configuration object
+ */
+
+/**
+ * Event emitted when a question is answered
+ * @event TerminalHUD#question:answer
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {string} question - The question that was asked
+ * @property {string} answer - The answer provided
+ * @property {object} configuration - Configuration object
+ */
+
+/**
+ * Event emitted when loading starts
+ * @event TerminalHUD#loading:start
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ */
+
+/**
+ * Event emitted when loading stops
+ * @event TerminalHUD#loading:stop
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ */
+
+/**
+ * Event emitted on mouse click
+ * @event TerminalHUD#mouse:click
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {number} x - X coordinate of click
+ * @property {number} y - Y coordinate of click
+ * @property {'left'|'right'|'middle'} button - Mouse button
+ * @property {number} buttonCode - Raw button code
+ */
+
+/**
+ * Event emitted on mouse double click
+ * @event TerminalHUD#mouse:doubleclick
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {number} x - X coordinate of click
+ * @property {number} y - Y coordinate of click
+ * @property {'left'|'right'|'middle'} button - Mouse button
+ */
+
+/**
+ * Event emitted on mouse wheel scroll
+ * @event TerminalHUD#mouse:wheel
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {number} x - X coordinate of wheel event
+ * @property {number} y - Y coordinate of wheel event
+ * @property {'up'|'down'} direction - Wheel direction
+ * @property {number} buttonCode - Raw button code
+ */
+
+/**
+ * Event emitted on key press
+ * @event TerminalHUD#key:press
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ * @property {string} [key] - Key name (for keypress events)
+ * @property {string} [sequence] - Raw key sequence
+ * @property {boolean} [ctrl] - Ctrl key pressed
+ * @property {boolean} [shift] - Shift key pressed
+ * @property {boolean} [meta] - Meta key pressed
+ * @property {boolean} [inMenu] - Whether in menu context
+ * @property {string} [key] - Key character (for generic key press)
+ * @property {boolean} [isCtrlC] - Whether it's Ctrl+C
+ */
+
+/**
+ * Event emitted when waiting for key press
+ * @event TerminalHUD#press:wait
+ * @type {object}
+ * @property {number} timestamp - Event timestamp
+ */
+
+/**
+ * Wildcard event emitted for all events
+ * @event TerminalHUD#*
+ * @type {object}
+ * @property {string} event - Original event name
+ * @property {number} timestamp - Event timestamp
+ * @property {object} [additionalData] - Original event data
+ */
+
+
 
 //--------------------------- SyAPP Structure start below ----------------------------------
 
 class SyAPP_Func {
-    constructor(name,build = async (props) => {},config = {log : false,linked : []}){
+    constructor(name,build = async (props) => {},config = {userid_only : false,log : false,linked : []}){
         this.Name = name
         this.Linked = config.linked || []
         this.Log = config.log || false
+        this.UserID_Only = config.userid_only || false
 
         class userBuild {
             constructor(id,data = {}){
@@ -1108,9 +1488,12 @@ class SyAPP_Func {
 
 
 
-class SyAPP {
-    constructor(Func = SyAPP_Func,config = {}){
+class SyAPP extends TerminalHUD {
+    constructor(Func = SyAPP_Func,config = {userid_only : false}){
+      super()
+      this.HUD = new TerminalHUD()
 
+      this.on('')
 
 
     }
