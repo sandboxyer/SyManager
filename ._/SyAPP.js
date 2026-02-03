@@ -1454,6 +1454,32 @@ class TerminalHUD extends EventEmitter {
  */
 
 
+// --------------------------- Util interfaces --------------------------------------------
+
+
+class Session {
+  constructor(config = {machine_id : undefined,process_id : undefined,userid : undefined,external : false}){
+    this.MachineID = config.machine_id || ''
+    this.ProcessID = config.process_id || undefined
+    this.UserID = config.userid || undefined
+    this.External = config.external || false
+    this.UniqueID = `${this.MachineID}${this.ProcessID}`
+
+  }
+}
+
+class userBuild {
+  constructor(data = {session : new Session}){
+    this.Session = data.session || new Session()
+    this.UniqueID = this.Session.UniqueID
+    this.MachineID = this.Session.MachineID
+    this.ProcessID = this.Session.ProcessID || undefined
+    this.UserID = this.Session.UserID || undefined
+    this.Text = ''
+    this.Buttons = []
+  }
+
+}
 
 //--------------------------- SyAPP Structure start below ----------------------------------
 
@@ -1464,15 +1490,9 @@ class SyAPP_Func {
         this.Log = config.log || false
         this.UserID_Only = config.userid_only || false
 
-        class userBuild {
-            constructor(id,data = {}){
-              this.ID = id
-              this.Buttons = []
-            }
-
-        }
-
-      this.Builds = [new userBuild(0)]  
+    
+      this.Builds = [new userBuild({})] 
+      this.Builds.splice(0,1) 
 
       this.Button = (id,text,path,config = {props : {}}) => {
         if(this.Builds[this.Builds.findIndex(e => e.ID == id)]){
@@ -1483,20 +1503,77 @@ class SyAPP_Func {
 
       }
 
+      this.Buttons = (buttons = []) => {
+        buttons
+      }
+
+      this.Text = (id,text,path,config = {props : {}}) => {
+        if(this.Builds[this.Builds.findIndex(e => e.ID == id)]){
+            this.Builds[this.Builds.findIndex(e => e.ID == id)].Buttons.push()
+        } else {
+            if(this.Log){console.log(`Button Load Error | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
+        }
+
+      }
+
+
+      this.Build = async (props = {}) => {
+        this.Builds.push(new userBuild())
+      }
+
       }
 }
 
 
+class TemplateFunc extends SyAPP_Func {
+  constructor(){
+    super(
+      'templatefunc',
+      async () => {
+
+      }
+    )
+  }
+}
+
 
 class SyAPP extends TerminalHUD {
-    constructor(Func = SyAPP_Func,config = {userid_only : false}){
+    constructor(mainfunc = TemplateFunc,config = {userid_only : false}){
       super()
       this.HUD = new TerminalHUD()
+      this.Funcs = [new SyAPP_Func]
+      this.Funcs.splice(0,1)
 
-      this.on('')
+        let funcs = []
+        let toadd = []
+        const firstfunc = new mainfunc()
+        funcs.push(firstfunc)
+        toadd.push(...firstfunc.Linked)
+        while(toadd.length){
+            toadd.forEach((f,i) => {
+                const instancedfunc = new f()
+                if(!funcs.find(e => e.Name == instancedfunc.Name)){
+                    funcs.push(instancedfunc)
+                    toadd.push(...instancedfunc.Linked)
+                }
+            toadd.splice(i,1)
+            })
+        }
+        this.Funcs.push(...funcs)
+
+        console.log(this.Funcs)
+      
+
+      this.on(this.eventTypes.MENU_SELECTION,(e) => {
+          this.close()
+          console.clear()
+          console.log(e)
+      })
 
 
     }
 }
 
 export default SyAPP
+
+//let app = new SyAPP()
