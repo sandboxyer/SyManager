@@ -77,6 +77,8 @@ function getMachineID() {
 }
 
 
+//TerminalHUD interface below
+
 /**
  * TerminalHUD - A framework for creating HUD interfaces in terminal
  * Optional mouse support: click to focus, double-click to select, wheel to navigate.
@@ -1565,24 +1567,25 @@ class SyAPP_Func {
         this.Log = config.log || false
         this.UserID_Only = config.userid_only || false
 
-    
-      this.Builds = [new userBuild({})] 
-      this.Builds.splice(0,1) 
+    /** @type {Map<string, userBuild>} */
+    this.Builds = new Map()
 
-      this.Button = (id,text,path,config = {props : {}}) => {
-        if(this.Builds[this.Builds.findIndex(e => e.ID == id)]){
-            this.Builds[this.Builds.findIndex(e => e.ID == id)].Buttons.push()
+
+      this.Button = (id,text,config = {path : this.Name,props : {}}) => {
+        if(this.Builds.has(id)){
+            if(!config.path){config.path = this.Name}
+            this.Builds.get(id).Buttons.push()
         } else {
-            if(this.Log){console.log(`Button Load Error | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
+            if(this.Log){console.log(`This.Button() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
         }
       }
 
     
-      this.Text = (id,text,path,config = {props : {}}) => {
-        if(this.Builds[this.Builds.findIndex(e => e.ID == id)]){
-            this.Builds[this.Builds.findIndex(e => e.ID == id)].Buttons.push()
+      this.Text = (id,text,config = {}) => {
+        if(this.Builds.has(id)){
+            this.Builds.has(id).Buttons.push()
         } else {
-            if(this.Log){console.log(`Button Load Error | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
+            if(this.Log){console.log(`This.Text() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
         }
 
       }
@@ -1613,45 +1616,51 @@ class TemplateFunc extends SyAPP_Func {
 
 
 class SyAPP extends TerminalHUD {
-    constructor(config = {mainfunc : TemplateFunc,userid_only : false}){
+  constructor(config = {mainfunc : TemplateFunc, userid_only : false}){
       super()
 
       this.MainFunc = config.mainfunc || TemplateFunc
-
       this.HUD = new TerminalHUD()
-      this.Funcs = [new SyAPP_Func]
-      this.Funcs.splice(0,1)
-
-      this.Sessions = [new Session({machine_id : getMachineID(),process_id : process.pid})]
-
-        let funcs = []
-        let toadd = []
-        const firstfunc = new this.MainFunc()
-        funcs.push(firstfunc)
-        toadd.push(...firstfunc.Linked)
-        while(toadd.length){
-            toadd.forEach((f,i) => {
-                const instancedfunc = new f()
-                if(!funcs.find(e => e.Name == instancedfunc.Name)){
-                    funcs.push(instancedfunc)
-                    toadd.push(...instancedfunc.Linked)
-                }
-            toadd.splice(i,1)
-            })
-        }
-        this.Funcs.push(...funcs)
-
-        console.log(this.Funcs)
       
+      /** @type {Map<string, SyAPP_Func>} */
+      this.Funcs = new Map()
+      
+      /** @type {Map<string, Session>} */
+      this.Sessions = new Map([[`${getMachineID()}-P${process.pid}`, new Session({
+          machine_id: getMachineID(),
+          process_id: process.pid
+      })]])
+
+      const processFuncs = (FuncClass) => {
+          const tempInstance = new FuncClass()
+          const funcName = tempInstance.Name
+          
+          if (this.Funcs.has(funcName)) {
+              return
+          }
+          
+          const instance = new FuncClass()
+          this.Funcs.set(funcName, instance)
+          
+          instance.Linked.forEach(linkedFunc => {
+              const linkedTemp = new linkedFunc()
+              if (!this.Funcs.has(linkedTemp.Name)) {
+                  processFuncs(linkedFunc)
+              }
+          })
+      }
+
+      processFuncs(this.MainFunc)
+
+      console.log(this.Funcs)
+      console.log(Session)
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
           this.close()
           console.clear()
           console.log(e)
       })
-
-
-    }
+  }
 }
 
 export default SyAPP
