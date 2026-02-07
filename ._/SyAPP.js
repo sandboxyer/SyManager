@@ -1660,14 +1660,25 @@ class SyAPP_Func {
         }
       }
 
-      this.SideButton = (id, config = {}) => {
-        // Call this.Button with forced buttons: true
-        return this.Button(id, {
-            ...config,
-            buttons: true  // Force buttons to be true
+      this.Buttons = (id, configs = []) => {
+        if (!Array.isArray(configs)) {
+            configs = [configs];
+        }
+        configs.forEach(config => {
+           
+            this.Button(id, {
+                ...config,
+                buttons: true  
+            });
         });
     };
 
+    this.SideButton = (id, config = {}) => {
+      return this.Button(id, {
+          ...config,
+          buttons: true 
+      });
+  };
     
       this.Text = (id,text,config = {}) => {
         if(this.Builds.has(id)){
@@ -1713,8 +1724,11 @@ class TemplateFunc extends SyAPP_Func {
 
       this.Text(uid,'Hello World')
       this.Button(uid,{name : 'Button 1'})
-      this.SideButton(uid,{name : 'Button 2'})
-      this.SideButton(uid,{name : 'Button 3',resetSelection : true})
+      this.Buttons(uid,[
+        {name : 'Button 2'},
+        {name : 'Button 3'}
+      ])
+      
       this.Button(uid,{name : 'Button 4',resetSelection : true})
       this.Button(uid,{name : 'Button 5',props : {testando : true}})
       if(props.testando){
