@@ -1711,6 +1711,19 @@ class SyAPP_Func {
       }
 }
 
+class NotFounded extends SyAPP_Func {
+  constructor(){
+    super(
+      'notfounded',
+      async (props) => {
+      let uid = props.session.UniqueID
+      this.Text(uid,'Func not founded !')
+      this.Button(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
+
+      }
+    )
+  }
+}
 
 class TemplateFunc extends SyAPP_Func {
   constructor(){
@@ -1726,7 +1739,7 @@ class TemplateFunc extends SyAPP_Func {
       this.Button(uid,{name : 'Button 1'})
       this.Buttons(uid,[
         {name : 'Button 2'},
-        {name : 'Button 3'}
+        {name : 'Button 3',path : 'dasded'}
       ])
       
       this.Button(uid,{name : 'Button 4',resetSelection : true})
@@ -1782,11 +1795,14 @@ class SyAPP extends TerminalHUD {
       }
 
       this.ProcessFuncs(this.MainFunc.Func)
+      this.ProcessFuncs(NotFounded)
 
       this.LoadScreen = async (funcname = this.MainFunc.Name,config = {resetSelection : false,props : {}}) => { 
-        if(this.Funcs.has(funcname)){
+        if(!this.Funcs.has(funcname)){funcname = 'notfounded'}
           if(!config.props){config.props = {}}
-          
+
+          config.props.mainfunc = this.MainFunc.Name
+
           this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
           this.Sessions.get(this.MainSessionID).ActualPath = funcname
           this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps
@@ -1795,13 +1811,9 @@ class SyAPP extends TerminalHUD {
           
           let return_obj = await this.Funcs.get(funcname).Build(config.props)
           this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
-        } else {
-          console.log('Func não encontrada')
-        }
       }
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
-          
           this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
       })
 
