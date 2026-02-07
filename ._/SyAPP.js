@@ -1635,7 +1635,7 @@ class SyAPP_Func {
         await new Promise(resolve => setTimeout(resolve, ms));
       }
 
-      this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {},resetSelection : false}) => {
+      this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {},resetSelection : false,buttons : false}) => {
         if(this.Builds.has(id)){
             if(!config.path){config.path = this.Name}
             let button_obj = {
@@ -1643,11 +1643,30 @@ class SyAPP_Func {
               metadata : {props : config.props || {},path : config.path || this.Name,resetSelection : config.resetSelection || false}, 
               action : (config.action) ? config.action : () => {},
             }
-            this.Builds.get(id).Buttons.push(button_obj)
+            if(config.buttons){
+              if(this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].type){
+                if(this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].type == 'options'){
+                  this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].value.push(button_obj)
+                }
+              } else {
+                this.Builds.get(id).Buttons.push({type : 'options',value : [button_obj]})
+              }
+            } else {
+              this.Builds.get(id).Buttons.push(button_obj)
+            }
+            
         } else {
             if(this.Log){console.log(`This.Button() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
         }
       }
+
+      this.SideButton = (id, config = {}) => {
+        // Call this.Button with forced buttons: true
+        return this.Button(id, {
+            ...config,
+            buttons: true  // Force buttons to be true
+        });
+    };
 
     
       this.Text = (id,text,config = {}) => {
@@ -1694,8 +1713,8 @@ class TemplateFunc extends SyAPP_Func {
 
       this.Text(uid,'Hello World')
       this.Button(uid,{name : 'Button 1'})
-      this.Button(uid,{name : 'Button 2',resetSelection : true})
-      this.Button(uid,{name : 'Button 3'})
+      this.SideButton(uid,{name : 'Button 2'})
+      this.SideButton(uid,{name : 'Button 3',resetSelection : true})
       this.Button(uid,{name : 'Button 4',resetSelection : true})
       this.Button(uid,{name : 'Button 5',props : {testando : true}})
       if(props.testando){
@@ -1778,4 +1797,4 @@ class SyAPP extends TerminalHUD {
 
 export default SyAPP
 
-new SyAPP()
+//new SyAPP()
