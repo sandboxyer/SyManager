@@ -1632,13 +1632,17 @@ class SyAPP_Func {
 
       this.WaitLog = async (message,ms = 5000) => {
         console.log(message)
-        await new Promise(resolve => setTimeout(resolve, ms)); // 1 second delay
+        await new Promise(resolve => setTimeout(resolve, ms));
       }
 
-      this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {}}) => {
+      this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {},resetSelection : false}) => {
         if(this.Builds.has(id)){
             if(!config.path){config.path = this.Name}
-            let button_obj = {name : config.name || '',metadata : {props : config.props || {},path : config.path || this.Name}, action : (config.action) ? config.action : () => {}}
+            let button_obj = {
+              name : config.name || '',
+              metadata : {props : config.props || {},path : config.path || this.Name,resetSelection : config.resetSelection || false}, 
+              action : (config.action) ? config.action : () => {},
+            }
             this.Builds.get(id).Buttons.push(button_obj)
         } else {
             if(this.Log){console.log(`This.Button() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
@@ -1687,12 +1691,15 @@ class TemplateFunc extends SyAPP_Func {
       
       //await this.WaitLog(props,2000)
       
+
       this.Text(uid,'Hello World')
       this.Button(uid,{name : 'Button 1'})
-      this.Button(uid,{name : 'Button 2'})
-      this.Button(uid,{name : 'Button 3',props : {testando : true}})
+      this.Button(uid,{name : 'Button 2',resetSelection : true})
+      this.Button(uid,{name : 'Button 3'})
+      this.Button(uid,{name : 'Button 4',resetSelection : true})
+      this.Button(uid,{name : 'Button 5',props : {testando : true}})
       if(props.testando){
-        this.Button(uid,{name : 'Button 4'})
+        this.Button(uid,{name : 'Button 6'})
       }
       
 
@@ -1743,7 +1750,7 @@ class SyAPP extends TerminalHUD {
 
       this.ProcessFuncs(this.MainFunc.Func)
 
-      this.LoadScreen = async (funcname = this.MainFunc.Name,config = {props : {}}) => { 
+      this.LoadScreen = async (funcname = this.MainFunc.Name,config = {resetSelection : false,props : {}}) => { 
         if(this.Funcs.has(funcname)){
           if(!config.props){config.props = {}}
           
@@ -1754,7 +1761,7 @@ class SyAPP extends TerminalHUD {
           this.Sessions.get(this.MainSessionID).ActualProps = config.props
           
           let return_obj = await this.Funcs.get(funcname).Build(config.props)
-          this.displayMenu(return_obj.hud_obj,{remember : true})
+          this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
         } else {
           console.log('Func não encontrada')
         }
@@ -1762,7 +1769,7 @@ class SyAPP extends TerminalHUD {
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
           
-          this.LoadScreen(e.metadata.path,{props : e.metadata.props})
+          this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
       })
 
       this.LoadScreen()
@@ -1771,6 +1778,4 @@ class SyAPP extends TerminalHUD {
 
 export default SyAPP
 
-//1- criar no this.Button() a config opcional para não manter a posição/index do botão selecionado, alterando dinamicamente pra remember : false no invoke do displayMenu no loadscreen
-
-//new SyAPP()
+new SyAPP()
