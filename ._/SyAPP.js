@@ -1598,7 +1598,10 @@ class Session {
     this.UserID = config.userid || undefined
     this.External = config.external || false
     this.UniqueID = config.uniqueid || `${this.MachineID}-P${this.ProcessID}`
-
+    this.ActualPath = undefined
+    this.PreviousPath = undefined
+    this.ActualProps = undefined
+    this.PreviousProps = undefined
   }
 }
 
@@ -1627,6 +1630,10 @@ class SyAPP_Func {
     /** @type {Map<string, userBuild>} */
     this.Builds = new Map()
 
+      this.WaitLog = async (message,ms = 5000) => {
+        console.log(message)
+        await new Promise(resolve => setTimeout(resolve, ms)); // 1 second delay
+      }
 
       this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {}}) => {
         if(this.Builds.has(id)){
@@ -1677,11 +1684,16 @@ class TemplateFunc extends SyAPP_Func {
       'templatefunc',
       async (props) => {
       let uid = props.session.UniqueID
-        
+      
+      //await this.WaitLog(props,2000)
+      
       this.Text(uid,'Hello World')
       this.Button(uid,{name : 'Button 1'})
       this.Button(uid,{name : 'Button 2'})
-      this.Button(uid,{name : 'Button 3'})
+      this.Button(uid,{name : 'Button 3',props : {testando : true}})
+      if(props.testando){
+        this.Button(uid,{name : 'Button 4'})
+      }
       
 
       }
@@ -1702,8 +1714,10 @@ class SyAPP extends TerminalHUD {
       /** @type {Map<string, SyAPP_Func>} */
       this.Funcs = new Map()
       
+      this.MainSessionID = `${getMachineID()}-P${process.pid}`
+
       /** @type {Map<string, Session>} */
-      this.Sessions = new Map([[`${getMachineID()}-P${process.pid}`, new Session({
+      this.Sessions = new Map([[this.MainSessionID, new Session({
           machine_id: getMachineID(),
           process_id: process.pid
       })]])
@@ -1732,7 +1746,13 @@ class SyAPP extends TerminalHUD {
       this.LoadScreen = async (funcname = this.MainFunc.Name,config = {props : {}}) => { 
         if(this.Funcs.has(funcname)){
           if(!config.props){config.props = {}}
-          config.props.session = this.Sessions.get(`${getMachineID()}-P${process.pid}`)
+          
+          this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
+          this.Sessions.get(this.MainSessionID).ActualPath = funcname
+          this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps
+          config.props.session = this.Sessions.get(this.MainSessionID)
+          this.Sessions.get(this.MainSessionID).ActualProps = config.props
+          
           let return_obj = await this.Funcs.get(funcname).Build(config.props)
           this.displayMenu(return_obj.hud_obj,{remember : true})
         } else {
@@ -1741,9 +1761,7 @@ class SyAPP extends TerminalHUD {
       }
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
-          this.close()
-          console.clear()
-          console.log(e)
+          
           this.LoadScreen(e.metadata.path,{props : e.metadata.props})
       })
 
