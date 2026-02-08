@@ -5,6 +5,89 @@ import { readFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
 
+class ColorText {
+  static red(text) {
+      return `\x1b[31m${text}\x1b[0m`; // Red text
+  }
+
+  static green(text) {
+      return `\x1b[38;5;82m${text}\x1b[0m`; // Green text
+  }
+
+  static yellow(text) {
+      return `\x1b[33m${text}\x1b[0m`; // Yellow text
+  }
+
+  static blue(text) {
+      return `\x1b[34m${text}\x1b[0m`; // Blue text
+  }
+
+  static magenta(text) {
+      return `\x1b[35m${text}\x1b[0m`; // Magenta text
+  }
+
+  static cyan(text) {
+      return `\x1b[36m${text}\x1b[0m`; // Cyan text
+  }
+
+  static white(text) {
+      return `\x1b[37m${text}\x1b[0m`; // White text
+  }
+
+  static orange(text) {
+      return `\x1b[38;5;208m${text}\x1b[0m`; // Orange text
+  }
+
+  // Additional colors
+  static black(text) {
+      return `\x1b[30m${text}\x1b[0m`; // Black text
+  }
+
+  static brightRed(text) {
+      return `\x1b[91m${text}\x1b[0m`; // Bright red text
+  }
+
+  static brightGreen(text) {
+      return `\x1b[92m${text}\x1b[0m`; // Bright green text
+  }
+
+  static brightYellow(text) {
+      return `\x1b[93m${text}\x1b[0m`; // Bright yellow text
+  }
+
+  static brightBlue(text) {
+      return `\x1b[94m${text}\x1b[0m`; // Bright blue text
+  }
+
+  static brightMagenta(text) {
+      return `\x1b[95m${text}\x1b[0m`; // Bright magenta text
+  }
+
+  static brightCyan(text) {
+      return `\x1b[96m${text}\x1b[0m`; // Bright cyan text
+  }
+
+  static brightWhite(text) {
+      return `\x1b[97m${text}\x1b[0m`; // Bright white text
+  }
+
+  static gray(text) {
+      return `\x1b[90m${text}\x1b[0m`; // Gray text
+  }
+
+  static lightGray(text) {
+      return `\x1b[37m${text}\x1b[0m`; // Light gray text (same as white)
+  }
+
+  static darkGray(text) {
+      return `\x1b[90m${text}\x1b[0m`; // Dark gray text (same as gray)
+  }
+
+  static custom(text, colorCode) {
+      return `\x1b[38;5;${colorCode}m${text}\x1b[0m`; // Custom color text
+  }
+}
+
 function getMachineID() {
     // Try primary DMI method
     try {
@@ -1630,35 +1713,39 @@ class SyAPP_Func {
     /** @type {Map<string, userBuild>} */
     this.Builds = new Map()
 
+      this.TextColor = ColorText
+
       this.WaitLog = async (message,ms = 5000) => {
         console.log(message)
         await new Promise(resolve => setTimeout(resolve, ms));
       }
 
-      this.Button = (id,config = {name : undefined,path : this.Name,props : {},action : () => {},resetSelection : false,buttons : false}) => {
-        if(this.Builds.has(id)){
-            if(!config.path){config.path = this.Name}
+      this.Button = (id, config = {name: undefined, path: this.Name, props: {}, action: () => {}, resetSelection: false, buttons: false}) => {
+        if (this.Builds.has(id)) {
+            if (!config.path) { config.path = this.Name }
             let button_obj = {
-              name : config.name || '',
-              metadata : {props : config.props || {},path : config.path || this.Name,resetSelection : config.resetSelection || false}, 
-              action : (config.action) ? config.action : () => {},
+                name: config.name || '',
+                metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false },
+                action: (config.action) ? config.action : () => {},
             }
-            if(config.buttons){
-              if(this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].type){
-                if(this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].type == 'options'){
-                  this.Builds.get(id).Buttons[this.Builds.get(id).Buttons.length-1].value.push(button_obj)
+            if (config.buttons) {
+                const buttonsArray = this.Builds.get(id).Buttons;
+                if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
+                    buttonsArray.push({ type: 'options', value: [button_obj] });
+                } else if (buttonsArray[buttonsArray.length - 1].type === 'options') {
+                    buttonsArray[buttonsArray.length - 1].value.push(button_obj);
+                } else {
+                    buttonsArray.push({ type: 'options', value: [button_obj] });
                 }
-              } else {
-                this.Builds.get(id).Buttons.push({type : 'options',value : [button_obj]})
-              }
             } else {
-              this.Builds.get(id).Buttons.push(button_obj)
+                this.Builds.get(id).Buttons.push(button_obj);
             }
-            
         } else {
-            if(this.Log){console.log(`This.Button() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
+            if (this.Log) {
+                console.log(`This.Button() Error - userBuild not founded | BuildID: ${id}`);
+            }
         }
-      }
+    }
 
       this.Buttons = (id, configs = []) => {
         if (!Array.isArray(configs)) {
@@ -1674,7 +1761,7 @@ class SyAPP_Func {
     };
 
     this.SideButton = (id, config = {}) => {
-      return this.Button(id, {
+      this.Button(id, {
           ...config,
           buttons: true 
       });
@@ -1717,9 +1804,23 @@ class NotFounded extends SyAPP_Func {
       'notfounded',
       async (props) => {
       let uid = props.session.UniqueID
-      this.Text(uid,'Func not founded !')
+      this.Text(uid,`Func ${this.TextColor.brightRed(props.notfounded_func)} not founded !`)
       this.Button(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
 
+      }
+    )
+  }
+}
+
+class Error extends SyAPP_Func {
+  constructor(){
+    super(
+      'error',
+      async (props) => {
+      let uid = props.session.UniqueID
+      this.Text(uid,`Internal error loading ${this.TextColor.brightRed(props.error_func)}`)
+      this.SideButton(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
+      this.SideButton(uid,{name : '⌂ Main Func',path : props.mainfunc})
       }
     )
   }
@@ -1741,6 +1842,7 @@ class TemplateFunc extends SyAPP_Func {
         {name : 'Button 2'},
         {name : 'Button 3',path : 'dasded'}
       ])
+
       
       this.Button(uid,{name : 'Button 4',resetSelection : true})
       this.Button(uid,{name : 'Button 5',props : {testando : true}})
@@ -1796,11 +1898,17 @@ class SyAPP extends TerminalHUD {
 
       this.ProcessFuncs(this.MainFunc.Func)
       this.ProcessFuncs(NotFounded)
+      this.ProcessFuncs(Error)
 
       this.LoadScreen = async (funcname = this.MainFunc.Name,config = {resetSelection : false,props : {}}) => { 
-        if(!this.Funcs.has(funcname)){funcname = 'notfounded'}
-          if(!config.props){config.props = {}}
+        if(!config.props){config.props = {}}
 
+        if(!this.Funcs.has(funcname)){
+          config.props.notfounded_func = funcname
+          funcname = 'notfounded'
+          
+        }
+         
           config.props.mainfunc = this.MainFunc.Name
 
           this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
@@ -1809,8 +1917,14 @@ class SyAPP extends TerminalHUD {
           config.props.session = this.Sessions.get(this.MainSessionID)
           this.Sessions.get(this.MainSessionID).ActualProps = config.props
           
-          let return_obj = await this.Funcs.get(funcname).Build(config.props)
-          this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
+          await this.Funcs.get(funcname).Build(config.props)
+          .then(return_obj => {
+            this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
+          })
+          .catch(e => {
+            this.LoadScreen('error',{props : {error_func : funcname,mainfunc : this.MainFunc.Name}})
+          })
+          
       }
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
@@ -1823,4 +1937,4 @@ class SyAPP extends TerminalHUD {
 
 export default SyAPP
 
-//new SyAPP()
+new SyAPP()
