@@ -2110,9 +2110,14 @@ class SyAPP_Func {
         up_buttontext: 'Show More',
         down_buttontext: 'Hide',
         down_emoji: '▼',
-        up_emoji: '▶'
+        up_emoji: '▶',
+        open_colors : true,
+        open_spacement : true,
       }) => {
         const storageKey = `dropdown-${name}`;
+
+        if(config.open_colors == undefined){config.open_colors = true}
+        if(config.open_spacement == undefined){config.open_spacement = true}
         
         // Initialize or get state
         if (!this.Storages.Has(id, storageKey)) {
@@ -2137,7 +2142,11 @@ class SyAPP_Func {
           //CONFIG PARA DEIXAR TODOS DA MESMA COR AQUI, CASO ATIVADO, ATIVA UMA CONFIG GLOBAL PARA O TEXTO DOS PROXIMOS BOTÕES PEGAREM A COR E APÓS O AWAIT VOLTA AO NORMAL
           //uma segunda issue, aplicar cores alternadas para caso tenha dropdown dentro de dropdown
           // criar outra config que por padrão é true, que cria um espaçamento antes dos textos dos this.Buttons do code(), para ficar no estilo file tree, por padrão true mas pode ser desativado
-          await code();
+          if(config.open_colors){this.Builds.get(id).dropdown_color = true}
+          if(config.open_spacement){this.Builds.get(id).dropdown_spacement = true}
+          await code()
+          this.Builds.get(id).dropdown_color = undefined
+          this.Builds.get(id).dropdown_spacement = undefined
         } else {
           this.Button(id, {
             name: this.TextColor.gold(`${config.up_emoji} ${config.up_buttontext}`),
@@ -2154,6 +2163,9 @@ class SyAPP_Func {
                 metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false },
                 action: (config.action) ? config.action : () => {},
             }
+            if(this.Builds.get(id).dropdown_color){button_obj.name = this.TextColor.rgb(button_obj.name,0,255,127)}
+            if(this.Builds.get(id).dropdown_spacement){button_obj.name = ` ${button_obj.name}`}
+            
             if (config.buttons) {
                 const buttonsArray = this.Builds.get(id).Buttons;
                 if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
@@ -2210,7 +2222,7 @@ class SyAPP_Func {
 
       this.Build = async (props = {session : new Session}) => {
         this.Builds.set(props.session.UniqueID,new userBuild({session : props.session}))
-        await build(props)
+        await build(props) //handle .catch aqui
         let obj_return = {
           hud_obj : {
             title : this.Builds.get(props.session.UniqueID).Text,
@@ -2244,7 +2256,9 @@ class Error extends SyAPP_Func {
       'error',
       async (props) => {
       let uid = props.session.UniqueID
-      this.Text(uid,`Internal error loading ${this.TextColor.brightRed(props.error_func)}`)
+      this.Text(uid,`Internal error loading ${this.TextColor.brightRed(props.error_func)}\n`)
+      //await this.WaitLog(props.error_message,5000)
+      if(props.error_message){this.Text(uid,props.error_message.toString())}
       this.SideButton(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
       this.SideButton(uid,{name : '⌂ Main Func',path : props.mainfunc})
       }
@@ -2351,13 +2365,13 @@ class SyAPP extends TerminalHUD {
             this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
           })
           .catch(e => {
-            this.LoadScreen('error',{props : {error_func : funcname,mainfunc : this.MainFunc.Name}})
+            this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
           })
           
       }
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
-          this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
+          this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props}) //.catch aqui
       })
 
       this.LoadScreen()
