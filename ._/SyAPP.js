@@ -1713,6 +1713,90 @@ class SyAPP_Func {
     /** @type {Map<string, userBuild>} */
     this.Builds = new Map()
 
+    this.UserStorage = new Map()
+    this.Storages = {
+    Set: (id, key, value) => {
+    if (!this.UserStorage.has(id)) {
+      this.UserStorage.set(id, {})
+    }
+    this.UserStorage.get(id)[key] = value
+    return true
+    },
+  
+    Get: (id, key) => {
+    const user = this.UserStorage.get(id)
+    return user ? user[key] : undefined
+    },
+  
+    Has: (id, key) => {
+    const user = this.UserStorage.get(id)
+    return user ? key in user : false
+    },
+  
+    Delete: (id, key) => {
+    const user = this.UserStorage.get(id)
+    if (!user) return false
+    const existed = key in user
+    if (existed) delete user[key]
+    return existed
+    },
+  
+    DeleteUser: (id) => {
+    return this.UserStorage.delete(id)
+    },
+  
+    GetAll: (id) => {
+    const user = this.UserStorage.get(id)
+    return user ? { ...user } : null
+    },
+  
+    Update: (id, updateFn) => {
+    if (!this.UserStorage.has(id)) {
+      this.UserStorage.set(id, {})
+    }
+    const user = this.UserStorage.get(id)
+    return updateFn(user)
+    },
+  
+    SetMany: (id, data) => {
+    if (!this.UserStorage.has(id)) {
+      this.UserStorage.set(id, {})
+    }
+    const user = this.UserStorage.get(id)
+    Object.assign(user, data)
+    return Object.keys(data).length
+   },
+  
+    ClearUser: (id) => {
+    const user = this.UserStorage.get(id)
+    if (!user) return false
+    for (const key in user) {
+      delete user[key]
+    }
+    return true
+    },
+  
+    Count: () => {
+    return this.UserStorage.size
+    },
+  
+    GetUsers: () => {
+    return Array.from(this.UserStorage.keys())
+    },
+  
+    GetAllData: () => {
+    const result = {}
+    for (const [id, user] of this.UserStorage) {
+      result[id] = { ...user }
+    }
+    return result
+    },
+  
+  Clear: () => {
+    this.UserStorage.clear()
+    }
+  }
+
       this.TextColor = ColorText
 
       this.WaitLog = async (message,ms = 5000) => {
@@ -1937,4 +2021,4 @@ class SyAPP extends TerminalHUD {
 
 export default SyAPP
 
-new SyAPP()
+//new SyAPP()
