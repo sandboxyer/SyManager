@@ -2003,8 +2003,14 @@ class userBuild {
     this.InputPath = ''
     this.InputProps = ''
     this.InputQuestion = ''
+    
+    // Dropdown state properties
+    this.droplevel = 0
+    this.dropdown_color = undefined
+    this.dropdown_spacement = undefined
+    this.dropdown_horizontal = undefined
+    this.last_dropdown_button = undefined
   }
-
 }
 
 //--------------------------- SyAPP Structure start below ----------------------------------
@@ -2115,91 +2121,211 @@ class SyAPP_Func {
         down_buttontext: 'Hide',
         down_emoji: '▼',
         up_emoji: '▶',
-        open_colors : true,
-        open_spacement : true,
+        open_colors: true,
+        open_spacement: true,
+        horizontal: false, // NEW: Open to the right instead of down
       }) => {
         const storageKey = `dropdown-${name}`;
-
-        if(config.open_colors == undefined){config.open_colors = true}
-        if(config.open_spacement == undefined){config.open_spacement = true}
-        
+      
+        // Set defaults for all config options
+        config = {
+          up_buttontext: 'Show More',
+          down_buttontext: 'Hide',
+          down_emoji: '▼',
+          up_emoji: '▶',
+          open_colors: true,
+          open_spacement: true,
+          horizontal: false,
+          ...config
+        };
+      
+        // Adjust emojis for horizontal mode if using defaults
+        if (config.horizontal) {
+          if (config.down_emoji === '▼') config.down_emoji = '▶';
+          if (config.up_emoji === '▶') config.up_emoji = '⧾';
+        }
+      
         // Initialize or get state
         if (!this.Storages.Has(id, storageKey)) {
           this.Storages.Set(id, storageKey, { dropped: false });
         }
-        
+      
         const state = this.Storages.Get(id, storageKey);
         const wasClicked = this.Builds.get(id).Session.ActualProps.droprun === storageKey;
-        
+      
         // Toggle if clicked
         if (wasClicked) {
           state.dropped = !state.dropped;
           this.Storages.Set(id, storageKey, state);
         }
-        
+      
+        // Store current dropdown state for nested dropdowns
+        const wasHorizontal = this.Builds.get(id).dropdown_horizontal;
+        const wasSpacement = this.Builds.get(id).dropdown_spacement;
+        const wasColors = this.Builds.get(id).dropdown_color;
+        const wasDroplevel = this.Builds.get(id).droplevel || 0;
+      
         // Render button and content
         if (state.dropped) {
-          this.Button(id, {
-            name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
-            props: { droprun: storageKey }
-          });
-          //CONFIG PARA DEIXAR TODOS DA MESMA COR AQUI, CASO ATIVADO, ATIVA UMA CONFIG GLOBAL PARA O TEXTO DOS PROXIMOS BOTÕES PEGAREM A COR E APÓS O AWAIT VOLTA AO NORMAL
-          //uma segunda issue, aplicar cores alternadas para caso tenha dropdown dentro de dropdown
-          // criar outra config que por padrão é true, que cria um espaçamento antes dos textos dos this.Buttons do code(), para ficar no estilo file tree, por padrão true mas pode ser desativado
-          if(config.open_colors){this.Builds.get(id).dropdown_color = true}
-          if(config.open_spacement){this.Builds.get(id).dropdown_spacement = true}
-          if(this.Builds.get(id).droplevel > 0){this.Builds.get(id).droplevel++}
-          if(!this.Builds.get(id).droplevel || this.Builds.get(id).droplevel == 0){this.Builds.get(id).droplevel = 1}
-          
-          await code()
-          if(this.Builds.get(id).droplevel == 1){
-          this.Builds.get(id).dropdown_color = undefined
-          this.Builds.get(id).dropdown_spacement = undefined
-        }
-          this.Builds.get(id).droplevel = this.Builds.get(id).droplevel-1
+          if (config.horizontal) {
+            // In horizontal mode, we need to handle rendering differently
+            this.Button(id, {
+              name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
+              props: { droprun: storageKey }
+            });
+      
+            // Store current button index for horizontal layout
+            const currentButtonCount = this.Builds.get(id).Buttons.length;
+            this.Builds.get(id).last_dropdown_button = currentButtonCount - 1;
+      
+            // Apply horizontal configuration
+            this.Builds.get(id).dropdown_horizontal = true;
+            if (config.open_colors) this.Builds.get(id).dropdown_color = true;
+            if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
+            this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
+      
+            // Execute the dropdown content code
+            await code();
+      
+            // Reset to previous state
+            this.Builds.get(id).dropdown_horizontal = wasHorizontal;
+            if (config.open_colors && this.Builds.get(id).droplevel === 1) {
+              this.Builds.get(id).dropdown_color = undefined;
+            }
+            if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
+              this.Builds.get(id).dropdown_spacement = undefined;
+            }
+            this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
+            this.Builds.get(id).last_dropdown_button = undefined;
+          } else {
+            // Original vertical dropdown behavior
+            this.Button(id, {
+              name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
+              props: { droprun: storageKey }
+            });
+      
+            // Apply vertical configuration
+            if (config.open_colors) this.Builds.get(id).dropdown_color = true;
+            if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
+            this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
+      
+            await code();
+      
+            // Reset to previous state
+            if (config.open_colors && this.Builds.get(id).droplevel === 1) {
+              this.Builds.get(id).dropdown_color = undefined;
+            }
+            if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
+              this.Builds.get(id).dropdown_spacement = undefined;
+            }
+            this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
+          }
         } else {
+          // Closed state - show "Show More" button
+          const emoji = config.horizontal ? config.up_emoji : config.up_emoji;
           this.Button(id, {
-            name: this.TextColor.gold(`${config.up_emoji} ${config.up_buttontext}`),
+            name: this.TextColor.gold(`${emoji} ${config.up_buttontext}`),
             props: { droprun: storageKey }
           });
+        }
+      
+        // Restore previous state if we're exiting a nested dropdown
+        if (wasDroplevel === 0 && this.Builds.get(id).droplevel === 0) {
+          this.Builds.get(id).dropdown_horizontal = wasHorizontal;
+          this.Builds.get(id).dropdown_color = wasColors;
+          this.Builds.get(id).dropdown_spacement = wasSpacement;
         }
       };
 
       this.Button = (id, config = {name: undefined, path: this.Name, props: {}, action: () => {}, resetSelection: false, buttons: false}) => {
         if (this.Builds.has(id)) {
-            if (!config.path) { config.path = this.Name }
-            let button_obj = {
-                name: config.name || '',
-                metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false },
-                action: (config.action) ? config.action : () => {},
+          if (!config.path) { config.path = this.Name }
+          
+          let button_obj = {
+            name: config.name || '',
+            metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false },
+            action: (config.action) ? config.action : () => {},
+          }
+      
+          // Apply dropdown styling
+          if (this.Builds.get(id).dropdown_color) {
+            button_obj.name = this.TextColor.rgb(
+              button_obj.name,
+              (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.7) * 128)),
+              (127 + Math.floor(Math.cos(this.Builds.get(id).droplevel * 2.3) * 128)),
+              (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.3 + 1.5) * 128))
+            );
+          }
+      
+          if (this.Builds.get(id).dropdown_spacement) {
+            let space = '';
+            for (let i = 0; i < this.Builds.get(id).droplevel; i++) {
+              space = ` ${space}`;
             }
-            if(this.Builds.get(id).dropdown_color){button_obj.name = this.TextColor.rgb(button_obj.name,(127+Math.floor(Math.sin(this.Builds.get(id).droplevel*1.7)*128)),(127+Math.floor(Math.cos(this.Builds.get(id).droplevel*2.3)*128)),(127+Math.floor(Math.sin(this.Builds.get(id).droplevel*1.3+1.5)*128)))}
-            if(this.Builds.get(id).dropdown_spacement){
-              let space = ''
-              for(let i = 0;i <= this.Builds.get(id).droplevel;i++){
-                space = ` ${space}`
+            button_obj.name = `${space}${button_obj.name}`;
+          }
+      
+          // Handle horizontal dropdown layout
+          if (this.Builds.get(id).dropdown_horizontal && 
+              this.Builds.get(id).last_dropdown_button !== undefined) {
+            
+            const buttonsArray = this.Builds.get(id).Buttons;
+            const lastDropdownIndex = this.Builds.get(id).last_dropdown_button;
+            
+            // Find the position to insert (right after the dropdown button)
+            let insertIndex = lastDropdownIndex + 1;
+            let foundGroup = false;
+            
+            // Look for an existing options group to add to
+            for (let i = lastDropdownIndex + 1; i < buttonsArray.length; i++) {
+              if (buttonsArray[i].type === 'options') {
+                // Add to existing group for horizontal layout
+                buttonsArray[i].value.push(button_obj);
+                foundGroup = true;
+                break;
               }
-              button_obj.name = `${space}${button_obj.name}`
             }
             
-            if (config.buttons) {
-                const buttonsArray = this.Builds.get(id).Buttons;
-                if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
-                    buttonsArray.push({ type: 'options', value: [button_obj] });
-                } else if (buttonsArray[buttonsArray.length - 1].type === 'options') {
-                    buttonsArray[buttonsArray.length - 1].value.push(button_obj);
-                } else {
-                    buttonsArray.push({ type: 'options', value: [button_obj] });
+            if (!foundGroup) {
+              // Create new group starting from the dropdown button
+              // Move existing dropdown button into a group if it's not already
+              if (lastDropdownIndex >= 0 && lastDropdownIndex < buttonsArray.length) {
+                const dropdownButton = buttonsArray[lastDropdownIndex];
+                
+                // If the dropdown button is standalone, convert it to a group
+                if (!dropdownButton.type) {
+                  const newGroup = {
+                    type: 'options',
+                    value: [dropdownButton, button_obj]
+                  };
+                  buttonsArray[lastDropdownIndex] = newGroup;
+                } else if (dropdownButton.type === 'options') {
+                  // Add to existing dropdown button's group
+                  dropdownButton.value.push(button_obj);
                 }
+              }
+            }
+            
+          } else if (config.buttons) {
+            // Original grouped buttons behavior (for vertical layout)
+            const buttonsArray = this.Builds.get(id).Buttons;
+            if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
+              buttonsArray.push({ type: 'options', value: [button_obj] });
+            } else if (buttonsArray[buttonsArray.length - 1].type === 'options') {
+              buttonsArray[buttonsArray.length - 1].value.push(button_obj);
             } else {
-                this.Builds.get(id).Buttons.push(button_obj);
+              buttonsArray.push({ type: 'options', value: [button_obj] });
             }
+          } else {
+            // Single button
+            this.Builds.get(id).Buttons.push(button_obj);
+          }
         } else {
-            if (this.Log) {
-                console.log(`This.Button() Error - userBuild not founded | BuildID: ${id}`);
-            }
+          if (this.Log) {
+            console.log(`This.Button() Error - userBuild not founded | BuildID: ${id}`);
+          }
         }
-    }
+      };
 
       this.Buttons = (id, configs = []) => {
         if (!Array.isArray(configs)) {
@@ -2342,6 +2468,11 @@ class TemplateFunc extends SyAPP_Func {
       })
 
       this.Button(uid,{name : 'Button 4',resetSelection : true})
+      await this.DropDown(uid,'lateral',async () =>{
+
+        this.Button(uid,{name : 'dsdsdasd'})
+        this.Button(uid,{name : 'dsdfsddasd'})
+      },{horizontal : true})
       this.Button(uid,{name : 'Button 5',props : {testando : true}})
       if(props.testando){
         this.Button(uid,{name : 'Button 6'})
@@ -2435,8 +2566,11 @@ class SyAPP extends TerminalHUD {
       }
 
       this.on(this.eventTypes.MENU_SELECTION,(e) => {
-          this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props}) //.catch aqui
-      })
+        this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
+        .catch(er => {
+          this.LoadScreen('error',{props : {error_message : er,error_func : e.metadata.path,mainfunc : this.MainFunc.Name}})
+        })
+    })
 
       this.LoadScreen()
   }
@@ -2446,6 +2580,6 @@ export default SyAPP
 
 //1 - Criar uma config no SyAPP chamada debug, que irá mostrar o erro na Func de Error, e não só a mensagem, criar também uma outra que cospe em um json, duas opções
 //2 - criar config no SyAPP que define o padrão da NotFounded e Error func, para definir se volta com a props anterior ou sem props, por padrão Error volta sem props e NotFounded volta com props, deixar isso flexivel, criar uma configuração no SyAPP_Func também, para poder controlar isso a nível de FUnc também
-new SyAPP()
+//new SyAPP()
 
 //ColorText.showAllColors()
