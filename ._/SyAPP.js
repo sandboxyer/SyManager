@@ -2144,9 +2144,15 @@ class SyAPP_Func {
           // criar outra config que por padrão é true, que cria um espaçamento antes dos textos dos this.Buttons do code(), para ficar no estilo file tree, por padrão true mas pode ser desativado
           if(config.open_colors){this.Builds.get(id).dropdown_color = true}
           if(config.open_spacement){this.Builds.get(id).dropdown_spacement = true}
+          if(this.Builds.get(id).droplevel > 0){this.Builds.get(id).droplevel++}
+          if(!this.Builds.get(id).droplevel || this.Builds.get(id).droplevel == 0){this.Builds.get(id).droplevel = 1}
+          
           await code()
+          if(this.Builds.get(id).droplevel == 1){
           this.Builds.get(id).dropdown_color = undefined
           this.Builds.get(id).dropdown_spacement = undefined
+        }
+          this.Builds.get(id).droplevel = this.Builds.get(id).droplevel-1
         } else {
           this.Button(id, {
             name: this.TextColor.gold(`${config.up_emoji} ${config.up_buttontext}`),
@@ -2163,8 +2169,14 @@ class SyAPP_Func {
                 metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false },
                 action: (config.action) ? config.action : () => {},
             }
-            if(this.Builds.get(id).dropdown_color){button_obj.name = this.TextColor.rgb(button_obj.name,0,255,127)}
-            if(this.Builds.get(id).dropdown_spacement){button_obj.name = ` ${button_obj.name}`}
+            if(this.Builds.get(id).dropdown_color){button_obj.name = this.TextColor.rgb(button_obj.name,(127+Math.floor(Math.sin(this.Builds.get(id).droplevel*1.7)*128)),(127+Math.floor(Math.cos(this.Builds.get(id).droplevel*2.3)*128)),(127+Math.floor(Math.sin(this.Builds.get(id).droplevel*1.3+1.5)*128)))}
+            if(this.Builds.get(id).dropdown_spacement){
+              let space = ''
+              for(let i = 0;i <= this.Builds.get(id).droplevel;i++){
+                space = ` ${space}`
+              }
+              button_obj.name = `${space}${button_obj.name}`
+            }
             
             if (config.buttons) {
                 const buttonsArray = this.Builds.get(id).Buttons;
@@ -2282,8 +2294,16 @@ class TemplateFunc extends SyAPP_Func {
         {name : 'Button 2'},
         {name : 'Button 3',path : 'dasded'}
       ])
-      await this.DropDown(uid,'drop1',() =>{
+      await this.DropDown(uid,'drop1',async () =>{
         this.Button(uid,{name : 'opa'})
+        await this.DropDown(uid,'drop2',async () => {
+          this.Button(uid,{name : 'testing1'})
+          await this.DropDown(uid,'drop3',() => {
+            this.Button(uid,{name : 'maisum1'})
+            this.Button(uid,{name : 'outro'})
+          })
+          this.Button(uid,{name : 'testing2'})
+        })
         this.Button(uid,{name : 'opa 2'})
       })
 
