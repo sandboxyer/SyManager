@@ -1999,6 +1999,10 @@ class userBuild {
     this.UserID = this.Session.UserID || undefined
     this.Text = ''
     this.Buttons = []
+    this.WaitInput = false
+    this.InputPath = ''
+    this.InputProps = ''
+    this.InputQuestion = ''
   }
 
 }
@@ -2231,6 +2235,13 @@ class SyAPP_Func {
 
       }
 
+     this.WaitInput = (id,config = {path : this.Name,props : {},question : ''}) => {
+      this.Builds.get(id).WaitInput = true
+      this.Builds.get(id).InputPath = config.path || this.Name
+      this.Builds.get(id).InputProps = config.props || {}
+      this.Builds.get(id).InputQuestion = config.question || ''
+     } 
+
 
       this.Build = async (props = {session : new Session}) => {
         this.Builds.set(props.session.UniqueID,new userBuild({session : props.session}))
@@ -2239,6 +2250,12 @@ class SyAPP_Func {
           hud_obj : {
             title : this.Builds.get(props.session.UniqueID).Text,
             options : this.Builds.get(props.session.UniqueID).Buttons
+          },
+          wait_input : this.Builds.get(props.session.UniqueID).WaitInput,
+          input_obj : {
+            path : this.Builds.get(props.session.UniqueID).InputPath,
+            props : this.Builds.get(props.session.UniqueID).InputProps,
+            question : this.Builds.get(props.session.UniqueID).InputQuestion
           }
         }
         this.Builds.delete(props.session.UniqueID)
@@ -2271,7 +2288,7 @@ class Error extends SyAPP_Func {
       this.Text(uid,`Internal error loading ${this.TextColor.brightRed(props.error_func)}\n`)
       //await this.WaitLog(props.error_message,5000)
       if(props.error_message){this.Text(uid,props.error_message.toString())}
-      this.SideButton(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
+      this.SideButton(uid,{name : '← Return',path : props.session.PreviousPath})
       this.SideButton(uid,{name : '⌂ Main Func',path : props.mainfunc})
       }
     )
@@ -2287,12 +2304,23 @@ class TemplateFunc extends SyAPP_Func {
       
       //await this.WaitLog(props,2000)
       
+      if(props.errorforce){
+        this.Text(d)
+      }
+
+      if(props.inputnumero){
+        this.WaitInput(uid)
+      }
+
+      if(props.inputValue){
+        this.Text(uid,`Numero digitado : ${props.inputValue}`)
+      }
 
       this.Text(uid,'Hello World')
       this.Button(uid,{name : 'Button 1'})
       this.Buttons(uid,[
-        {name : 'Button 2'},
-        {name : 'Button 3',path : 'dasded'}
+        {name : 'Error',props : {errorforce : true}},
+        {name : 'Inexistent Func',path : 'dasded'}
       ])
       await this.DropDown(uid,'drop1',async () =>{
         this.Button(uid,{name : 'opa'})
@@ -2306,12 +2334,20 @@ class TemplateFunc extends SyAPP_Func {
         })
         this.Button(uid,{name : 'opa 2'})
       })
+      await this.DropDown(uid,'drop55',async () =>{
+
+        this.Button(uid,{name : 'dsdsdasd'})
+        this.Button(uid,{name : 'dsddfsdd'})
+        this.Button(uid,{name : 'dsdfsddasd'})
+      })
 
       this.Button(uid,{name : 'Button 4',resetSelection : true})
       this.Button(uid,{name : 'Button 5',props : {testando : true}})
       if(props.testando){
         this.Button(uid,{name : 'Button 6'})
       }
+
+      this.Button(uid,{name : 'Inserir numero',props : {inputnumero : true}})
       
 
       }
@@ -2381,8 +2417,12 @@ class SyAPP extends TerminalHUD {
           this.Sessions.get(this.MainSessionID).ActualProps = config.props
           
           await this.Funcs.get(funcname).Build(config.props)
-          .then(return_obj => {
+          .then(async return_obj => {
             this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
+            if(return_obj.wait_input){
+              let response = await this.ask(return_obj.input_obj.question || 'Type : ')
+              this.LoadScreen(return_obj.input_obj.path,{props : {inputValue : response,...return_obj.input_obj.props}})
+            }
           })
           .catch(e => {
             this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
@@ -2401,7 +2441,7 @@ class SyAPP extends TerminalHUD {
 export default SyAPP
 
 //1 - Criar uma config no SyAPP chamada debug, que irá mostrar o erro na Func de Error, e não só a mensagem, criar também uma outra que cospe em um json, duas opções
-
+//2 - criar config no SyAPP que define o padrão da NotFounded e Error func, para definir se volta com a props anterior ou sem props, por padrão Error volta sem props e NotFounded volta com props, deixar isso flexivel, criar uma configuração no SyAPP_Func também, para poder controlar isso a nível de FUnc também
 //new SyAPP()
 
 //ColorText.showAllColors()
