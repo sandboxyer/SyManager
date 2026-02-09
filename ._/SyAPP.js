@@ -2405,9 +2405,7 @@ class SyAPP extends TerminalHUD {
         if(!this.Funcs.has(funcname)){
           config.props.notfounded_func = funcname
           funcname = 'notfounded'
-          
         }
-         
           config.props.mainfunc = this.MainFunc.Name
 
           this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
@@ -2419,8 +2417,14 @@ class SyAPP extends TerminalHUD {
           await this.Funcs.get(funcname).Build(config.props)
           .then(async return_obj => {
             this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
+            .catch(e => {
+              this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
+            })
             if(return_obj.wait_input){
               let response = await this.ask(return_obj.input_obj.question || 'Type : ')
+              .catch(e => {
+                this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
+              })
               this.LoadScreen(return_obj.input_obj.path,{props : {inputValue : response,...return_obj.input_obj.props}})
             }
           })
@@ -2442,6 +2446,6 @@ export default SyAPP
 
 //1 - Criar uma config no SyAPP chamada debug, que irá mostrar o erro na Func de Error, e não só a mensagem, criar também uma outra que cospe em um json, duas opções
 //2 - criar config no SyAPP que define o padrão da NotFounded e Error func, para definir se volta com a props anterior ou sem props, por padrão Error volta sem props e NotFounded volta com props, deixar isso flexivel, criar uma configuração no SyAPP_Func também, para poder controlar isso a nível de FUnc também
-//new SyAPP()
+new SyAPP()
 
 //ColorText.showAllColors()
