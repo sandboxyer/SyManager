@@ -2854,6 +2854,9 @@ class SyAPP {
 
       this.LoadScreen()
   }
+
+static Func(){return SyAPP_Func}
+
 }
 
 export default SyAPP
