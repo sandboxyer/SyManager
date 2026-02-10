@@ -2769,14 +2769,12 @@ class TemplateFunc extends SyAPP_Func {
 }
 
 
-class SyAPP extends TerminalHUD {
+class SyAPP {
   constructor(config = {mainfunc : TemplateFunc, userid_only : false}){
-      super()
+      this.HUD = new TerminalHUD()
       
-
       this.MainFunc = {Func : config.mainfunc || TemplateFunc,Name : undefined}
       this.MainFunc.Name = new this.MainFunc.Func().Name
-      this.HUD = new TerminalHUD()
       
       /** @type {Map<string, SyAPP_Func>} */
       this.Funcs = new Map()
@@ -2829,12 +2827,12 @@ class SyAPP extends TerminalHUD {
           
           await this.Funcs.get(funcname).Build(config.props)
           .then(async return_obj => {
-            this.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
+            this.HUD.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false})
             .catch(e => {
               this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
             })
             if(return_obj.wait_input){
-              let response = await this.ask(return_obj.input_obj.question || 'Type : ')
+              let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ')
               .catch(e => {
                 this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
               })
@@ -2847,7 +2845,7 @@ class SyAPP extends TerminalHUD {
           
       }
 
-      this.on(this.eventTypes.MENU_SELECTION,(e) => {
+      this.HUD.on(this.HUD.eventTypes.MENU_SELECTION,(e) => {
         this.LoadScreen(e.metadata.path,{resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
         .catch(er => {
           this.LoadScreen('error',{props : {error_message : er,error_func : e.metadata.path,mainfunc : this.MainFunc.Name}})
@@ -2859,9 +2857,3 @@ class SyAPP extends TerminalHUD {
 }
 
 export default SyAPP
-
-//1 - Criar uma config no SyAPP chamada debug, que irá mostrar o erro na Func de Error, e não só a mensagem, criar também uma outra que cospe em um json, duas opções
-//2 - criar config no SyAPP que define o padrão da NotFounded e Error func, para definir se volta com a props anterior ou sem props, por padrão Error volta sem props e NotFounded volta com props, deixar isso flexivel, criar uma configuração no SyAPP_Func também, para poder controlar isso a nível de FUnc também
-//new SyAPP()
-
-//ColorText.showAllColors()
