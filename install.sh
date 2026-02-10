@@ -234,7 +234,7 @@ create_pkg_cli() {
     install_dir="$1"
     pkg_cli_path="$install_dir/pkg-cli.js"
     
-    log_message "Creating generic pkg CLI utility with ES modules..."
+    log_message "Creating generic pkg CLI utility with enhanced terminal handling..."
     
     # Always remove existing pkg-cli.js to ensure fresh creation
     if [ -f "$pkg_cli_path" ]; then
@@ -253,6 +253,26 @@ import { fileURLToPath } from 'url';
 // Get the caller's current working directory
 const callerCwd = process.cwd();
 const packageJsonPath = path.join(callerCwd, 'package.json');
+
+// Terminal cleanup utilities
+function cleanupTerminal() {
+    try {
+        // Reset terminal modes
+        if (process.stdin.isTTY) {
+            process.stdin.setRawMode(false);
+        }
+        
+        // Show cursor and reset terminal
+        process.stdout.write('\x1b[?25h'); // Show cursor
+        process.stdout.write('\x1b[0m');   // Reset colors
+        process.stdout.write('\x1b[?1000l'); // Disable mouse tracking
+        process.stdout.write('\x1b[?1002l');
+        process.stdout.write('\x1b[?1003l');
+        process.stdout.write('\x1b[?1006l');
+    } catch (error) {
+        // Ignore cleanup errors
+    }
+}
 
 function readPackageJson() {
   try {
@@ -293,20 +313,49 @@ async function runScript(scriptName, ...scriptArgs) {
     const child = spawn(fullCommand, {
       shell: true,
       stdio: 'inherit',
-      cwd: callerCwd
+      cwd: callerCwd,
+      detached: false  // Changed to false for better signal handling
     });
     
+    // Set up signal handlers for proper cleanup
+    const signalHandler = (signal) => {
+        cleanupTerminal();
+        if (!child.killed) {
+            child.kill(signal);
+        }
+    };
+    
+    // Listen for termination signals
+    process.on('SIGINT', () => signalHandler('SIGINT'));
+    process.on('SIGTERM', () => signalHandler('SIGTERM'));
+    process.on('SIGHUP', () => signalHandler('SIGHUP'));
+    
     return new Promise((resolve, reject) => {
-      child.on('close', (code) => {
-        process.exit(code);
-      });
-      
-      child.on('error', (error) => {
-        console.error(`Error running script: ${error.message}`);
-        process.exit(1);
-      });
+        child.on('close', (code, signal) => {
+            // Clean up terminal before exiting
+            cleanupTerminal();
+            
+            // Remove signal listeners
+            process.removeAllListeners('SIGINT');
+            process.removeAllListeners('SIGTERM');
+            process.removeAllListeners('SIGHUP');
+            
+            if (signal === 'SIGINT') {
+                console.log('\nProcess terminated by user');
+                process.exit(0);
+            } else {
+                process.exit(code || 0);
+            }
+        });
+        
+        child.on('error', (error) => {
+            cleanupTerminal();
+            console.error(`Error running script: ${error.message}`);
+            process.exit(1);
+        });
     });
   } catch (error) {
+    cleanupTerminal();
     console.error(`Error running script: ${error.message}`);
     process.exit(1);
   }
@@ -446,6 +495,24 @@ Working directory: ${callerCwd}
 
 // Main CLI logic
 async function main() {
+  // Set up global cleanup for unexpected exits
+  process.on('uncaughtException', (error) => {
+    cleanupTerminal();
+    console.error('Uncaught Exception:', error.message);
+    process.exit(1);
+  });
+  
+  process.on('unhandledRejection', (reason, promise) => {
+    cleanupTerminal();
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    process.exit(1);
+  });
+  
+  // Clean up terminal on normal exit
+  process.on('exit', () => {
+    cleanupTerminal();
+  });
+  
   const args = process.argv.slice(2);
   
   if (args.length === 0) {
@@ -489,6 +556,7 @@ async function main() {
 // Run the CLI
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch(error => {
+    cleanupTerminal();
     console.error(`Unhandled error: ${error.message}`);
     process.exit(1);
   });
@@ -496,7 +564,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 PKG_EOF
     
     chmod +x "$pkg_cli_path"
-    log_message "Created generic pkg CLI utility at $pkg_cli_path"
+    log_message "Created enhanced pkg CLI utility at $pkg_cli_path"
 }
 
 create_command_links() {
