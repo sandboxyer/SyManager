@@ -5,6 +5,72 @@ import { readFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
 
+const BuildPagination = (fullarray = [], items_per_page = 5) => {
+  let pagination = [{
+       page : 1,
+       list : []
+   }]
+   pagination.splice(0,1)
+   
+   let object_model = {}
+   let count = 0
+   let type = typeof fullarray[0]
+   
+
+   fullarray.forEach((t,index) => {
+       if (count == 0) {
+           if(index == 0){
+               type = typeof t
+               if(typeof t == 'object'){
+                   object_model = t
+               }
+           }
+           if(typeof t == type){
+               if(typeof t == 'object'){
+                  let fullinclude = true
+                  Object.keys(t).forEach(k => {
+                      if(!Object.keys(object_model).includes(k)){
+                          fullinclude = false
+                      }
+                  })
+                   if(fullinclude){
+                       pagination.push({ page: pagination.length + 1, list: [] })
+                   pagination[pagination.length - 1].list.push(t)
+                   count += 1
+                   }
+               } else {
+                  pagination.push({ page: pagination.length + 1, list: [] })
+                   pagination[pagination.length - 1].list.push(t)
+                   count += 1
+               }
+               
+           }
+           
+       } else {
+           if(typeof t == type){
+               if(typeof t == 'object'){
+                  let fullinclude = true
+                  Object.keys(t).forEach(k => {
+                      if(!Object.keys(object_model).includes(k)){
+                          fullinclude = false
+                      }
+                  })
+                   if(fullinclude){
+                   pagination[pagination.length - 1].list.push(t)
+                   count += 1
+                   }
+               } else {
+                   pagination[pagination.length - 1].list.push(t)
+                   count += 1
+               }
+           }
+       }
+       
+       if (count == items_per_page) { count = 0 }
+   })
+return pagination
+}
+
 class ColorText {
   // Standard 8/16 colors
   static black(text) {
@@ -755,7 +821,7 @@ class TerminalHUD extends EventEmitter {
   }
 
 /**
- * Counts total options in a menu structure
+ * Counts total options in a menu structure, properly handling groups
  * @private
  * @param {Array<string|object|Array<string|object>>} options - Menu options
  * @returns {number} Total number of options
@@ -767,6 +833,9 @@ countMenuOptions(options) {
   for (const option of options) {
     if (Array.isArray(option)) {
       count += option.length;
+    } else if (option && option.type === 'options') {
+      // Count each item in the options group
+      count += option.value.length;
     } else {
       count++;
     }
@@ -1050,6 +1119,7 @@ async displayMenu(menuGeneratorOrObject, configuration = {
             }
           }
           
+          // Return the selected item for resolution
           resolve(selected?.name || selected);
         } catch (error) {
           console.error('Error in menu action:', error);
@@ -1406,20 +1476,37 @@ async displayMenu(menuGeneratorOrObject, configuration = {
   }
 
   // Menu Utilities
-
-  /**
-   * Normalizes menu options to a consistent format
-   * @private
-   * @param {Array<string|object|Array<string|object>>} options - Menu options
-   * @returns {Array<Array<object>>} Normalized options in 2D array format
-   */
-  normalizeOptions(options) {
-    return options.map(option => {
-      if (Array.isArray(option)) return option.map(item => typeof item === 'string' ? { name: item } : item);
-      if (option?.type === 'options') return option.value.map(item => typeof item === 'string' ? { name: item } : item);
-      return [typeof option === 'string' ? { name: option } : option];
-    });
+/**
+ * Normalizes menu options to a consistent format, handling groups
+ * @private
+ * @param {Array<string|object|Array<string|object>>} options - Menu options
+ * @returns {Array<Array<object>>} Normalized options in 2D array format
+ */
+normalizeOptions(options) {
+  const result = [];
+  
+  for (const option of options) {
+    if (Array.isArray(option)) {
+      // Handle array of options (already flattened)
+      const line = option.map(item => 
+        typeof item === 'string' ? { name: item } : item
+      );
+      result.push(line);
+    } else if (option?.type === 'options') {
+      // Handle options group - flatten it into the current line
+      const line = option.value.map(item => 
+        typeof item === 'string' ? { name: item } : item
+      );
+      result.push(line);
+    } else {
+      // Single option
+      const item = typeof option === 'string' ? { name: option } : option;
+      result.push([item]);
+    }
   }
+  
+  return result;
+}
 
   /**
    * Converts linear index to 2D coordinates
@@ -1472,36 +1559,44 @@ async displayMenu(menuGeneratorOrObject, configuration = {
     });
   }
   
-  /**
-   * Gets safe option data for event emission
-   * @private
-   * @param {string|object} option - Menu option
-   * @returns {object|null} Safe option data without functions
-   */
-  getOptionDataForEvent(option) {
-    if (!option) return null;
-    
-    if (typeof option === 'string') {
-      return { name: option };
-    }
-    
-    // Return a safe object without functions for event emission
-    const eventData = {
-      name: option.name,
-      type: option.type,
-      value: option.value
+ /**
+ * Gets safe option data for event emission
+ * @private
+ * @param {string|object} option - Menu option
+ * @returns {object|null} Safe option data without functions
+ */
+getOptionDataForEvent(option) {
+  if (!option) return null;
+  
+  // Handle options group
+  if (option.type === 'options') {
+    return {
+      type: 'options',
+      value: option.value.map(item => this.getOptionDataForEvent(item))
     };
-    
-    // Include custom data if present
-    if (option.eventData) {
-      eventData.eventData = option.eventData;
-    }
-    if (option.metadata) {
-      eventData.metadata = option.metadata;
-    }
-    
-    return eventData;
   }
+  
+  if (typeof option === 'string') {
+    return { name: option };
+  }
+  
+  // Return a safe object without functions for event emission
+  const eventData = {
+    name: option.name,
+    type: option.type,
+    value: option.value
+  };
+  
+  // Include custom data if present
+  if (option.eventData) {
+    eventData.eventData = option.eventData;
+  }
+  if (option.metadata) {
+    eventData.metadata = option.metadata;
+  }
+  
+  return eventData;
+}
 
   // Mouse Support (Enhanced with Wheel)
 
@@ -2116,6 +2211,193 @@ class SyAPP_Func {
         await new Promise(resolve => setTimeout(resolve, ms));
       }
 
+      this.Pagination = {
+        Button: (id, name = '', data = [], config = {
+          actual_page: 1,
+          items_per_page: 5,
+          button: {
+            text: [{ type: 'text', value: 'text1' }, { type: 'key', value: 'ID' }],
+            path: { type: 'text', value: 'path1' },
+            props: [{ props_key: 'id', type: 'text', value: 'ID' }]
+          },
+          template_config: true
+        }) => {
+          if (data.length) {
+            // Initialize return object
+            let obj_return = {
+              actual_page: config.actual_page || 1,
+              total_pages: undefined
+            }
+      
+            // Paginate the data
+            let paginated_data = BuildPagination(data, config.items_per_page || 5)
+      
+            // Initialize storage for this pagination
+            if (!this.Storages.Has(id, name)) {
+              this.Storages.Set(id, name, {
+                actual_page: config.actual_page || 1,
+                total_pages: paginated_data.length
+              })
+            }
+      
+            // Get stored pagination state
+            let storaged = this.Storages.Get(id, name)
+            let actual_page = storaged.actual_page
+      
+            // Handle page navigation via props
+            const currentProps = this.Builds.get(id).Session.ActualProps
+            
+            // Check for next page navigation
+            if (currentProps.pagination_next === name) {
+              if (actual_page < storaged.total_pages) {
+                actual_page++
+              }
+              // Clear the prop after processing
+              delete this.Builds.get(id).Session.ActualProps.pagination_next
+            }
+            
+            // Check for previous page navigation
+            if (currentProps.pagination_prev === name) {
+              if (actual_page > 1) {
+                actual_page--
+              }
+              // Clear the prop after processing
+              delete this.Builds.get(id).Session.ActualProps.pagination_prev
+            }
+      
+            // Update storage with new page
+            storaged.actual_page = actual_page
+            this.Storages.Set(id, name, storaged)
+      
+            // Display page info
+            this.Text(id, `Page ${actual_page} of ${storaged.total_pages}`)
+      
+            // Get current page items
+            const currentPageItems = paginated_data[actual_page - 1]?.list || []
+      
+            // Display items as buttons
+            if (config.button && !config.template_config) {
+              // Custom button configuration
+              currentPageItems.forEach(item => {
+                let buttonText = ''
+                let buttonPath = this.Name // Default to current function
+                let buttonProps = {}
+      
+                // Build button text
+                if (config.button.text) {
+                  config.button.text.forEach(textConfig => {
+                    switch (textConfig.type) {
+                      case 'text':
+                        buttonText += textConfig.value
+                        break
+                      case 'key':
+                        if (typeof item === 'object' && item[textConfig.value]) {
+                          buttonText += item[textConfig.value]
+                        }
+                        break
+                    }
+                  })
+                }
+      
+                // Build button path
+                if (config.button.path) {
+                  switch (config.button.path.type) {
+                    case 'text':
+                      buttonPath = config.button.path.value
+                      break
+                    case 'key':
+                      if (typeof item === 'object' && item[config.button.path.value]) {
+                        buttonPath = item[config.button.path.value]
+                      }
+                      break
+                  }
+                }
+      
+                // Build button props
+                if (config.button.props) {
+                  config.button.props.forEach(propConfig => {
+                    switch (propConfig.type) {
+                      case 'text':
+                        buttonProps[propConfig.props_key] = propConfig.value
+                        break
+                      case 'key':
+                        if (typeof item === 'object' && item[propConfig.value]) {
+                          buttonProps[propConfig.props_key] = item[propConfig.value]
+                        }
+                        break
+                    }
+                  })
+                }
+      
+                // Create button
+                this.Button(id, {
+                  name: buttonText || JSON.stringify(item),
+                  path: buttonPath,
+                  props: buttonProps
+                })
+              })
+            } else {
+              // Default template configuration
+              currentPageItems.forEach(item => {
+                let buttonName
+                let buttonProps = {}
+                
+                if (typeof item === 'object') {
+                  // Use first key-value pair for display
+                  const firstKey = Object.keys(item)[0]
+                  buttonName = `${firstKey}: ${item[firstKey]}`
+                  
+                  // Pass the entire object as props
+                  buttonProps = { ...item }
+                } else {
+                  buttonName = item.toString()
+                  buttonProps = { value: item }
+                }
+      
+                this.Button(id, {
+                  name: buttonName,
+                  path: this.Name, // Stay in current function by default
+                  props: buttonProps
+                })
+              })
+            }
+      
+            // Add spacing between items and navigation
+            this.Button(id, { name: ' ' })
+      
+            // Add navigation buttons
+            if (actual_page > 1) {
+              this.SideButton(id, {
+                name: '<- Prev',
+                props: { pagination_prev: name }
+              })
+            }
+      
+            if (actual_page < storaged.total_pages) {
+              this.SideButton(id, {
+                name: 'Next ->',
+                props: { pagination_next: name }
+              })
+            }
+      
+            // Return pagination info
+            return {
+              actual_page: actual_page,
+              total_pages: storaged.total_pages
+            }
+      
+          } else {
+            if (this.Log) {
+              console.log(`This.Pagination.Button() Error - Empty Data Array | BuildID: ${id}`)
+            }
+            return {
+              actual_page: 0,
+              total_pages: 0
+            }
+          }
+        }
+      }
+      
       this.DropDown = async (id, name, code = async () => {}, config = {
         up_buttontext: 'Show More',
         down_buttontext: 'Hide',

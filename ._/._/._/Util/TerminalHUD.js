@@ -292,8 +292,8 @@ class TerminalHUD extends EventEmitter {
     });
   }
 
-  /**
- * Counts total options in a menu structure
+/**
+ * Counts total options in a menu structure, properly handling groups
  * @private
  * @param {Array<string|object|Array<string|object>>} options - Menu options
  * @returns {number} Total number of options
@@ -305,6 +305,9 @@ countMenuOptions(options) {
   for (const option of options) {
     if (Array.isArray(option)) {
       count += option.length;
+    } else if (option && option.type === 'options') {
+      // Count each item in the options group
+      count += option.value.length;
     } else {
       count++;
     }
@@ -588,6 +591,7 @@ async displayMenu(menuGeneratorOrObject, configuration = {
             }
           }
           
+          // Return the selected item for resolution
           resolve(selected?.name || selected);
         } catch (error) {
           console.error('Error in menu action:', error);
@@ -944,20 +948,37 @@ async displayMenu(menuGeneratorOrObject, configuration = {
   }
 
   // Menu Utilities
-
-  /**
-   * Normalizes menu options to a consistent format
-   * @private
-   * @param {Array<string|object|Array<string|object>>} options - Menu options
-   * @returns {Array<Array<object>>} Normalized options in 2D array format
-   */
-  normalizeOptions(options) {
-    return options.map(option => {
-      if (Array.isArray(option)) return option.map(item => typeof item === 'string' ? { name: item } : item);
-      if (option?.type === 'options') return option.value.map(item => typeof item === 'string' ? { name: item } : item);
-      return [typeof option === 'string' ? { name: option } : option];
-    });
+/**
+ * Normalizes menu options to a consistent format, handling groups
+ * @private
+ * @param {Array<string|object|Array<string|object>>} options - Menu options
+ * @returns {Array<Array<object>>} Normalized options in 2D array format
+ */
+normalizeOptions(options) {
+  const result = [];
+  
+  for (const option of options) {
+    if (Array.isArray(option)) {
+      // Handle array of options (already flattened)
+      const line = option.map(item => 
+        typeof item === 'string' ? { name: item } : item
+      );
+      result.push(line);
+    } else if (option?.type === 'options') {
+      // Handle options group - flatten it into the current line
+      const line = option.value.map(item => 
+        typeof item === 'string' ? { name: item } : item
+      );
+      result.push(line);
+    } else {
+      // Single option
+      const item = typeof option === 'string' ? { name: option } : option;
+      result.push([item]);
+    }
   }
+  
+  return result;
+}
 
   /**
    * Converts linear index to 2D coordinates
@@ -1010,36 +1031,44 @@ async displayMenu(menuGeneratorOrObject, configuration = {
     });
   }
   
-  /**
-   * Gets safe option data for event emission
-   * @private
-   * @param {string|object} option - Menu option
-   * @returns {object|null} Safe option data without functions
-   */
-  getOptionDataForEvent(option) {
-    if (!option) return null;
-    
-    if (typeof option === 'string') {
-      return { name: option };
-    }
-    
-    // Return a safe object without functions for event emission
-    const eventData = {
-      name: option.name,
-      type: option.type,
-      value: option.value
+ /**
+ * Gets safe option data for event emission
+ * @private
+ * @param {string|object} option - Menu option
+ * @returns {object|null} Safe option data without functions
+ */
+getOptionDataForEvent(option) {
+  if (!option) return null;
+  
+  // Handle options group
+  if (option.type === 'options') {
+    return {
+      type: 'options',
+      value: option.value.map(item => this.getOptionDataForEvent(item))
     };
-    
-    // Include custom data if present
-    if (option.eventData) {
-      eventData.eventData = option.eventData;
-    }
-    if (option.metadata) {
-      eventData.metadata = option.metadata;
-    }
-    
-    return eventData;
   }
+  
+  if (typeof option === 'string') {
+    return { name: option };
+  }
+  
+  // Return a safe object without functions for event emission
+  const eventData = {
+    name: option.name,
+    type: option.type,
+    value: option.value
+  };
+  
+  // Include custom data if present
+  if (option.eventData) {
+    eventData.eventData = option.eventData;
+  }
+  if (option.metadata) {
+    eventData.metadata = option.metadata;
+  }
+  
+  return eventData;
+}
 
   // Mouse Support (Enhanced with Wheel)
 
