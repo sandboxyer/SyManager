@@ -325,8 +325,10 @@ countMenuOptions(options) {
  * @param {string} [configuration.alert] - Alert message to display
  * @param {string} [configuration.alertEmoji='⚠️'] - Emoji for alert message
  * @param {number} [configuration.initialSelectedIndex=0] - Initial selected index
- * @param {number} [configuration.selectedIncrement=0] - Increment to apply to selected index
+ * @param {number} [configuration.selectedIncrement=0] - Increment to apply to selected index (deprecated, use jumpToIndex instead)
  * @param {boolean} [configuration.remember=false] - Whether to remember the previous selection index if possible
+ * @param {number} [configuration.jumpToIndex=0] - Jump forward/backward this many positions from the base index
+ * @param {boolean} [configuration.jumpFromLast=false] - If true, jump from the last index when jumpToIndex is negative
  * @returns {Promise<string|any>} The selected option
  * 
  * @emits TerminalHUD#menu:display
@@ -342,7 +344,9 @@ async displayMenu(menuGeneratorOrObject, configuration = {
   alertEmoji: '⚠️',
   initialSelectedIndex: 0,
   selectedIncrement: 0,
-  remember: false
+  remember: false,
+  jumpToIndex: 0,
+  jumpFromLast: false
 }) {
   if (configuration.clearScreen) console.clear();
   
@@ -377,31 +381,69 @@ async displayMenu(menuGeneratorOrObject, configuration = {
       ? await menu.title 
       : menu.title || '');
   
-  // Determine initial index based on configuration and previous state
-  let initialIndex = configuration.initialSelectedIndex || 0;
+  // Get total number of options
+  const totalOptions = this.countMenuOptions(menu.options);
   
-  // Apply remember logic: if remember is true, try to use last selected index
+  // Determine base index
+  let baseIndex;
+  
   if (configuration.remember && this.lastSelectedIndex !== undefined) {
-    // Check if the remembered index is valid for current menu
-    const totalOptions = this.countMenuOptions(menu.options);
-    if (this.lastSelectedIndex >= 0 && this.lastSelectedIndex < totalOptions) {
-      initialIndex = this.lastSelectedIndex;
+    // Use remembered index as base if valid
+    baseIndex = (this.lastSelectedIndex >= 0 && this.lastSelectedIndex < totalOptions) 
+      ? this.lastSelectedIndex 
+      : (configuration.initialSelectedIndex || 0);
+  } else {
+    // Use initialSelectedIndex as base
+    baseIndex = configuration.initialSelectedIndex || 0;
+  }
+  
+  // Apply selectedIncrement for backward compatibility
+  if (configuration.selectedIncrement) {
+    configuration.jumpToIndex = (configuration.jumpToIndex || 0) + configuration.selectedIncrement;
+  }
+  
+  // Calculate final index based on jump configuration
+  let finalIndex = baseIndex;
+  
+  if (configuration.jumpToIndex) {
+    if (configuration.jumpToIndex > 0) {
+      // Positive jump: always jump forward from base index
+      finalIndex = Math.min(baseIndex + configuration.jumpToIndex, totalOptions - 1);
+    } else if (configuration.jumpToIndex < 0) {
+      if (configuration.jumpFromLast) {
+        // Jump backward from the last index
+        finalIndex = Math.max(0, totalOptions - 1 + configuration.jumpToIndex);
+      } else {
+        // Jump backward from base index
+        finalIndex = Math.max(0, baseIndex + configuration.jumpToIndex);
+      }
     }
   }
   
-  // Apply any increment configuration
-  if (configuration.selectedIncrement) {
-    initialIndex = Math.max(0, initialIndex + configuration.selectedIncrement);
-  }
+  // Ensure finalIndex is within bounds
+  finalIndex = Math.max(0, Math.min(finalIndex, totalOptions - 1));
   
   // Store reference to menu generator for function case
   if (typeof menuGeneratorOrObject === 'function') {
     this.lastMenuGenerator = menuGeneratorOrObject;
   }
   
+  // Emit menu display event with jump information
+  this.emitEvent(this.eventTypes.MENU_DISPLAY, {
+    question: menuTitle,
+    options: this.sanitizeOptionsForEvent(menu.options),
+    configuration: {
+      ...configuration,
+      baseIndex,
+      finalIndex,
+      totalOptions
+    },
+    menuType: this.numberedMenus ? 'numbered' : 'arrow'
+  });
+  
   return this.numberedMenus
-    ? this.displayMenuFromOptions(menuTitle, menu.options, configuration)
-    : this.displayMenuWithArrows(menuTitle, menu.options, configuration, initialIndex);
+    ? this.displayMenuFromOptions(menuTitle, menu.options, { ...configuration, initialSelectedIndex: finalIndex })
+    : this.displayMenuWithArrows(menuTitle, menu.options, configuration, finalIndex);
 }
 
   /**
