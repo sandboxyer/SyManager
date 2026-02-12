@@ -28,8 +28,10 @@ class Sy extends SyAPP.Func() {
                     createInstance()
                 }
                 
-                instances.forEach(e => {
-                    this.Button(uid,{name : e.MainFunc.Name})
+                instances.forEach(async (e,k) => {
+                   await this.DropDown(uid,k.toString(),async () => {
+                        this.Button(uid,'test')
+                    },{up_buttontext : `${k.toString().substring(k.toString().length-5,k.toString())} | ${e.MainFunc.Name}`, down_buttontext : `${k.toString().substring(k.toString().length-5,k.toString())} | ${e.MainFunc.Name}`})
                 })
             
             

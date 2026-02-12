@@ -3230,6 +3230,9 @@ class SyAPP_Func {
 
       this.Button = (id, config = {name: undefined, path: this.Name, props: {}, action: () => {},jumpTo : false ,resetSelection: false, buttons: false}) => {
         if (this.Builds.has(id)) {
+          if (typeof config === 'string') {
+            config = { name: config };
+          }
           if (!config.path) { config.path = this.Name }
           
           let button_obj = {
