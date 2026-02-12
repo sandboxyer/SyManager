@@ -4,6 +4,18 @@ import SyDB from './._/SyDB.js'
 import SyPM from './._/SyPM.js'
 import SyAPP from './._/SyAPP.js'
 
+let instances = new Map([[1,new SyAPP({background : true})]])
+
+instances.delete(1)
+
+function createInstance(config = {}) {
+    const id = Date.now() + Math.random();
+    instances.set(id, new SyAPP({ background: true, ...config }));
+    return id;
+  }
+
+
+
 
 class Sy extends SyAPP.Func() {
     constructor(){
@@ -11,19 +23,17 @@ class Sy extends SyAPP.Func() {
             'sy',
             async (props) => {
                 let uid = props.session.UniqueID
+
+                if(props.new_app){
+                    createInstance()
+                }
                 
-                this.Button(uid,{name : 'teste',jumpTo:1})
-                this.Button(uid,{name : 'test2'})
-
-
-                await this.DropDown(uid,'drop-new-func',() => {
-                    this.Buttons(uid,[{name : 'teste1'},{name : 'teste2'}])
-                },{
-                    up_buttontext : 'New',
-                    down_buttontext : 'New',
-                    up_emoji : '＋',
-                    down_emoji : '',
+                instances.forEach(e => {
+                    this.Button(uid,{name : e.MainFunc.Name})
                 })
+            
+            
+               this.Button(uid,{name : this.TextColor.orange('＋ New'),props : {new_app : true}})
                 this.Button(uid,{name:'⚙️  Config'})
 
 

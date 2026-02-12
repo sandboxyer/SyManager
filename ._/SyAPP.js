@@ -3479,98 +3479,362 @@ class TemplateFunc extends SyAPP_Func {
 
 
 class SyAPP {
-  constructor(config = {mainfunc : TemplateFunc, userid_only : false}){
-      this.HUD = new TerminalHUD()
-      
-      this.MainFunc = {Func : config.mainfunc || TemplateFunc,Name : undefined}
-      this.MainFunc.Name = new this.MainFunc.Func().Name
-      
-      /** @type {Map<string, SyAPP_Func>} */
-      this.Funcs = new Map()
-      
-      this.MainSessionID = `${getMachineID()}-P${process.pid}`
+  constructor(config = { background: false, mainfunc: TemplateFunc, userid_only: false }) {
+    // Store configuration
+    this.config = config;
+    
+    // Only create HUD if not in background mode
+    if (!config.background) {
+      this.HUD = new TerminalHUD();
+    }
+    
+    this.Status = 'Starting';
+    this.Online = false
+    
+    this.MainFunc = { Func: config.mainfunc || TemplateFunc, Name: undefined };
+    this.MainFunc.Name = new this.MainFunc.Func().Name;
+    
+    /** @type {Map<string, SyAPP_Func>} */
+    this.Funcs = new Map();
+    
+    this.MainSessionID = `${getMachineID()}-P${process.pid}`;
+    
+    /** @type {Map<string, Session>} */
+    this.Sessions = new Map([[this.MainSessionID, new Session({
+      machine_id: getMachineID(),
+      process_id: process.pid
+    })]]);
 
-      /** @type {Map<string, Session>} */
-      this.Sessions = new Map([[this.MainSessionID, new Session({
-          machine_id: getMachineID(),
-          process_id: process.pid
-      })]])
-
+    if(config.background){
+      this.Sessions.delete(this.MainSessionID)
+    }
+    
+    // Store the last menu selection for programmatic access
+    this.lastSelection = null;
+    
+    // Store pending operations queue for background mode
+    this.pendingOperations = [];
+    
+    // Event listeners for programmatic HUD activation
+    this.hudActivationCallbacks = [];
+    
     this.ProcessFuncs = (FuncClass) => {
-          const tempInstance = new FuncClass()
-          const funcName = tempInstance.Name
-          
-          if (this.Funcs.has(funcName)) {
-              return
-          }
-          
-          const instance = new FuncClass()
-          this.Funcs.set(funcName, instance)
-          
-          instance.Linked.forEach(linkedFunc => {
-              const linkedTemp = new linkedFunc()
-              if (!this.Funcs.has(linkedTemp.Name)) {
-                  this.ProcessFuncs(linkedFunc)
-              }
-          })
+      const tempInstance = new FuncClass();
+      const funcName = tempInstance.Name;
+      
+      if (this.Funcs.has(funcName)) {
+        return;
       }
-
-      this.ProcessFuncs(this.MainFunc.Func)
-      this.ProcessFuncs(NotFounded)
-      this.ProcessFuncs(Error)
-
-      this.LoadScreen = async (funcname = this.MainFunc.Name,config = {jumpTo : false,resetSelection : false,props : {}}) => { 
-        if(!config.props){config.props = {}}
-
-        if(!this.Funcs.has(funcname)){
-          config.props.notfounded_func = funcname
-          funcname = 'notfounded'
+      
+      const instance = new FuncClass();
+      this.Funcs.set(funcName, instance);
+      
+      instance.Linked.forEach(linkedFunc => {
+        const linkedTemp = new linkedFunc();
+        if (!this.Funcs.has(linkedTemp.Name)) {
+          this.ProcessFuncs(linkedFunc);
         }
-          config.props.mainfunc = this.MainFunc.Name
-
-          this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
-          this.Sessions.get(this.MainSessionID).ActualPath = funcname
-          this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps
-          config.props.session = this.Sessions.get(this.MainSessionID)
-          this.Sessions.get(this.MainSessionID).ActualProps = config.props
-          
-          await this.Funcs.get(funcname).Build(config.props)
-          .then(async return_obj => {
-            this.HUD.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false,jumpToIndex : (!config.jumpTo) ? undefined : config.jumpTo})
-            .catch(e => {
-              this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-            })
-            if(return_obj.wait_input){
-              let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ')
-              .catch(e => {
-                this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-              })
-              this.LoadScreen(return_obj.input_obj.path,{props : {inputValue : response,...return_obj.input_obj.props}})
-            }
-          })
-          .catch(e => {
-            this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-          })
-          
+      });
+    };
+    
+    this.ProcessFuncs(this.MainFunc.Func);
+    this.ProcessFuncs(NotFounded);
+    this.ProcessFuncs(Error);
+    
+    /**
+     * Internal method to process a screen load
+     * @private
+     */
+    this.processScreenLoad = async (funcname = this.MainFunc.Name, config = { jumpTo: false, resetSelection: false, props: {} }) => {
+      if (!config.props) { config.props = {}; }
+      
+      if (!this.Funcs.has(funcname)) {
+        config.props.notfounded_func = funcname;
+        funcname = 'notfounded';
       }
-
-      this.HUD.on(this.HUD.eventTypes.MENU_SELECTION,(e) => {
-        this.LoadScreen(e.metadata.path,{jumpTo :  e.metadata.jumpTo || false,resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
-        .catch(er => {
-          this.LoadScreen('error',{props : {error_message : er,error_func : e.metadata.path,mainfunc : this.MainFunc.Name}})
-        })
-    })
-
-      this.LoadScreen()
+      config.props.mainfunc = this.MainFunc.Name;
+      
+      this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath;
+      this.Sessions.get(this.MainSessionID).ActualPath = funcname;
+      this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps;
+      config.props.session = this.Sessions.get(this.MainSessionID);
+      this.Sessions.get(this.MainSessionID).ActualProps = config.props;
+      
+      try {
+        const return_obj = await this.Funcs.get(funcname).Build(config.props);
+        
+        // Store the return object for programmatic access
+        this.lastReturnObject = return_obj;
+        
+        // If not in background mode, display the menu
+        if (!this.config.background) {
+          await this.HUD.displayMenu(return_obj.hud_obj, {
+            remember: (!config.resetSelection) ? true : false,
+            jumpToIndex: (!config.jumpTo) ? undefined : config.jumpTo
+          });
+          
+          if (return_obj.wait_input) {
+            let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ');
+            this.processScreenLoad(return_obj.input_obj.path, {
+              props: { inputValue: response, ...return_obj.input_obj.props }
+            });
+          }
+        } else {
+          // In background mode, just store the result and notify callbacks
+          this.lastSelection = {
+            funcname,
+            config,
+            return_obj,
+            timestamp: Date.now()
+          };
+          
+          // Process any pending operations
+          this.processPendingOperations();
+          
+          // Notify any waiting callbacks
+          this.notifyHudActivationCallbacks();
+        }
+      } catch (e) {
+        this.processScreenLoad('error', {
+          props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name }
+        });
+      }
+    };
+    
+    /**
+     * Notifies all registered HUD activation callbacks
+     * @private
+     */
+    this.notifyHudActivationCallbacks = () => {
+      if (this.lastReturnObject && !this.config.background) {
+        this.hudActivationCallbacks.forEach(callback => {
+          try {
+            callback(this.lastReturnObject);
+          } catch (e) {
+            console.error('Error in HUD activation callback:', e);
+          }
+        });
+      }
+    };
+    
+    /**
+     * Processes any pending operations queued while in background mode
+     * @private
+     */
+    this.processPendingOperations = () => {
+      if (!this.config.background) {
+        while (this.pendingOperations.length > 0) {
+          const operation = this.pendingOperations.shift();
+          operation();
+        }
+      }
+    };
+    
+    /**
+     * Activates the TerminalHUD interface
+     * Call this method to switch from background mode to interactive mode
+     * @param {Object} options - Activation options
+     * @param {boolean} [options.preserveState=true] - Whether to preserve the current app state
+     * @param {Function} [options.onActivate] - Callback function called after activation
+     * @returns {Promise<void>}
+     * 
+     * @example
+     * // Activate HUD with current state
+     * await app.activateHUD();
+     * 
+     * // Activate HUD with callback
+     * await app.activateHUD({
+     *   onActivate: () => console.log('HUD activated!')
+     * });
+     */
+    this.activateHUD = async (options = { preserveState: true, onActivate: null }) => {
+      // Only proceed if in background mode
+      if (!this.config.background) {
+        console.log('App is already in interactive mode');
+        return;
+      }
+      
+      // Change configuration
+      this.config.background = false;
+      
+      // Create HUD instance
+      this.HUD = new TerminalHUD();
+      
+      // Set up event listeners
+      this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
+        this.processScreenLoad(e.metadata.path, {
+          jumpTo: e.metadata.jumpTo || false,
+          resetSelection: e.metadata.resetSelection || false,
+          props: e.metadata.props
+        }).catch(er => {
+          this.processScreenLoad('error', {
+            props: { error_message: er, error_func: e.metadata.path, mainfunc: this.MainFunc.Name }
+          });
+        });
+      });
+      
+      // Process pending operations
+      this.processPendingOperations();
+      
+      // Load current screen if we have state and preserveState is true
+      if (options.preserveState && this.lastReturnObject) {
+        const currentPath = this.Sessions.get(this.MainSessionID).ActualPath || this.MainFunc.Name;
+        const currentProps = this.Sessions.get(this.MainSessionID).ActualProps || {};
+        
+        await this.processScreenLoad(currentPath, {
+          props: currentProps,
+          remember: true
+        });
+      } else {
+        // Load main screen
+        await this.processScreenLoad(this.MainFunc.Name, {});
+      }
+      
+      // Execute callback if provided
+      if (options.onActivate && typeof options.onActivate === 'function') {
+        options.onActivate();
+      }
+      
+      // Notify activation callbacks
+      this.notifyHudActivationCallbacks();
+    };
+    
+    /**
+     * Checks if the app is currently in interactive mode
+     * @returns {boolean} True if HUD is active and app is interactive
+     */
+    this.isInteractive = () => {
+      return !this.config.background && this.HUD !== undefined;
+    };
+    
+    /**
+     * Gets the current app state without activating HUD
+     * @returns {Object} Current app state including last menu and selections
+     */
+    this.getState = () => {
+      return {
+        currentPath: this.Sessions.get(this.MainSessionID)?.ActualPath,
+        currentProps: this.Sessions.get(this.MainSessionID)?.ActualProps,
+        lastSelection: this.lastSelection,
+        lastReturnObject: this.lastReturnObject,
+        isBackground: this.config.background,
+        sessions: Array.from(this.Sessions.keys()),
+        funcs: Array.from(this.Funcs.keys())
+      };
+    };
+    
+    /**
+     * Registers a callback to be called when HUD is activated
+     * @param {Function} callback - Function to call when HUD is activated
+     * @returns {Function} Function to remove the callback
+     */
+    this.onHudActivate = (callback) => {
+      if (typeof callback !== 'function') {
+        throw new Error('Callback must be a function');
+      }
+      
+      this.hudActivationCallbacks.push(callback);
+      
+      // If HUD is already active, call immediately
+      if (this.isInteractive()) {
+        try {
+          callback(this.lastReturnObject);
+        } catch (e) {
+          console.error('Error in HUD activation callback:', e);
+        }
+      }
+      
+      // Return function to remove callback
+      return () => {
+        const index = this.hudActivationCallbacks.indexOf(callback);
+        if (index !== -1) {
+          this.hudActivationCallbacks.splice(index, 1);
+        }
+      };
+    };
+    
+    /**
+     * Queues an operation to be executed when HUD becomes active
+     * @param {Function} operation - Operation to queue
+     */
+    this.queueOperation = (operation) => {
+      if (typeof operation !== 'function') {
+        throw new Error('Operation must be a function');
+      }
+      
+      if (this.isInteractive()) {
+        // Execute immediately if HUD is active
+        operation();
+      } else {
+        // Queue for later execution
+        this.pendingOperations.push(operation);
+      }
+    };
+    
+    /**
+     * Executes a function programmatically without user interaction
+     * @param {string} funcname - Name of the function to execute
+     * @param {Object} props - Properties to pass to the function
+     * @returns {Promise<Object>} The build result
+     */
+    this.executeFunction = async (funcname, props = {}) => {
+      if (!this.Funcs.has(funcname)) {
+        throw new Error(`Function ${funcname} not found`);
+      }
+      
+      const tempSession = new Session({
+        machine_id: getMachineID(),
+        process_id: process.pid,
+        uniqueid: `${this.MainSessionID}-${Date.now()}`
+      });
+      
+      props.session = tempSession;
+      
+      try {
+        const result = await this.Funcs.get(funcname).Build(props);
+        return result;
+      } catch (e) {
+        console.error(`Error executing function ${funcname}:`, e);
+        throw e;
+      }
+    };
+    
+    // Initialize based on configuration
+    if (!config.background) {
+      // Set up event listeners for interactive mode
+      this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
+        this.processScreenLoad(e.metadata.path, {
+          jumpTo: e.metadata.jumpTo || false,
+          resetSelection: e.metadata.resetSelection || false,
+          props: e.metadata.props
+        }).catch(er => {
+          this.processScreenLoad('error', {
+            props: { error_message: er, error_func: e.metadata.path, mainfunc: this.MainFunc.Name }
+          });
+        });
+      });
+      
+      // Load initial screen
+      this.processScreenLoad();
+    } else {
+      // In background mode, just initialize without HUD
+      this.Status = 'Background';
+      
+      // Optionally execute initial load without display
+      this.processScreenLoad().catch(e => {
+        console.error('Background initialization error:', e);
+      });
+    }
   }
-
-static Func(){return SyAPP_Func}
-
+  
+  static Func() {
+    return SyAPP_Func;
+  }
 }
 
 // If this file is run directly, execute the CLI
 if (import.meta.url === `file://${process.argv[1]}`) {
-  new SyAPP()
+    new SyAPP()
 }
 
 
