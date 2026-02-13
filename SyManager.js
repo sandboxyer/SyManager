@@ -36,7 +36,7 @@ function createInstance(config = {}) {
   // Remove name from config to avoid passing it to SyAPP constructor
   const { name, ...appConfig } = config;
   
-  instances.set(instanceName,new SyAPP({ background: true, ...appConfig }));
+  instances.set(instanceName,''); //new SyAPP({ background: true, ...appConfig })
   return instanceName;
 }
 
