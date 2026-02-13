@@ -7,6 +7,7 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
+import http from 'http'
 
 class ConfigManager {
     static configPath = path.join(process.cwd(), 'config.json');
