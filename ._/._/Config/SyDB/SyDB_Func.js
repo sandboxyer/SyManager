@@ -36,9 +36,37 @@ class SyDB_Func extends SyAPP.Func() {
                 let databases = await SyDB.listDatabases()
                 if(databases.success){
                     this.Text(uid,`Databases(${databases.databases.length})${extra_message}`)
-                    databases.databases.forEach(e => {
-                        this.Button(uid,{name : e})
-                    })
+                    
+                    // Use for...of to ensure sequential processing
+                    for(const dbName of databases.databases) {
+                        await this.DropDown(uid, `drop-${dbName}`, async() => {
+
+                            let collections = await SyDB.listCollections(dbName)
+                            .catch(e => {
+
+                            })
+                            
+                                
+
+                            await this.DropDown(uid,`drop-l2-${dbName}`,async () => {
+                                
+                                if(collections.success){
+                                    collections.collections.forEach(e => {
+                                        this.Button(uid,{name : e})
+                                    })
+                                }
+                                
+                                
+                            
+                            },{up_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,down_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,horizontal : true})
+                           // this.Button(uid,{name : '🔍 View'})
+                            this.Button(uid,{name : '✏️  Rename'})
+                            this.Button(uid,{name : '🗑️  Delete'})
+                        }, {
+                            up_buttontext: dbName,
+                            down_buttontext: dbName
+                        });
+                    }
                 }
 
 
