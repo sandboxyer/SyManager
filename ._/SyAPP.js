@@ -3217,7 +3217,7 @@ class SyAPP_Func {
           this.Button(id, {
             name: this.TextColor.gold(`${emoji} ${config.up_buttontext}`),
             props: { droprun: storageKey },
-            jumpTo : (typeof config.jumpTo == 'number' && (config.jumpTo > 0 || config.jumpTo < 0)) ? config.jumpTo : 1
+            jumpTo: config.jumpTo !== undefined ? config.jumpTo : 1  // Fixed: allow 0 as valid value
           });
         }
       

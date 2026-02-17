@@ -46,22 +46,22 @@ class SyDB_Func extends SyAPP.Func() {
 
                             })
                             
-                                
-
-                            await this.DropDown(uid,`drop-l2-${dbName}`,async () => {
+                                 await this.DropDown(uid,`drop-l2-1-${dbName}`,async () => {
                                 
                                 if(collections.success){
                                     collections.collections.forEach(e => {
                                         this.Button(uid,{name : e})
                                     })
                                 }
+
                                 
                                 
-                            
-                            },{up_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,down_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,horizontal : true})
-                           // this.Button(uid,{name : '🔍 View'})
-                            this.Button(uid,{name : '✏️  Rename'})
-                            this.Button(uid,{name : '🗑️  Delete'})
+                            },{up_buttontext : `Collections(${(collections.success) ? collections.collections.length : '0'})`,down_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,horizontal : true,jumpTo : 0,up_emoji : '🔍'})
+                          
+
+                            this.Button(uid,{name : '🗃️  Create Collection'})
+                           
+                            this.Button(uid,{name : '⚙️  Database Settings'})
                         }, {
                             up_buttontext: dbName,
                             down_buttontext: dbName
