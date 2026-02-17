@@ -2819,7 +2819,7 @@ class userBuild {
 //--------------------------- SyAPP Structure start below ----------------------------------
 
 class SyAPP_Func {
-    constructor(name,build = async (props = {session : new Session}) => {},config = {userid_only : false,log : false,linked : []}){
+    constructor(name,build = async (props = {session : new Session}) => {},config = {routes : [{name : '',stream: false,method : '',input_model : [],output_model : []}],userid_only : false,log : false,linked : []}){
         this.Name = name
         this.Linked = config.linked || []
         this.Log = config.log || false
