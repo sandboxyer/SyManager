@@ -81,20 +81,25 @@ class Sy extends SyAPP.Func() {
                 }
 
                 this.Text(uid,this.Storages.Get(uid,'minidrop_selected') || '')
+
+
+                let keys = instances.keys()
+
+                for(const app of keys) {
+                  await this.DropDown(uid,`drop${app}`,async () => {
+                    this.SideButton(uid,{name : 'Enter'})
+                    this.SideButton(uid,{name : 'Edit'})
+                  },{up_buttontext : this.TextColor.red(app),down_buttontext : this.TextColor.red(app),jumpTo : 0})
+
+                }
                 
-                instances.forEach(async (e,k) => {
-                    this.Button(uid,{name : this.TextColor.red(k),props : {new_selection : k}})
-                    if(this.Storages.Has(uid,'minidrop_selected')){
-                        if(this.Storages.Get(uid,'minidrop_selected') == k){
-                            this.SideButton(uid,{name : 'testing'})
-                            this.SideButton(uid,{name : 'testing'})
-                        }
-                    }
-               })
-            
-            
-               this.Button(uid,{name : this.TextColor.orange('＋ New'),jumpTo: 1,props : {new_app : true}})
-                this.Button(uid,{name:'⚙️  Config',path : 'config'})
+                this.Button(uid,{name : ' '})
+               this.SideButton(uid,{name : this.TextColor.orange('＋ New'),jumpTo: 1,props : {new_app : true}})
+               this.SideButton(uid,{name : this.TextColor.orange('📁 Load')})
+                this.SideButton(uid,{name : this.TextColor.orange('🌐 Connect')})
+                this.Button(uid,{name : ' '})
+                this.SideButton(uid,{name : this.TextColor.orange('      ')})
+                this.SideButton(uid,{name:'⚙️  Config',path : 'config'})
 
 
 
