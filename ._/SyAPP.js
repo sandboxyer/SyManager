@@ -3500,6 +3500,11 @@ class SyAPP {
           process_id: process.pid
       })]])
 
+      this.WaitLog = async (message,ms = 5000) => {
+        console.log(message)
+        await new Promise(resolve => setTimeout(resolve, ms));
+      }
+
     this.ProcessFuncs = (FuncClass) => {
           const tempInstance = new FuncClass()
           const funcName = tempInstance.Name
@@ -3540,6 +3545,18 @@ class SyAPP {
           
           await this.Funcs.get(funcname).Build(config.props)
           .then(async return_obj => {
+
+           //after let it more robust and with func optional config to force inverse of it check
+            if (config.props) {
+              if (config.props.session) {
+               if (config.props.session.ActualPath && config.props.session.PreviousPath) {
+                  if (config.props.session.ActualPath != config.props.session.PreviousPath) {
+                    config.resetSelection = true
+                  }
+              }
+            }
+          }
+            
             this.HUD.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false,jumpToIndex : (!config.jumpTo) ? undefined : config.jumpTo})
             .catch(e => {
               this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
