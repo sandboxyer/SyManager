@@ -1,5 +1,5 @@
 import SyAPP from '../../SyAPP.js'
-import SyDB_Func from './SyDB/SyDB_Func.js'
+import SyDB_Config from './SyDB_Config/SyDB_Config.js'
 
 class Config extends SyAPP.Func() {
     constructor(){
@@ -14,7 +14,7 @@ class Config extends SyAPP.Func() {
                 this.Button(uid,{name : '← Return',path : 'sy'})
 
             },
-            {linked : [SyDB_Func]}
+            {linked : [SyDB_Config]}
         )
     }
 }

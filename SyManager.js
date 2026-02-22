@@ -12,7 +12,7 @@ static DefaultFunc = Sy
 
 }
 
-// If this file is run directly, execute the CLI
+
 if (import.meta.url === `file://${process.argv[1]}`) {
     new SyAPP({mainfunc : SyManager.DefaultFunc})
   }

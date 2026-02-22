@@ -1,7 +1,7 @@
 import SyAPP from '../../../SyAPP.js'
 import SyDB from '../../../SyDB.js'
 
-class SyDB_Func extends SyAPP.Func() {
+class SyDB_Config extends SyAPP.Func() {
     constructor(){
         super(
             'sydb',
@@ -80,4 +80,4 @@ class SyDB_Func extends SyAPP.Func() {
     }
 }
 
-export default SyDB_Func
+export default SyDB_Config
