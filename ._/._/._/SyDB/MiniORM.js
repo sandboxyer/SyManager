@@ -1786,6 +1786,1256 @@ class SQLiteProtocol {
   }
 }
 
+// ==================== Microsoft SQL Server (TDS) Native Protocol ====================
+class MSSQLProtocol {
+  constructor(config) {
+    this.config = config;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.authenticated = false;
+    this.packetSize = 4096;
+    this.procId = 0;
+    this._events = {};
+    
+    // TDS packet types
+    this.PACKET_TYPE = {
+      SQL_BATCH: 0x01,
+      PRE_TDS7_LOGIN: 0x02,
+      RPC: 0x03,
+      TABULAR_RESULT: 0x04,
+      ATTENTION_SIGNAL: 0x06,
+      BULK_LOAD: 0x07,
+      TRANSACTION_MANAGER: 0x0E,
+      TDS7_LOGIN: 0x10,
+      SSPI: 0x11,
+      PRE_LOGIN: 0x12
+    };
+
+    // TDS status flags
+    this.PACKET_STATUS = {
+      NORMAL: 0x00,
+      END_OF_MESSAGE: 0x01,
+      IGNORE: 0x02,
+      RESET_CONNECTION: 0x08,
+      RESET_CONNECTION_SKIP_TRAN: 0x10
+    };
+
+    // Token types
+    this.TOKEN = {
+      ALTMETADATA: 0x88,
+      ALTROW: 0xD3,
+      COLMETADATA: 0x81,
+      COLINFO: 0xA5,
+      DONE: 0xFD,
+      DONEPROC: 0xFE,
+      DONEINPROC: 0xFF,
+      ENVCHANGE: 0xE3,
+      ERROR: 0xAA,
+      INFO: 0xAB,
+      LOGINACK: 0xAD,
+      NBCROW: 0xD2,
+      OFFSET: 0x78,
+      ORDER: 0xA9,
+      RETURNSTATUS: 0x79,
+      RETURNVALUE: 0xAC,
+      ROW: 0xD1,
+      SSPI: 0xED,
+      TABNAME: 0xA4
+    };
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) => {
+      const port = this.config.port || 1433;
+      const host = this.config.host || this.config.server || 'localhost';
+      
+      // Check if SSL is requested
+      if (this.config.ssl || this.config.encrypt) {
+        this.socket = tls.connect({
+          host,
+          port,
+          rejectUnauthorized: this.config.ssl?.rejectUnauthorized !== false
+        }, () => {
+          this.sendPreLogin();
+        });
+      } else {
+        this.socket = net.createConnection(port, host, () => {
+          this.sendPreLogin();
+        });
+      }
+
+      this.socket.on('data', (data) => {
+        this.handleData(data);
+      });
+
+      this.socket.on('error', reject);
+      this.socket.on('close', () => {
+        this.authenticated = false;
+      });
+
+      // Wait for login acknowledgment
+      const authTimeout = setTimeout(() => {
+        reject(new Error('Authentication timeout'));
+      }, this.config.connectionTimeout || 30000);
+
+      this.once('authenticated', () => {
+        clearTimeout(authTimeout);
+        resolve();
+      });
+    });
+  }
+
+  sendPreLogin() {
+    // Build pre-login packet
+    const options = [
+      { type: 0x00, data: Buffer.from('TDS7', 'utf8') }, // Version
+      { type: 0x01, data: Buffer.alloc(2) }, // Encryption
+      { type: 0x02, data: Buffer.alloc(2) }, // InstOpt
+      { type: 0x03, data: Buffer.alloc(2) }, // ThreadID
+      { type: 0x04, data: Buffer.alloc(1) }, // MARS
+      { type: 0xFF, data: Buffer.alloc(0) }  // Terminator
+    ];
+
+    // Calculate total length
+    let totalLength = 0;
+    options.forEach(opt => {
+      totalLength += 5 + opt.data.length; // Type(1) + Length(2) + Data
+    });
+
+    const packet = Buffer.alloc(totalLength + 1); // +1 for terminating 0xFF
+    let offset = 0;
+
+    options.forEach(opt => {
+      packet[offset] = opt.type; offset++;
+      packet.writeUInt16BE(5 + opt.data.length, offset); offset += 2;
+      
+      if (opt.type === 0x00) { // Version
+        packet.writeUInt16BE(0x0709, offset); // TDS 7.4 (SQL Server 2012+)
+        offset += 2;
+        packet.writeUInt16BE(0x0000, offset); // Sub-build
+        offset += 2;
+      } else if (opt.type === 0x01) { // Encryption
+        if (this.config.encrypt) {
+          packet[offset] = 0x02; // Required
+        } else {
+          packet[offset] = 0x00; // Not supported
+        }
+        offset++;
+      } else {
+        opt.data.copy(packet, offset);
+        offset += opt.data.length;
+      }
+    });
+
+    packet[offset] = 0xFF; // Terminator
+
+    this.sendPacket(this.PACKET_TYPE.PRE_LOGIN, packet);
+  }
+
+  sendLogin() {
+    const username = this.config.user || this.config.username || '';
+    const password = this.config.password || '';
+    const database = this.config.database || '';
+    const appName = this.config.application_name || 'Node.js ORM';
+    const serverName = this.config.host || this.config.server || 'localhost';
+    const clientName = require('os').hostname();
+    const libraryName = 'nodejs-orm';
+    const language = '';
+    const charset = '';
+
+    // Encode password (simple obfuscation)
+    const encodedPassword = Buffer.from(password, 'utf16le').swap16();
+    for (let i = 0; i < encodedPassword.length; i++) {
+      encodedPassword[i] = encodedPassword[i] ^ 0xA5;
+    }
+
+    // Build login data
+    const loginData = {
+      length: 0,
+      tdsVersion: 0x07090000, // TDS 7.4
+      packetSize: this.packetSize,
+      clientProgVer: 0x01000000,
+      clientPID: process.pid,
+      connectionID: 0,
+      optionFlags1: 0x60, // Use DB, Set Lang
+      optionFlags2: 0x00,
+      typeFlags: 0x00,
+      optionFlags3: 0x00,
+      clientTimeZone: new Date().getTimezoneOffset(),
+      clientLcid: 0x00000409 // English US
+    };
+
+    // Calculate offsets
+    let offset = 94; // Fixed header size
+    const offsets = {};
+
+    // Hostname
+    offsets.hostname = { offset, length: clientName.length * 2 };
+    offset += clientName.length * 2;
+
+    // Username
+    offsets.username = { offset, length: username.length * 2 };
+    offset += username.length * 2;
+
+    // Password
+    offsets.password = { offset, length: encodedPassword.length };
+    offset += encodedPassword.length;
+
+    // App name
+    offsets.appName = { offset, length: appName.length * 2 };
+    offset += appName.length * 2;
+
+    // Server name
+    offsets.serverName = { offset, length: serverName.length * 2 };
+    offset += serverName.length * 2;
+
+    // Library name
+    offsets.libraryName = { offset, length: libraryName.length * 2 };
+    offset += libraryName.length * 2;
+
+    // Language
+    offsets.language = { offset, length: language.length * 2 };
+    offset += language.length * 2;
+
+    // Database
+    offsets.database = { offset, length: database.length * 2 };
+    offset += database.length * 2;
+
+    // Build packet
+    const packet = Buffer.alloc(offset);
+    let pos = 0;
+
+    // Write header
+    packet.writeUInt32LE(loginData.length, pos); pos += 4;
+    packet.writeUInt32LE(loginData.tdsVersion, pos); pos += 4;
+    packet.writeUInt32LE(loginData.packetSize, pos); pos += 4;
+    packet.writeUInt32LE(loginData.clientProgVer, pos); pos += 4;
+    packet.writeUInt32LE(loginData.clientPID, pos); pos += 4;
+    packet.writeUInt32LE(loginData.connectionID, pos); pos += 4;
+    packet[pos] = loginData.optionFlags1; pos++;
+    packet[pos] = loginData.optionFlags2; pos++;
+    packet[pos] = loginData.typeFlags; pos++;
+    packet[pos] = loginData.optionFlags3; pos++;
+    packet.writeInt32LE(loginData.clientTimeZone, pos); pos += 4;
+    packet.writeUInt32LE(loginData.clientLcid, pos); pos += 4;
+
+    // Write offsets
+    packet.writeUInt16LE(offsets.hostname.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.hostname.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.username.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.username.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.password.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.password.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.appName.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.appName.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.serverName.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.serverName.length, pos); pos += 2;
+    packet.fill(0, pos, pos + 16); pos += 16; // Reserved
+    packet.writeUInt16LE(offsets.libraryName.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.libraryName.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.language.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.language.length, pos); pos += 2;
+    packet.writeUInt16LE(offsets.database.offset, pos); pos += 2;
+    packet.writeUInt16LE(offsets.database.length, pos); pos += 2;
+    packet.fill(0, pos, pos + 18); pos += 18; // Reserved
+
+    // Write string data (UTF-16LE)
+    if (clientName) {
+      packet.write(clientName, offsets.hostname.offset, clientName.length * 2, 'utf16le');
+    }
+    if (username) {
+      packet.write(username, offsets.username.offset, username.length * 2, 'utf16le');
+    }
+    if (encodedPassword.length > 0) {
+      encodedPassword.copy(packet, offsets.password.offset);
+    }
+    if (appName) {
+      packet.write(appName, offsets.appName.offset, appName.length * 2, 'utf16le');
+    }
+    if (serverName) {
+      packet.write(serverName, offsets.serverName.offset, serverName.length * 2, 'utf16le');
+    }
+    if (libraryName) {
+      packet.write(libraryName, offsets.libraryName.offset, libraryName.length * 2, 'utf16le');
+    }
+    if (database) {
+      packet.write(database, offsets.database.offset, database.length * 2, 'utf16le');
+    }
+
+    this.sendPacket(this.PACKET_TYPE.TDS7_LOGIN, packet);
+  }
+
+  handleData(data) {
+    this.buffer = Buffer.concat([this.buffer, data]);
+    
+    while (this.buffer.length >= 8) {
+      const packetType = this.buffer[0];
+      const packetStatus = this.buffer[1];
+      const packetLength = this.buffer.readUInt16BE(2);
+      const packetSpId = this.buffer.readUInt16BE(4);
+      const packetId = this.buffer[6];
+      
+      if (this.buffer.length < packetLength) break;
+
+      const packet = this.buffer.subarray(8, packetLength);
+      this.buffer = this.buffer.subarray(packetLength);
+
+      this.processPacket(packetType, packet, packetStatus);
+    }
+  }
+
+  processPacket(type, packet, status) {
+    switch (type) {
+      case this.PACKET_TYPE.PRE_LOGIN:
+        this.handlePreLoginResponse(packet);
+        break;
+      case this.PACKET_TYPE.TDS7_LOGIN:
+        this.handleLoginResponse(packet);
+        break;
+      case this.PACKET_TYPE.TABULAR_RESULT:
+        this.handleTabularResult(packet);
+        break;
+    }
+  }
+
+  handlePreLoginResponse(packet) {
+    let offset = 0;
+    
+    while (offset < packet.length) {
+      const token = packet[offset]; offset++;
+      if (token === 0xFF) break;
+      
+      const length = packet.readUInt16BE(offset); offset += 2;
+      
+      if (token === 0x01) { // Encryption response
+        const encryptionType = packet[offset];
+        if (encryptionType === 0x02) { // Required
+          // Upgrade to TLS if not already
+          if (!this.socket.encrypted) {
+            // This would require reconnecting with TLS
+          }
+        }
+      }
+      
+      offset += length - 2;
+    }
+
+    // Send login packet
+    this.sendLogin();
+  }
+
+  handleLoginResponse(packet) {
+    let offset = 0;
+    
+    while (offset < packet.length) {
+      const token = packet[offset]; offset++;
+      
+      switch (token) {
+        case this.TOKEN.LOGINACK:
+          const ackLength = packet.readUInt16BE(offset); offset += 2;
+          const interface = packet[offset]; offset++;
+          const tdsVersion = packet.readUInt32BE(offset); offset += 4;
+          const progName = packet.toString('ucs2', offset, offset + 30).replace(/\0/g, '');
+          offset += 30;
+          const progVersion = packet.readUInt32BE(offset); offset += 4;
+          break;
+          
+        case this.TOKEN.ENVCHANGE:
+          const envLength = packet.readUInt16BE(offset); offset += 2;
+          const envType = packet.readUInt16BE(offset); offset += 2;
+          
+          if (envType === 0x01) { // Database change
+            const newDbLength = packet[offset]; offset++;
+            const newDb = packet.toString('ucs2', offset, offset + newDbLength * 2);
+            offset += newDbLength * 2;
+            const oldDbLength = packet[offset]; offset++;
+            offset += oldDbLength * 2;
+          }
+          break;
+          
+        case this.TOKEN.DONE:
+          const doneLength = packet.readUInt16BE(offset); offset += 2;
+          const doneStatus = packet.readUInt16BE(offset); offset += 2;
+          const doneCmd = packet.readUInt16BE(offset); offset += 2;
+          const doneRows = packet.readUInt32BE(offset); offset += 4;
+          
+          if (doneStatus & 0x01) { // Final done
+            this.authenticated = true;
+            this.emit('authenticated');
+          }
+          break;
+          
+        case this.TOKEN.ERROR:
+          const errorLength = packet.readUInt16BE(offset); offset += 2;
+          const errorNumber = packet.readUInt32BE(offset); offset += 4;
+          const errorState = packet[offset]; offset++;
+          const errorClass = packet[offset]; offset++;
+          const errorMsgLength = packet.readUInt16BE(offset); offset += 2;
+          const errorMsg = packet.toString('ucs2', offset, offset + errorMsgLength);
+          offset += errorMsgLength;
+          const serverNameLength = packet[offset]; offset++;
+          offset += serverNameLength * 2;
+          const procNameLength = packet[offset]; offset++;
+          offset += procNameLength * 2;
+          const lineNumber = packet.readUInt32BE(offset); offset += 4;
+          
+          const error = new Error(errorMsg);
+          error.number = errorNumber;
+          error.state = errorState;
+          error.class = errorClass;
+          error.line = lineNumber;
+          this.emit('error', error);
+          break;
+      }
+    }
+  }
+
+  handleTabularResult(packet) {
+    let offset = 0;
+    const results = [];
+    let columns = [];
+    let currentRow = null;
+    
+    while (offset < packet.length) {
+      const token = packet[offset]; offset++;
+      
+      switch (token) {
+        case this.TOKEN.COLMETADATA:
+          const count = packet.readUInt16BE(offset); offset += 2;
+          columns = [];
+          
+          for (let i = 0; i < count; i++) {
+            const userType = packet.readUInt32BE(offset); offset += 4;
+            const flags = packet.readUInt16BE(offset); offset += 2;
+            const typeInfo = packet[offset]; offset++;
+            
+            let column = {
+              name: '',
+              type: typeInfo,
+              flags,
+              userType
+            };
+            
+            if (typeInfo === 0xE7 || typeInfo === 0xEF) { // varchar, nvarchar, etc.
+              const maxLength = packet.readUInt16BE(offset); offset += 2;
+              const collation = packet.readUInt32BE(offset); offset += 4;
+            } else if (typeInfo === 0x26 || typeInfo === 0x24) { // datetime, etc.
+              const scale = packet[offset]; offset++;
+            }
+            
+            // Column name
+            const nameLength = packet.readUInt8(offset); offset++;
+            column.name = packet.toString('ucs2', offset, offset + nameLength * 2);
+            offset += nameLength * 2;
+            
+            columns.push(column);
+          }
+          break;
+          
+        case this.TOKEN.ROW:
+          currentRow = {};
+          
+          columns.forEach(column => {
+            const length = packet.readUInt32BE(offset); offset += 4;
+            
+            if (length === 0xFFFFFFFF) {
+              currentRow[column.name] = null;
+            } else {
+              let value;
+              
+              // Parse based on column type
+              if (column.type === 0x26 || column.type === 0x24) { // datetime
+                const days = packet.readUInt32BE(offset); offset += 4;
+                const seconds = packet.readUInt32BE(offset); offset += 4;
+                value = this.parseTDSDateTime(days, seconds);
+              } else if (column.type === 0x38) { // int
+                value = packet.readInt32LE(offset); offset += 4;
+              } else if (column.type === 0x6A) { // bigint
+                value = Number(packet.readBigInt64LE(offset)); offset += 8;
+              } else if (column.type === 0x3C) { // money
+                value = packet.readDoubleLE(offset); offset += 8;
+              } else if (column.type === 0x3E || column.type === 0x7C) { // decimal/numeric
+                const sign = packet[offset]; offset++;
+                const valueBytes = packet.subarray(offset, offset + length - 1);
+                offset += length - 1;
+                value = this.parseTDSPackedDecimal(valueBytes, sign);
+              } else if (column.type === 0x29 || column.type === 0x2A || column.type === 0x2B) { // guid
+                value = this.parseTDSGuid(packet, offset);
+                offset += length;
+              } else { // string
+                value = packet.toString('ucs2', offset, offset + length);
+                offset += length;
+              }
+              
+              currentRow[column.name] = value;
+            }
+          });
+          
+          results.push(currentRow);
+          break;
+          
+        case this.TOKEN.DONE:
+        case this.TOKEN.DONEPROC:
+        case this.TOKEN.DONEINPROC:
+          const doneLength = packet.readUInt16BE(offset); offset += 2;
+          const doneStatus = packet.readUInt16BE(offset); offset += 2;
+          const doneCmd = packet.readUInt16BE(offset); offset += 2;
+          const doneRows = packet.readUInt32BE(offset); offset += 4;
+          
+          if (doneStatus & 0x10) { // Count token
+            // Row count
+          }
+          
+          if (results.length > 0) {
+            this.emit('result', results);
+          }
+          
+          if (doneStatus & 0x01) { // Final
+            this.emit('ready');
+          }
+          break;
+      }
+    }
+  }
+
+  sendPacket(type, data) {
+    const header = Buffer.alloc(8);
+    const totalLength = data.length + 8;
+    
+    header[0] = type;
+    header[1] = this.PACKET_STATUS.END_OF_MESSAGE;
+    header.writeUInt16BE(totalLength, 2);
+    header.writeUInt16BE(0, 4); // SPID
+    header[6] = this.procId++;
+    header[7] = 0; // Window
+    
+    this.socket.write(Buffer.concat([header, data]));
+  }
+
+  parseTDSDateTime(days, seconds) {
+    // Convert SQL Server datetime to JS Date
+    const baseDate = new Date('1900-01-01');
+    const dayMs = days * 24 * 60 * 60 * 1000;
+    const secondMs = seconds / 300 * 1000; // SQL Server time is in 1/300 seconds
+    return new Date(baseDate.getTime() + dayMs + secondMs);
+  }
+
+  parseTDSGuid(buffer, offset) {
+    // Convert GUID to string format
+    const hex = buffer.toString('hex', offset, offset + 16);
+    return `${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20,32)}`;
+  }
+
+  parseTDSPackedDecimal(data, sign) {
+    // Simplified decimal parsing - in production you'd want proper decimal handling
+    let value = 0;
+    for (let i = 0; i < data.length; i++) {
+      value = value * 100 + ((data[i] >> 4) * 10 + (data[i] & 0x0F));
+    }
+    return sign ? -value / 10000 : value / 10000;
+  }
+
+  async query(sql, params = []) {
+    return new Promise((resolve, reject) => {
+      const results = [];
+      
+      const onResult = (result) => {
+        results.push(...result);
+      };
+      
+      const onError = (err) => {
+        this.removeListener('result', onResult);
+        this.removeListener('error', onError);
+        this.removeListener('ready', onReady);
+        reject(err);
+      };
+      
+      const onReady = () => {
+        this.removeListener('result', onResult);
+        this.removeListener('error', onError);
+        this.removeListener('ready', onReady);
+        resolve(results);
+      };
+      
+      this.on('result', onResult);
+      this.once('error', onError);
+      this.once('ready', onReady);
+      
+      // Build SQL batch
+      const batchData = this.buildSQLBatch(sql, params);
+      this.sendPacket(this.PACKET_TYPE.SQL_BATCH, batchData);
+    });
+  }
+
+  buildSQLBatch(sql, params) {
+    // Prepare SQL with parameters
+    let preparedSql = sql;
+    
+    if (params && params.length > 0) {
+      // For SQL Server, use parameterized queries
+      // This is simplified - you'd actually use sp_executesql with parameters
+      for (let i = 0; i < params.length; i++) {
+        const param = params[i];
+        let paramStr;
+        
+        if (param === null) {
+          paramStr = 'NULL';
+        } else if (typeof param === 'string') {
+          paramStr = `N'${param.replace(/'/g, "''")}'`;
+        } else if (Buffer.isBuffer(param)) {
+          paramStr = `0x${param.toString('hex')}`;
+        } else if (param instanceof Date) {
+          paramStr = `'${param.toISOString()}'`;
+        } else {
+          paramStr = String(param);
+        }
+        
+        preparedSql = preparedSql.replace('?', paramStr);
+      }
+    }
+    
+    // Convert to UTF-16LE (SQL Server uses UCS-2/UTF-16)
+    return Buffer.from(preparedSql, 'ucs2');
+  }
+
+  async execute(sql, params = []) {
+    const rows = await this.query(sql, params);
+    
+    let rowsAffected = 0;
+    let insertId = null;
+    
+    // Parse OUTPUT INSERTED or SCOPE_IDENTITY()
+    if (sql.toUpperCase().includes('INSERT')) {
+      try {
+        const result = await this.query('SELECT SCOPE_IDENTITY() as id');
+        if (result[0] && result[0].id) {
+          insertId = result[0].id;
+        }
+      } catch {
+        // Ignore
+      }
+    }
+    
+    return {
+      rowsAffected: rows.length,
+      insertId
+    };
+  }
+
+  async transaction(callback) {
+    await this.query('BEGIN TRANSACTION');
+    
+    try {
+      const result = await callback({
+        query: (sql, params) => this.query(sql, params),
+        execute: (sql, params) => this.execute(sql, params)
+      });
+      
+      await this.query('COMMIT');
+      return result;
+    } catch (error) {
+      await this.query('ROLLBACK');
+      throw error;
+    }
+  }
+
+  disconnect() {
+    if (this.socket) {
+      this.socket.end();
+    }
+  }
+
+  on(event, callback) {
+    if (!this._events) this._events = {};
+    if (!this._events[event]) this._events[event] = [];
+    this._events[event].push(callback);
+  }
+
+  once(event, callback) {
+    const onceWrapper = (...args) => {
+      this.removeListener(event, onceWrapper);
+      callback(...args);
+    };
+    this.on(event, onceWrapper);
+  }
+
+  emit(event, ...args) {
+    if (this._events && this._events[event]) {
+      this._events[event].forEach(callback => callback(...args));
+    }
+  }
+
+  removeListener(event, callback) {
+    if (this._events && this._events[event]) {
+      this._events[event] = this._events[event].filter(cb => cb !== callback);
+    }
+  }
+}
+
+// Also add MongoDB support
+class MongoDBProtocol {
+  constructor(config) {
+    this.config = config;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.authenticated = false;
+    this.requestId = 0;
+    this._events = {};
+    this.collections = new Map();
+    this.documents = new Map();
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) => {
+      const port = this.config.port || 27017;
+      const host = this.config.host || this.config.server || 'localhost';
+      
+      this.socket = net.createConnection(port, host, () => {
+        // Send OP_QUERY to check connection
+        this.sendIsMaster();
+      });
+
+      this.socket.on('data', (data) => {
+        this.handleData(data);
+      });
+
+      this.socket.on('error', reject);
+      
+      // Wait for authentication
+      this.once('authenticated', () => {
+        resolve();
+      });
+    });
+  }
+
+  handleData(data) {
+    this.buffer = Buffer.concat([this.buffer, data]);
+    
+    while (this.buffer.length >= 16) {
+      const messageLength = this.buffer.readInt32LE(0);
+      
+      if (this.buffer.length < messageLength) break;
+      
+      const message = this.buffer.subarray(0, messageLength);
+      this.buffer = this.buffer.subarray(messageLength);
+      
+      this.processMessage(message);
+    }
+  }
+
+  processMessage(message) {
+    const messageLength = message.readInt32LE(0);
+    const requestId = message.readInt32LE(4);
+    const responseTo = message.readInt32LE(8);
+    const opCode = message.readInt32LE(12);
+    
+    switch (opCode) {
+      case 1: // OP_REPLY
+        this.handleReply(message);
+        break;
+      case 100: // OP_MSG (new in 3.6+)
+        this.handleMsg(message);
+        break;
+    }
+  }
+
+  handleReply(message) {
+    const flags = message.readInt32LE(16);
+    const cursorId = message.readInt64LE(20);
+    const startingFrom = message.readInt32LE(28);
+    const numberReturned = message.readInt32LE(32);
+    
+    const documents = [];
+    let offset = 36;
+    
+    for (let i = 0; i < numberReturned; i++) {
+      const docLength = message.readInt32LE(offset);
+      const doc = this.parseBSON(message.subarray(offset, offset + docLength));
+      documents.push(doc);
+      offset += docLength;
+    }
+    
+    this.emit('result', documents);
+    
+    if (cursorId === 0n) {
+      this.emit('ready');
+    }
+  }
+
+  handleMsg(message) {
+    // Simplified - in production you'd parse OP_MSG properly
+    const flags = message.readInt32LE(16);
+    const sections = [];
+    let offset = 20;
+    
+    while (offset < message.length) {
+      const sectionType = message[offset]; offset++;
+      
+      if (sectionType === 0) { // Body
+        const docLength = message.readInt32LE(offset);
+        const doc = this.parseBSON(message.subarray(offset, offset + docLength));
+        sections.push(doc);
+        offset += docLength;
+      } else if (sectionType === 1) { // Document sequence
+        const size = message.readInt32LE(offset); offset += 4;
+        const sequenceEnd = offset + size;
+        
+        // Read identifier
+        let identifier = '';
+        while (offset < sequenceEnd && message[offset] !== 0) {
+          identifier += String.fromCharCode(message[offset]);
+          offset++;
+        }
+        offset++; // Skip null
+        
+        // Read documents
+        while (offset < sequenceEnd) {
+          const docLength = message.readInt32LE(offset);
+          if (docLength === 0) break;
+          const doc = this.parseBSON(message.subarray(offset, offset + docLength));
+          sections.push(doc);
+          offset += docLength;
+        }
+      }
+    }
+    
+    this.emit('result', sections);
+    
+    if (flags & 0x0001) { // MoreToCome
+      // Wait for more
+    } else {
+      this.emit('ready');
+    }
+  }
+
+  parseBSON(buffer) {
+    const doc = {};
+    const length = buffer.readInt32LE(0);
+    let offset = 4;
+    
+    while (offset < length - 1) {
+      const type = buffer[offset]; offset++;
+      
+      // Read name
+      let name = '';
+      while (offset < length && buffer[offset] !== 0) {
+        name += String.fromCharCode(buffer[offset]);
+        offset++;
+      }
+      offset++; // Skip null
+      
+      // Read value based on type
+      switch (type) {
+        case 0x01: // Double
+          doc[name] = buffer.readDoubleLE(offset);
+          offset += 8;
+          break;
+        case 0x02: // String
+          const strLength = buffer.readInt32LE(offset);
+          offset += 4;
+          doc[name] = buffer.toString('utf8', offset, offset + strLength - 1);
+          offset += strLength;
+          break;
+        case 0x03: // Document
+          const docLength = buffer.readInt32LE(offset);
+          const subDoc = this.parseBSON(buffer.subarray(offset, offset + docLength));
+          doc[name] = subDoc;
+          offset += docLength;
+          break;
+        case 0x04: // Array
+          const arrLength = buffer.readInt32LE(offset);
+          const arr = [];
+          let arrOffset = offset + 4;
+          while (arrOffset < offset + arrLength - 1) {
+            const arrType = buffer[arrOffset]; arrOffset++;
+            // Skip index
+            while (arrOffset < offset + arrLength && buffer[arrOffset] !== 0) {
+              arrOffset++;
+            }
+            arrOffset++; // Skip null
+            
+            if (arrType === 0x01) { // Double
+              arr.push(buffer.readDoubleLE(arrOffset));
+              arrOffset += 8;
+            } else if (arrType === 0x02) { // String
+              const elemLength = buffer.readInt32LE(arrOffset);
+              arrOffset += 4;
+              arr.push(buffer.toString('utf8', arrOffset, arrOffset + elemLength - 1));
+              arrOffset += elemLength;
+            }
+          }
+          doc[name] = arr;
+          offset += arrLength;
+          break;
+        case 0x05: // Binary
+          const binLength = buffer.readInt32LE(offset);
+          offset += 4;
+          const subtype = buffer[offset]; offset++;
+          doc[name] = buffer.subarray(offset, offset + binLength);
+          offset += binLength;
+          break;
+        case 0x06: // Undefined (deprecated)
+          doc[name] = undefined;
+          break;
+        case 0x07: // ObjectId
+          doc[name] = buffer.toString('hex', offset, offset + 12);
+          offset += 12;
+          break;
+        case 0x08: // Boolean
+          doc[name] = buffer[offset] === 0x01;
+          offset += 1;
+          break;
+        case 0x09: // DateTime
+          doc[name] = new Date(buffer.readInt64LE(offset));
+          offset += 8;
+          break;
+        case 0x0A: // Null
+          doc[name] = null;
+          break;
+        case 0x10: // Int32
+          doc[name] = buffer.readInt32LE(offset);
+          offset += 4;
+          break;
+        case 0x12: // Int64
+          doc[name] = Number(buffer.readBigInt64LE(offset));
+          offset += 8;
+          break;
+      }
+    }
+    
+    return doc;
+  }
+
+  buildBSON(doc) {
+    // Simplified BSON builder - in production you'd want full implementation
+    const buffers = [];
+    let totalLength = 4; // Start with length field
+    
+    for (const [key, value] of Object.entries(doc)) {
+      if (value === null) {
+        buffers.push(Buffer.from([0x0A])); // Type: Null
+        buffers.push(Buffer.from(key + '\0', 'utf8'));
+        totalLength += 1 + key.length + 1;
+      } else if (typeof value === 'string') {
+        const str = Buffer.from(value, 'utf8');
+        buffers.push(Buffer.from([0x02])); // Type: String
+        buffers.push(Buffer.from(key + '\0', 'utf8'));
+        buffers.push(Buffer.alloc(4));
+        buffers.push(str);
+        buffers.push(Buffer.from([0x00]));
+        totalLength += 1 + key.length + 1 + 4 + str.length + 1;
+      } else if (typeof value === 'number') {
+        if (Number.isInteger(value)) {
+          buffers.push(Buffer.from([0x10])); // Type: Int32
+          buffers.push(Buffer.from(key + '\0', 'utf8'));
+          const intBuf = Buffer.alloc(4);
+          intBuf.writeInt32LE(value);
+          buffers.push(intBuf);
+          totalLength += 1 + key.length + 1 + 4;
+        } else {
+          buffers.push(Buffer.from([0x01])); // Type: Double
+          buffers.push(Buffer.from(key + '\0', 'utf8'));
+          const doubleBuf = Buffer.alloc(8);
+          doubleBuf.writeDoubleLE(value);
+          buffers.push(doubleBuf);
+          totalLength += 1 + key.length + 1 + 8;
+        }
+      } else if (typeof value === 'boolean') {
+        buffers.push(Buffer.from([0x08])); // Type: Boolean
+        buffers.push(Buffer.from(key + '\0', 'utf8'));
+        buffers.push(Buffer.from([value ? 0x01 : 0x00]));
+        totalLength += 1 + key.length + 1 + 1;
+      }
+    }
+    
+    buffers.push(Buffer.from([0x00])); // Terminator
+    totalLength += 1;
+    
+    // Write length
+    const result = Buffer.concat([
+      Buffer.from([totalLength & 0xFF, (totalLength >> 8) & 0xFF, (totalLength >> 16) & 0xFF, (totalLength >> 24) & 0xFF]),
+      ...buffers
+    ]);
+    
+    return result;
+  }
+
+  sendIsMaster() {
+    const cmd = {
+      ismaster: 1,
+      client: {
+        application: { name: this.config.application_name || 'nodejs-orm' },
+        driver: { name: 'nodejs-orm', version: '1.0.0' },
+        os: { type: process.platform }
+      }
+    };
+    
+    const query = this.buildBSON(cmd);
+    const fullCollection = `${this.config.database || 'admin'}.$cmd`;
+    
+    const header = Buffer.alloc(16);
+    const messageLength = 16 + 4 + fullCollection.length + 1 + query.length;
+    
+    this.requestId++;
+    
+    header.writeInt32LE(messageLength, 0);
+    header.writeInt32LE(this.requestId, 4);
+    header.writeInt32LE(0, 8); // ResponseTo
+    header.writeInt32LE(2004, 12); // OP_QUERY
+    
+    const flags = Buffer.alloc(4);
+    flags.writeInt32LE(0, 0);
+    
+    const collectionBuf = Buffer.from(fullCollection + '\0', 'utf8');
+    const skip = Buffer.alloc(4);
+    skip.writeInt32LE(0, 0);
+    const returnBuf = Buffer.alloc(4);
+    returnBuf.writeInt32LE(-1, 0); // Return all
+    
+    this.socket.write(Buffer.concat([header, flags, collectionBuf, skip, returnBuf, query]));
+  }
+
+  async query(sql, params = []) {
+    // MongoDB doesn't use SQL, so we need to parse the SQL-like syntax
+    // This is a simplified implementation for basic SELECT/INSERT/UPDATE/DELETE
+    const sqlUpper = sql.trim().toUpperCase();
+    
+    if (sqlUpper.startsWith('SELECT')) {
+      return this.executeFind(sql);
+    } else if (sqlUpper.startsWith('INSERT')) {
+      return this.executeInsert(sql);
+    } else if (sqlUpper.startsWith('UPDATE')) {
+      return this.executeUpdate(sql);
+    } else if (sqlUpper.startsWith('DELETE')) {
+      return this.executeDelete(sql);
+    }
+    
+    return [];
+  }
+
+  executeFind(sql) {
+    const fromMatch = sql.match(/FROM\s+(\w+)/i);
+    const whereMatch = sql.match(/WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)/i);
+    const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+    
+    if (!fromMatch) return [];
+    
+    const collection = fromMatch[1];
+    const collectionData = this.collections.get(collection) || [];
+    let results = [...collectionData];
+    
+    if (whereMatch) {
+      const conditions = this.parseWhere(whereMatch[1]);
+      results = results.filter(doc => this.matchesConditions(doc, conditions));
+    }
+    
+    if (limitMatch) {
+      const limit = parseInt(limitMatch[1], 10);
+      results = results.slice(0, limit);
+    }
+    
+    return results;
+  }
+
+  executeInsert(sql) {
+    const intoMatch = sql.match(/INTO\s+(\w+)/i);
+    const valuesMatch = sql.match(/VALUES\s*\((.+?)\)/i);
+    
+    if (!intoMatch || !valuesMatch) return [];
+    
+    const collection = intoMatch[1];
+    const valuesStr = valuesMatch[1];
+    const values = valuesStr.split(',').map(v => v.trim().replace(/'/g, ''));
+    
+    const doc = {
+      _id: new Date().getTime().toString(16) + Math.random().toString(16).substr(2),
+      ...Object.fromEntries(values.map((v, i) => [`field${i}`, v]))
+    };
+    
+    const collectionData = this.collections.get(collection) || [];
+    collectionData.push(doc);
+    this.collections.set(collection, collectionData);
+    
+    return [{ insertId: doc._id }];
+  }
+
+  executeUpdate(sql) {
+    const updateMatch = sql.match(/UPDATE\s+(\w+)/i);
+    const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|$)/i);
+    const whereMatch = sql.match(/WHERE\s+(.+?)$/i);
+    
+    if (!updateMatch || !setMatch) return [];
+    
+    const collection = updateMatch[1];
+    const collectionData = this.collections.get(collection) || [];
+    const updates = this.parseSet(setMatch[1]);
+    
+    let updatedCount = 0;
+    
+    collectionData.forEach(doc => {
+      let shouldUpdate = true;
+      
+      if (whereMatch) {
+        const conditions = this.parseWhere(whereMatch[1]);
+        shouldUpdate = this.matchesConditions(doc, conditions);
+      }
+      
+      if (shouldUpdate) {
+        Object.assign(doc, updates);
+        updatedCount++;
+      }
+    });
+    
+    return [{ affectedRows: updatedCount }];
+  }
+
+  executeDelete(sql) {
+    const fromMatch = sql.match(/FROM\s+(\w+)/i);
+    const whereMatch = sql.match(/WHERE\s+(.+?)$/i);
+    
+    if (!fromMatch) return [];
+    
+    const collection = fromMatch[1];
+    let collectionData = this.collections.get(collection) || [];
+    const initialLength = collectionData.length;
+    
+    if (whereMatch) {
+      const conditions = this.parseWhere(whereMatch[1]);
+      collectionData = collectionData.filter(doc => !this.matchesConditions(doc, conditions));
+    } else {
+      collectionData = [];
+    }
+    
+    this.collections.set(collection, collectionData);
+    
+    return [{ affectedRows: initialLength - collectionData.length }];
+  }
+
+  parseWhere(whereStr) {
+    const conditions = [];
+    const parts = whereStr.split(/\s+(AND|OR)\s+/i);
+    
+    for (let i = 0; i < parts.length; i += 2) {
+      const part = parts[i];
+      const operator = i > 0 ? parts[i-1] : null;
+      
+      const match = part.match(/(\w+)\s*([=<>!]+)\s*(.+)/);
+      if (match) {
+        conditions.push({
+          field: match[1],
+          op: match[2],
+          value: match[3].replace(/'/g, ''),
+          operator: operator ? operator.toUpperCase() : 'AND'
+        });
+      }
+    }
+    
+    return conditions;
+  }
+
+  parseSet(setStr) {
+    const updates = {};
+    const parts = setStr.split(',');
+    
+    parts.forEach(part => {
+      const [field, value] = part.split('=').map(p => p.trim());
+      updates[field] = value.replace(/'/g, '');
+    });
+    
+    return updates;
+  }
+
+  matchesConditions(doc, conditions) {
+    return conditions.every(cond => {
+      const docValue = doc[cond.field];
+      let condValue = cond.value;
+      
+      if (!isNaN(condValue)) condValue = Number(condValue);
+      if (condValue === 'true' || condValue === 'false') condValue = condValue === 'true';
+      
+      let match = false;
+      switch (cond.op) {
+        case '=':
+          match = docValue == condValue;
+          break;
+        case '!=':
+        case '<>':
+          match = docValue != condValue;
+          break;
+        case '<':
+          match = docValue < condValue;
+          break;
+        case '>':
+          match = docValue > condValue;
+          break;
+        case '<=':
+          match = docValue <= condValue;
+          break;
+        case '>=':
+          match = docValue >= condValue;
+          break;
+      }
+      
+      return cond.operator === 'OR' ? match : match;
+    });
+  }
+
+  async execute(sql, params = []) {
+    const rows = await this.query(sql, params);
+    
+    return {
+      rowsAffected: rows.length,
+      insertId: rows[0]?.insertId || null
+    };
+  }
+
+  async transaction(callback) {
+    // MongoDB doesn't support multi-document transactions by default
+    // This is a simplified version
+    try {
+      const result = await callback({
+        query: (sql, params) => this.query(sql, params),
+        execute: (sql, params) => this.execute(sql, params)
+      });
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  disconnect() {
+    if (this.socket) {
+      this.socket.end();
+    }
+  }
+
+  on(event, callback) {
+    if (!this._events) this._events = {};
+    if (!this._events[event]) this._events[event] = [];
+    this._events[event].push(callback);
+  }
+
+  once(event, callback) {
+    const onceWrapper = (...args) => {
+      this.removeListener(event, onceWrapper);
+      callback(...args);
+    };
+    this.on(event, onceWrapper);
+  }
+
+  emit(event, ...args) {
+    if (this._events && this._events[event]) {
+      this._events[event].forEach(callback => callback(...args));
+    }
+  }
+
+  removeListener(event, callback) {
+    if (this._events && this._events[event]) {
+      this._events[event] = this._events[event].filter(cb => cb !== callback);
+    }
+  }
+}
+
 // ==================== ORM Core Classes ====================
 
 // Query Builder (same as before, but updated to use native adapters)
@@ -2381,7 +3631,9 @@ class ConnectionManager {
     this.protocols = {
       postgres: PostgreSQLProtocol,
       mysql: MySQLProtocol,
-      sqlite: SQLiteProtocol
+      sqlite: SQLiteProtocol,
+      sqlserver: MSSQLProtocol,
+      mongodb: MongoDBProtocol
     };
   }
 
