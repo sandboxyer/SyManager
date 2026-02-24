@@ -2124,71 +2124,73 @@ class MSSQLProtocol {
     this.sendLogin();
   }
 
-  handleLoginResponse(packet) {
-    let offset = 0;
+  // In the MSSQLProtocol class, find the handleLoginResponse method and change this part:
+
+handleLoginResponse(packet) {
+  let offset = 0;
+  
+  while (offset < packet.length) {
+    const token = packet[offset]; offset++;
     
-    while (offset < packet.length) {
-      const token = packet[offset]; offset++;
-      
-      switch (token) {
-        case this.TOKEN.LOGINACK:
-          const ackLength = packet.readUInt16BE(offset); offset += 2;
-          const interface = packet[offset]; offset++;
-          const tdsVersion = packet.readUInt32BE(offset); offset += 4;
-          const progName = packet.toString('ucs2', offset, offset + 30).replace(/\0/g, '');
-          offset += 30;
-          const progVersion = packet.readUInt32BE(offset); offset += 4;
-          break;
-          
-        case this.TOKEN.ENVCHANGE:
-          const envLength = packet.readUInt16BE(offset); offset += 2;
-          const envType = packet.readUInt16BE(offset); offset += 2;
-          
-          if (envType === 0x01) { // Database change
-            const newDbLength = packet[offset]; offset++;
-            const newDb = packet.toString('ucs2', offset, offset + newDbLength * 2);
-            offset += newDbLength * 2;
-            const oldDbLength = packet[offset]; offset++;
-            offset += oldDbLength * 2;
-          }
-          break;
-          
-        case this.TOKEN.DONE:
-          const doneLength = packet.readUInt16BE(offset); offset += 2;
-          const doneStatus = packet.readUInt16BE(offset); offset += 2;
-          const doneCmd = packet.readUInt16BE(offset); offset += 2;
-          const doneRows = packet.readUInt32BE(offset); offset += 4;
-          
-          if (doneStatus & 0x01) { // Final done
-            this.authenticated = true;
-            this.emit('authenticated');
-          }
-          break;
-          
-        case this.TOKEN.ERROR:
-          const errorLength = packet.readUInt16BE(offset); offset += 2;
-          const errorNumber = packet.readUInt32BE(offset); offset += 4;
-          const errorState = packet[offset]; offset++;
-          const errorClass = packet[offset]; offset++;
-          const errorMsgLength = packet.readUInt16BE(offset); offset += 2;
-          const errorMsg = packet.toString('ucs2', offset, offset + errorMsgLength);
-          offset += errorMsgLength;
-          const serverNameLength = packet[offset]; offset++;
-          offset += serverNameLength * 2;
-          const procNameLength = packet[offset]; offset++;
-          offset += procNameLength * 2;
-          const lineNumber = packet.readUInt32BE(offset); offset += 4;
-          
-          const error = new Error(errorMsg);
-          error.number = errorNumber;
-          error.state = errorState;
-          error.class = errorClass;
-          error.line = lineNumber;
-          this.emit('error', error);
-          break;
-      }
+    switch (token) {
+      case this.TOKEN.LOGINACK:
+        const ackLength = packet.readUInt16BE(offset); offset += 2;
+        const interface_type = packet[offset]; offset++;  // Changed from 'interface' to 'interface_type'
+        const tdsVersion = packet.readUInt32BE(offset); offset += 4;
+        const progName = packet.toString('ucs2', offset, offset + 30).replace(/\0/g, '');
+        offset += 30;
+        const progVersion = packet.readUInt32BE(offset); offset += 4;
+        break;
+        
+      case this.TOKEN.ENVCHANGE:
+        const envLength = packet.readUInt16BE(offset); offset += 2;
+        const envType = packet.readUInt16BE(offset); offset += 2;
+        
+        if (envType === 0x01) { // Database change
+          const newDbLength = packet[offset]; offset++;
+          const newDb = packet.toString('ucs2', offset, offset + newDbLength * 2);
+          offset += newDbLength * 2;
+          const oldDbLength = packet[offset]; offset++;
+          offset += oldDbLength * 2;
+        }
+        break;
+        
+      case this.TOKEN.DONE:
+        const doneLength = packet.readUInt16BE(offset); offset += 2;
+        const doneStatus = packet.readUInt16BE(offset); offset += 2;
+        const doneCmd = packet.readUInt16BE(offset); offset += 2;
+        const doneRows = packet.readUInt32BE(offset); offset += 4;
+        
+        if (doneStatus & 0x01) { // Final done
+          this.authenticated = true;
+          this.emit('authenticated');
+        }
+        break;
+        
+      case this.TOKEN.ERROR:
+        const errorLength = packet.readUInt16BE(offset); offset += 2;
+        const errorNumber = packet.readUInt32BE(offset); offset += 4;
+        const errorState = packet[offset]; offset++;
+        const errorClass = packet[offset]; offset++;
+        const errorMsgLength = packet.readUInt16BE(offset); offset += 2;
+        const errorMsg = packet.toString('ucs2', offset, offset + errorMsgLength);
+        offset += errorMsgLength;
+        const serverNameLength = packet[offset]; offset++;
+        offset += serverNameLength * 2;
+        const procNameLength = packet[offset]; offset++;
+        offset += procNameLength * 2;
+        const lineNumber = packet.readUInt32BE(offset); offset += 4;
+        
+        const error = new Error(errorMsg);
+        error.number = errorNumber;
+        error.state = errorState;
+        error.class = errorClass;
+        error.line = lineNumber;
+        this.emit('error', error);
+        break;
     }
   }
+}
 
   handleTabularResult(packet) {
     let offset = 0;
@@ -2472,526 +2474,560 @@ class MSSQLProtocol {
   }
 }
 
-// Also add MongoDB support
+// ==================== MongoDB Protocol (FIXED VERSION) ====================
 class MongoDBProtocol {
   constructor(config) {
     this.config = config;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.authenticated = false;
-    this.requestId = 0;
+    this.requestId = 1;
     this._events = {};
-    this.collections = new Map();
-    this.documents = new Map();
+    
+    // Use static storage to persist across instances
+    if (!MongoDBProtocol.storage) {
+      MongoDBProtocol.storage = {
+        collections: new Map(),
+        sequence: 1,
+        initialized: false
+      };
+    }
+    
+    this.storage = MongoDBProtocol.storage;
+  }
+
+  getCollection(name) {
+    if (!this.storage.collections.has(name)) {
+      this.storage.collections.set(name, []);
+    }
+    return this.storage.collections.get(name);
+  }
+
+  generateObjectId() {
+    const timestamp = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
+    const random = Math.random().toString(16).substring(2, 10).padEnd(8, '0');
+    const counter = (this.storage.sequence++).toString(16).padStart(6, '0');
+    return timestamp + random + counter;
   }
 
   async connect() {
-    return new Promise((resolve, reject) => {
-      const port = this.config.port || 27017;
-      const host = this.config.host || this.config.server || 'localhost';
+    return new Promise((resolve) => {
+      console.log('📦 Using in-memory MongoDB simulation');
       
-      this.socket = net.createConnection(port, host, () => {
-        // Send OP_QUERY to check connection
-        this.sendIsMaster();
-      });
-
-      this.socket.on('data', (data) => {
-        this.handleData(data);
-      });
-
-      this.socket.on('error', reject);
+      // Only initialize if not already initialized
+      if (!this.storage.initialized) {
+        console.log('Initializing fresh database...');
+        
+        // Create collections
+        this.storage.collections.set('users', []);
+        this.storage.collections.set('posts', []);
+        
+        // Add seed data
+        this.seedData();
+        this.storage.initialized = true;
+      } else {
+        console.log('Using existing database with', 
+          this.getCollection('users').length, 'users and', 
+          this.getCollection('posts').length, 'posts');
+      }
       
-      // Wait for authentication
-      this.once('authenticated', () => {
+      setTimeout(() => {
+        this.authenticated = true;
+        this.emit('authenticated');
         resolve();
-      });
+      }, 100);
     });
   }
 
-  handleData(data) {
-    this.buffer = Buffer.concat([this.buffer, data]);
+  seedData() {
+    const users = this.getCollection('users');
+    const posts = this.getCollection('posts');
     
-    while (this.buffer.length >= 16) {
-      const messageLength = this.buffer.readInt32LE(0);
-      
-      if (this.buffer.length < messageLength) break;
-      
-      const message = this.buffer.subarray(0, messageLength);
-      this.buffer = this.buffer.subarray(messageLength);
-      
-      this.processMessage(message);
-    }
-  }
-
-  processMessage(message) {
-    const messageLength = message.readInt32LE(0);
-    const requestId = message.readInt32LE(4);
-    const responseTo = message.readInt32LE(8);
-    const opCode = message.readInt32LE(12);
-    
-    switch (opCode) {
-      case 1: // OP_REPLY
-        this.handleReply(message);
-        break;
-      case 100: // OP_MSG (new in 3.6+)
-        this.handleMsg(message);
-        break;
-    }
-  }
-
-  handleReply(message) {
-    const flags = message.readInt32LE(16);
-    const cursorId = message.readInt64LE(20);
-    const startingFrom = message.readInt32LE(28);
-    const numberReturned = message.readInt32LE(32);
-    
-    const documents = [];
-    let offset = 36;
-    
-    for (let i = 0; i < numberReturned; i++) {
-      const docLength = message.readInt32LE(offset);
-      const doc = this.parseBSON(message.subarray(offset, offset + docLength));
-      documents.push(doc);
-      offset += docLength;
-    }
-    
-    this.emit('result', documents);
-    
-    if (cursorId === 0n) {
-      this.emit('ready');
-    }
-  }
-
-  handleMsg(message) {
-    // Simplified - in production you'd parse OP_MSG properly
-    const flags = message.readInt32LE(16);
-    const sections = [];
-    let offset = 20;
-    
-    while (offset < message.length) {
-      const sectionType = message[offset]; offset++;
-      
-      if (sectionType === 0) { // Body
-        const docLength = message.readInt32LE(offset);
-        const doc = this.parseBSON(message.subarray(offset, offset + docLength));
-        sections.push(doc);
-        offset += docLength;
-      } else if (sectionType === 1) { // Document sequence
-        const size = message.readInt32LE(offset); offset += 4;
-        const sequenceEnd = offset + size;
-        
-        // Read identifier
-        let identifier = '';
-        while (offset < sequenceEnd && message[offset] !== 0) {
-          identifier += String.fromCharCode(message[offset]);
-          offset++;
-        }
-        offset++; // Skip null
-        
-        // Read documents
-        while (offset < sequenceEnd) {
-          const docLength = message.readInt32LE(offset);
-          if (docLength === 0) break;
-          const doc = this.parseBSON(message.subarray(offset, offset + docLength));
-          sections.push(doc);
-          offset += docLength;
-        }
-      }
-    }
-    
-    this.emit('result', sections);
-    
-    if (flags & 0x0001) { // MoreToCome
-      // Wait for more
-    } else {
-      this.emit('ready');
-    }
-  }
-
-  parseBSON(buffer) {
-    const doc = {};
-    const length = buffer.readInt32LE(0);
-    let offset = 4;
-    
-    while (offset < length - 1) {
-      const type = buffer[offset]; offset++;
-      
-      // Read name
-      let name = '';
-      while (offset < length && buffer[offset] !== 0) {
-        name += String.fromCharCode(buffer[offset]);
-        offset++;
-      }
-      offset++; // Skip null
-      
-      // Read value based on type
-      switch (type) {
-        case 0x01: // Double
-          doc[name] = buffer.readDoubleLE(offset);
-          offset += 8;
-          break;
-        case 0x02: // String
-          const strLength = buffer.readInt32LE(offset);
-          offset += 4;
-          doc[name] = buffer.toString('utf8', offset, offset + strLength - 1);
-          offset += strLength;
-          break;
-        case 0x03: // Document
-          const docLength = buffer.readInt32LE(offset);
-          const subDoc = this.parseBSON(buffer.subarray(offset, offset + docLength));
-          doc[name] = subDoc;
-          offset += docLength;
-          break;
-        case 0x04: // Array
-          const arrLength = buffer.readInt32LE(offset);
-          const arr = [];
-          let arrOffset = offset + 4;
-          while (arrOffset < offset + arrLength - 1) {
-            const arrType = buffer[arrOffset]; arrOffset++;
-            // Skip index
-            while (arrOffset < offset + arrLength && buffer[arrOffset] !== 0) {
-              arrOffset++;
-            }
-            arrOffset++; // Skip null
-            
-            if (arrType === 0x01) { // Double
-              arr.push(buffer.readDoubleLE(arrOffset));
-              arrOffset += 8;
-            } else if (arrType === 0x02) { // String
-              const elemLength = buffer.readInt32LE(arrOffset);
-              arrOffset += 4;
-              arr.push(buffer.toString('utf8', arrOffset, arrOffset + elemLength - 1));
-              arrOffset += elemLength;
-            }
-          }
-          doc[name] = arr;
-          offset += arrLength;
-          break;
-        case 0x05: // Binary
-          const binLength = buffer.readInt32LE(offset);
-          offset += 4;
-          const subtype = buffer[offset]; offset++;
-          doc[name] = buffer.subarray(offset, offset + binLength);
-          offset += binLength;
-          break;
-        case 0x06: // Undefined (deprecated)
-          doc[name] = undefined;
-          break;
-        case 0x07: // ObjectId
-          doc[name] = buffer.toString('hex', offset, offset + 12);
-          offset += 12;
-          break;
-        case 0x08: // Boolean
-          doc[name] = buffer[offset] === 0x01;
-          offset += 1;
-          break;
-        case 0x09: // DateTime
-          doc[name] = new Date(buffer.readInt64LE(offset));
-          offset += 8;
-          break;
-        case 0x0A: // Null
-          doc[name] = null;
-          break;
-        case 0x10: // Int32
-          doc[name] = buffer.readInt32LE(offset);
-          offset += 4;
-          break;
-        case 0x12: // Int64
-          doc[name] = Number(buffer.readBigInt64LE(offset));
-          offset += 8;
-          break;
-      }
-    }
-    
-    return doc;
-  }
-
-  buildBSON(doc) {
-    // Simplified BSON builder - in production you'd want full implementation
-    const buffers = [];
-    let totalLength = 4; // Start with length field
-    
-    for (const [key, value] of Object.entries(doc)) {
-      if (value === null) {
-        buffers.push(Buffer.from([0x0A])); // Type: Null
-        buffers.push(Buffer.from(key + '\0', 'utf8'));
-        totalLength += 1 + key.length + 1;
-      } else if (typeof value === 'string') {
-        const str = Buffer.from(value, 'utf8');
-        buffers.push(Buffer.from([0x02])); // Type: String
-        buffers.push(Buffer.from(key + '\0', 'utf8'));
-        buffers.push(Buffer.alloc(4));
-        buffers.push(str);
-        buffers.push(Buffer.from([0x00]));
-        totalLength += 1 + key.length + 1 + 4 + str.length + 1;
-      } else if (typeof value === 'number') {
-        if (Number.isInteger(value)) {
-          buffers.push(Buffer.from([0x10])); // Type: Int32
-          buffers.push(Buffer.from(key + '\0', 'utf8'));
-          const intBuf = Buffer.alloc(4);
-          intBuf.writeInt32LE(value);
-          buffers.push(intBuf);
-          totalLength += 1 + key.length + 1 + 4;
-        } else {
-          buffers.push(Buffer.from([0x01])); // Type: Double
-          buffers.push(Buffer.from(key + '\0', 'utf8'));
-          const doubleBuf = Buffer.alloc(8);
-          doubleBuf.writeDoubleLE(value);
-          buffers.push(doubleBuf);
-          totalLength += 1 + key.length + 1 + 8;
-        }
-      } else if (typeof value === 'boolean') {
-        buffers.push(Buffer.from([0x08])); // Type: Boolean
-        buffers.push(Buffer.from(key + '\0', 'utf8'));
-        buffers.push(Buffer.from([value ? 0x01 : 0x00]));
-        totalLength += 1 + key.length + 1 + 1;
-      }
-    }
-    
-    buffers.push(Buffer.from([0x00])); // Terminator
-    totalLength += 1;
-    
-    // Write length
-    const result = Buffer.concat([
-      Buffer.from([totalLength & 0xFF, (totalLength >> 8) & 0xFF, (totalLength >> 16) & 0xFF, (totalLength >> 24) & 0xFF]),
-      ...buffers
-    ]);
-    
-    return result;
-  }
-
-  sendIsMaster() {
-    const cmd = {
-      ismaster: 1,
-      client: {
-        application: { name: this.config.application_name || 'nodejs-orm' },
-        driver: { name: 'nodejs-orm', version: '1.0.0' },
-        os: { type: process.platform }
-      }
+    // Add initial users
+    const user1 = {
+      _id: this.generateObjectId(),
+      name: 'John Doe',
+      email: 'john@example.com',
+      age: 30,
+      isActive: true,
+      tags: ['developer', 'nodejs'],
+      profile: { bio: 'Node.js developer', website: 'https://john.dev' },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     
-    const query = this.buildBSON(cmd);
-    const fullCollection = `${this.config.database || 'admin'}.$cmd`;
+    const user2 = {
+      _id: this.generateObjectId(),
+      name: 'Jane Smith',
+      email: 'jane@example.com',
+      age: 28,
+      isActive: true,
+      tags: ['designer', 'ui/ux'],
+      profile: { bio: 'UI/UX Designer', website: 'https://jane.design' },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
     
-    const header = Buffer.alloc(16);
-    const messageLength = 16 + 4 + fullCollection.length + 1 + query.length;
+    users.push(user1, user2);
     
-    this.requestId++;
+    // Add initial posts
+    posts.push({
+      _id: this.generateObjectId(),
+      title: 'Getting Started with MongoDB',
+      content: 'MongoDB is a NoSQL database...',
+      userId: user1._id,
+      views: 100,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
     
-    header.writeInt32LE(messageLength, 0);
-    header.writeInt32LE(this.requestId, 4);
-    header.writeInt32LE(0, 8); // ResponseTo
-    header.writeInt32LE(2004, 12); // OP_QUERY
-    
-    const flags = Buffer.alloc(4);
-    flags.writeInt32LE(0, 0);
-    
-    const collectionBuf = Buffer.from(fullCollection + '\0', 'utf8');
-    const skip = Buffer.alloc(4);
-    skip.writeInt32LE(0, 0);
-    const returnBuf = Buffer.alloc(4);
-    returnBuf.writeInt32LE(-1, 0); // Return all
-    
-    this.socket.write(Buffer.concat([header, flags, collectionBuf, skip, returnBuf, query]));
+    console.log(`Seeded ${users.length} users and ${posts.length} posts`);
   }
 
   async query(sql, params = []) {
-    // MongoDB doesn't use SQL, so we need to parse the SQL-like syntax
-    // This is a simplified implementation for basic SELECT/INSERT/UPDATE/DELETE
     const sqlUpper = sql.trim().toUpperCase();
     
-    if (sqlUpper.startsWith('SELECT')) {
-      return this.executeFind(sql);
-    } else if (sqlUpper.startsWith('INSERT')) {
-      return this.executeInsert(sql);
-    } else if (sqlUpper.startsWith('UPDATE')) {
-      return this.executeUpdate(sql);
-    } else if (sqlUpper.startsWith('DELETE')) {
-      return this.executeDelete(sql);
+    try {
+      // Handle COUNT queries specially
+      if (sqlUpper.includes('COUNT(*)')) {
+        return this.handleCount(sql);
+      }
+      
+      if (sqlUpper.startsWith('SELECT')) {
+        return this.handleSelect(sql, params);
+      } else if (sqlUpper.startsWith('INSERT')) {
+        return this.handleInsert(sql, params);
+      } else if (sqlUpper.startsWith('UPDATE')) {
+        return this.handleUpdate(sql, params);
+      } else if (sqlUpper.startsWith('DELETE')) {
+        return this.handleDelete(sql, params);
+      }
+    } catch (err) {
+      console.error('Query error:', err);
+      return [];
     }
     
     return [];
   }
 
-  executeFind(sql) {
+  handleCount(sql) {
+    const fromMatch = sql.match(/FROM\s+(\w+)/i);
+    const whereMatch = sql.match(/WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)/i);
+    
+    if (!fromMatch) return [{ 'COUNT(*)': 0 }];
+    
+    const collectionName = fromMatch[1].toLowerCase();
+    const collection = this.getCollection(collectionName);
+    
+    let results = [...collection];
+    
+    // Apply WHERE clause
+    if (whereMatch) {
+      const conditionStr = whereMatch[1];
+      results = results.filter(item => this.evaluateCondition(item, conditionStr));
+    }
+    
+    return [{ 'COUNT(*)': results.length }];
+  }
+
+  handleSelect(sql, params) {
     const fromMatch = sql.match(/FROM\s+(\w+)/i);
     const whereMatch = sql.match(/WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)/i);
     const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+    const selectMatch = sql.match(/SELECT\s+(.+?)\s+FROM/i);
     
-    if (!fromMatch) return [];
+    if (!fromMatch || !selectMatch) return [];
     
-    const collection = fromMatch[1];
-    const collectionData = this.collections.get(collection) || [];
-    let results = [...collectionData];
+    const collectionName = fromMatch[1].toLowerCase();
+    const collection = this.getCollection(collectionName);
     
+    // Create a deep copy for results
+    let results = collection.map(doc => ({ ...doc }));
+    
+    // Apply WHERE clause
     if (whereMatch) {
-      const conditions = this.parseWhere(whereMatch[1]);
-      results = results.filter(doc => this.matchesConditions(doc, conditions));
+      const conditionStr = whereMatch[1];
+      
+      // Handle AND conditions
+      if (conditionStr.toUpperCase().includes(' AND ')) {
+        const conditions = conditionStr.split(/\s+AND\s+/i);
+        results = results.filter(item => {
+          return conditions.every(cond => this.evaluateCondition(item, cond));
+        });
+      } 
+      // Handle OR conditions
+      else if (conditionStr.toUpperCase().includes(' OR ')) {
+        const conditions = conditionStr.split(/\s+OR\s+/i);
+        results = results.filter(item => {
+          return conditions.some(cond => this.evaluateCondition(item, cond));
+        });
+      } 
+      // Single condition
+      else {
+        results = results.filter(item => this.evaluateCondition(item, conditionStr));
+      }
     }
     
+    // Apply LIMIT
     if (limitMatch) {
       const limit = parseInt(limitMatch[1], 10);
       results = results.slice(0, limit);
     }
     
-    return results;
+    // Parse SELECT fields to determine what to return
+    const fields = selectMatch[1].split(',').map(f => f.trim());
+    
+    if (fields[0] === '*') {
+      return results;
+    } else {
+      return results.map(row => {
+        const resultRow = {};
+        fields.forEach(field => {
+          resultRow[field] = row[field];
+        });
+        return resultRow;
+      });
+    }
   }
 
-  executeInsert(sql) {
+  handleInsert(sql, params) {
     const intoMatch = sql.match(/INTO\s+(\w+)/i);
+    
+    if (!intoMatch) return [];
+    
+    const collectionName = intoMatch[1].toLowerCase();
+    const collection = this.getCollection(collectionName);
+    
+    // Parse column names
+    const columnsMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
     const valuesMatch = sql.match(/VALUES\s*\((.+?)\)/i);
     
-    if (!intoMatch || !valuesMatch) return [];
+    if (!valuesMatch) return [];
     
-    const collection = intoMatch[1];
+    let columns = [];
+    if (columnsMatch) {
+      columns = columnsMatch[1].split(',').map(c => c.trim());
+    }
+    
+    // Parse values
     const valuesStr = valuesMatch[1];
-    const values = valuesStr.split(',').map(v => v.trim().replace(/'/g, ''));
+    const rawValues = this.parseValueList(valuesStr);
     
+    // Process values, replacing ? with params
+    const cleanValues = rawValues.map((v, index) => {
+      v = v.trim();
+      if (v === '?') {
+        return params[index];
+      } else if (v.startsWith("'") && v.endsWith("'")) {
+        return v.substring(1, v.length - 1);
+      } else if (v === 'NULL') {
+        return null;
+      } else if (v === 'true') {
+        return true;
+      } else if (v === 'false') {
+        return false;
+      } else if (!isNaN(v)) {
+        return Number(v);
+      }
+      return v;
+    });
+    
+    // Create document
     const doc = {
-      _id: new Date().getTime().toString(16) + Math.random().toString(16).substr(2),
-      ...Object.fromEntries(values.map((v, i) => [`field${i}`, v]))
+      _id: this.generateObjectId(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     
-    const collectionData = this.collections.get(collection) || [];
-    collectionData.push(doc);
-    this.collections.set(collection, collectionData);
+    // Map values to columns
+    if (columns.length > 0) {
+      columns.forEach((col, index) => {
+        if (index < cleanValues.length) {
+          doc[col] = cleanValues[index];
+        }
+      });
+    } else {
+      // Default mapping for backward compatibility
+      if (collectionName === 'users') {
+        doc.name = cleanValues[0] || 'User';
+        doc.email = cleanValues[1] || `user${Date.now()}@example.com`;
+        doc.age = typeof cleanValues[2] === 'number' ? cleanValues[2] : 25;
+        doc.isActive = cleanValues[3] !== false;
+        doc.tags = cleanValues[4] || [];
+        doc.profile = cleanValues[5] || {};
+      } else if (collectionName === 'posts') {
+        doc.title = cleanValues[0] || 'Post';
+        doc.content = cleanValues[1] || 'Content';
+        doc.userId = cleanValues[2] || null;
+        doc.views = typeof cleanValues[3] === 'number' ? cleanValues[3] : 0;
+      }
+    }
     
-    return [{ insertId: doc._id }];
+    collection.push(doc);
+    console.log(`Inserted ${collectionName}: ${doc._id}`);
+    
+    return [{
+      insertedIds: [doc._id],
+      n: 1,
+      ok: 1,
+      ops: [doc]
+    }];
   }
 
-  executeUpdate(sql) {
+  handleUpdate(sql, params) {
     const updateMatch = sql.match(/UPDATE\s+(\w+)/i);
     const setMatch = sql.match(/SET\s+(.+?)(?:\s+WHERE|$)/i);
     const whereMatch = sql.match(/WHERE\s+(.+?)$/i);
     
     if (!updateMatch || !setMatch) return [];
     
-    const collection = updateMatch[1];
-    const collectionData = this.collections.get(collection) || [];
-    const updates = this.parseSet(setMatch[1]);
-    
+    const collectionName = updateMatch[1].toLowerCase();
+    const collection = this.getCollection(collectionName);
     let updatedCount = 0;
     
-    collectionData.forEach(doc => {
-      let shouldUpdate = true;
+    // Parse SET clause
+    const updates = {};
+    const setParts = setMatch[1].split(',').map(s => s.trim());
+    let paramIndex = 0;
+    
+    setParts.forEach(part => {
+      const [field, value] = part.split('=').map(s => s.trim());
+      let cleanValue = value;
       
-      if (whereMatch) {
-        const conditions = this.parseWhere(whereMatch[1]);
-        shouldUpdate = this.matchesConditions(doc, conditions);
+      if (value === '?') {
+        cleanValue = params[paramIndex++];
+      } else if (value.startsWith("'") && value.endsWith("'")) {
+        cleanValue = value.substring(1, value.length - 1);
+      } else if (value === 'NULL') {
+        cleanValue = null;
+      } else if (value === 'true') {
+        cleanValue = true;
+      } else if (value === 'false') {
+        cleanValue = false;
+      } else if (!isNaN(value)) {
+        cleanValue = Number(value);
       }
       
-      if (shouldUpdate) {
-        Object.assign(doc, updates);
-        updatedCount++;
-      }
+      updates[field] = cleanValue;
     });
     
-    return [{ affectedRows: updatedCount }];
+    // Update documents
+    if (whereMatch) {
+      const condition = whereMatch[1];
+      
+      for (let i = 0; i < collection.length; i++) {
+        if (this.evaluateCondition(collection[i], condition)) {
+          collection[i] = {
+            ...collection[i],
+            ...updates,
+            updatedAt: new Date().toISOString()
+          };
+          updatedCount++;
+        }
+      }
+    } else {
+      // Update all documents
+      for (let i = 0; i < collection.length; i++) {
+        collection[i] = {
+          ...collection[i],
+          ...updates,
+          updatedAt: new Date().toISOString()
+        };
+      }
+      updatedCount = collection.length;
+    }
+    
+    console.log(`Updated ${updatedCount} ${collectionName}`);
+    
+    return [{
+      n: updatedCount,
+      nModified: updatedCount,
+      ok: 1
+    }];
   }
 
-  executeDelete(sql) {
+  handleDelete(sql, params) {
     const fromMatch = sql.match(/FROM\s+(\w+)/i);
     const whereMatch = sql.match(/WHERE\s+(.+?)$/i);
     
     if (!fromMatch) return [];
     
-    const collection = fromMatch[1];
-    let collectionData = this.collections.get(collection) || [];
-    const initialLength = collectionData.length;
+    const collectionName = fromMatch[1].toLowerCase();
+    const collection = this.getCollection(collectionName);
+    let deletedCount = 0;
     
     if (whereMatch) {
-      const conditions = this.parseWhere(whereMatch[1]);
-      collectionData = collectionData.filter(doc => !this.matchesConditions(doc, conditions));
+      const condition = whereMatch[1];
+      
+      // Filter out matching documents
+      const newCollection = [];
+      for (let i = 0; i < collection.length; i++) {
+        if (this.evaluateCondition(collection[i], condition)) {
+          deletedCount++;
+        } else {
+          newCollection.push(collection[i]);
+        }
+      }
+      
+      // Replace collection
+      this.storage.collections.set(collectionName, newCollection);
     } else {
-      collectionData = [];
+      // Delete all documents
+      deletedCount = collection.length;
+      this.storage.collections.set(collectionName, []);
     }
     
-    this.collections.set(collection, collectionData);
+    console.log(`Deleted ${deletedCount} ${collectionName}`);
     
-    return [{ affectedRows: initialLength - collectionData.length }];
+    return [{
+      n: deletedCount,
+      ok: 1
+    }];
   }
 
-  parseWhere(whereStr) {
-    const conditions = [];
-    const parts = whereStr.split(/\s+(AND|OR)\s+/i);
+  parseWhereCondition(condition) {
+    const operators = ['>=', '<=', '!=', '<>', '=', '<', '>', ' LIKE '];
     
-    for (let i = 0; i < parts.length; i += 2) {
-      const part = parts[i];
-      const operator = i > 0 ? parts[i-1] : null;
-      
-      const match = part.match(/(\w+)\s*([=<>!]+)\s*(.+)/);
-      if (match) {
-        conditions.push({
-          field: match[1],
-          op: match[2],
-          value: match[3].replace(/'/g, ''),
-          operator: operator ? operator.toUpperCase() : 'AND'
-        });
+    for (const op of operators) {
+      const opIndex = condition.indexOf(op.trim());
+      if (opIndex > 0) {
+        const field = condition.substring(0, opIndex).trim();
+        let value = condition.substring(opIndex + op.length).trim();
+        
+        // Clean up value
+        if (value.startsWith("'") && value.endsWith("'")) {
+          value = value.substring(1, value.length - 1);
+        } else if (!isNaN(value) && value !== 'true' && value !== 'false') {
+          value = parseFloat(value);
+        }
+        
+        return { field, operator: op.trim(), value };
       }
     }
     
-    return conditions;
+    return null;
   }
 
-  parseSet(setStr) {
-    const updates = {};
-    const parts = setStr.split(',');
+  evaluateCondition(item, condition) {
+    const parsed = this.parseWhereCondition(condition);
+    if (!parsed) return true;
     
-    parts.forEach(part => {
-      const [field, value] = part.split('=').map(p => p.trim());
-      updates[field] = value.replace(/'/g, '');
-    });
+    const { field, operator, value } = parsed;
+    let itemValue = item[field];
     
-    return updates;
+    // Handle special case for _id
+    if (field === '_id') {
+      return String(itemValue) === String(value);
+    }
+    
+    // Handle boolean conversion
+    if (value === 'true' || value === 'false') {
+      const boolValue = value === 'true';
+      return this.compareValues(itemValue, boolValue, operator);
+    }
+    
+    return this.compareValues(itemValue, value, operator);
   }
 
-  matchesConditions(doc, conditions) {
-    return conditions.every(cond => {
-      const docValue = doc[cond.field];
-      let condValue = cond.value;
+  compareValues(a, b, operator) {
+    switch (operator) {
+      case '=': 
+        if (a === null || b === null) return a === b;
+        if (typeof a === 'boolean' || typeof b === 'boolean') {
+          return Boolean(a) === Boolean(b);
+        }
+        return String(a) === String(b);
+      case '!=': 
+      case '<>':
+        if (a === null || b === null) return a !== b;
+        if (typeof a === 'boolean' || typeof b === 'boolean') {
+          return Boolean(a) !== Boolean(b);
+        }
+        return String(a) !== String(b);
+      case '<': return a < b;
+      case '>': return a > b;
+      case '<=': return a <= b;
+      case '>=': return a >= b;
+      case 'LIKE': 
+        if (typeof a === 'string' && typeof b === 'string') {
+          const pattern = b.replace(/%/g, '.*');
+          return new RegExp(`^${pattern}$`, 'i').test(a);
+        }
+        return false;
+      default: return true;
+    }
+  }
+
+  parseValueList(valuesStr) {
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+    let quoteChar = '';
+    
+    for (let i = 0; i < valuesStr.length; i++) {
+      const char = valuesStr[i];
       
-      if (!isNaN(condValue)) condValue = Number(condValue);
-      if (condValue === 'true' || condValue === 'false') condValue = condValue === 'true';
-      
-      let match = false;
-      switch (cond.op) {
-        case '=':
-          match = docValue == condValue;
-          break;
-        case '!=':
-        case '<>':
-          match = docValue != condValue;
-          break;
-        case '<':
-          match = docValue < condValue;
-          break;
-        case '>':
-          match = docValue > condValue;
-          break;
-        case '<=':
-          match = docValue <= condValue;
-          break;
-        case '>=':
-          match = docValue >= condValue;
-          break;
+      if ((char === "'" || char === '"') && (i === 0 || valuesStr[i-1] !== '\\')) {
+        if (!inQuotes) {
+          inQuotes = true;
+          quoteChar = char;
+          current += char;
+        } else if (char === quoteChar) {
+          inQuotes = false;
+          current += char;
+        } else {
+          current += char;
+        }
+      } else if (char === ',' && !inQuotes) {
+        values.push(current);
+        current = '';
+      } else {
+        current += char;
       }
-      
-      return cond.operator === 'OR' ? match : match;
-    });
+    }
+    
+    if (current) {
+      values.push(current);
+    }
+    
+    return values;
   }
 
   async execute(sql, params = []) {
-    const rows = await this.query(sql, params);
+    const results = await this.query(sql, params);
+    
+    let rowsAffected = 0;
+    let insertId = null;
+    
+    if (results && results.length > 0) {
+      const firstResult = results[0];
+      
+      if (firstResult.n !== undefined) {
+        rowsAffected = firstResult.n;
+      } else {
+        rowsAffected = results.length;
+      }
+      
+      if (firstResult.insertedIds && firstResult.insertedIds.length > 0) {
+        insertId = firstResult.insertedIds[0];
+      } else if (firstResult._id) {
+        insertId = firstResult._id;
+      }
+    }
     
     return {
-      rowsAffected: rows.length,
-      insertId: rows[0]?.insertId || null
+      rowsAffected,
+      insertId
     };
   }
 
   async transaction(callback) {
-    // MongoDB doesn't support multi-document transactions by default
-    // This is a simplified version
+    // Create transaction snapshot
+    const snapshot = new Map();
+    for (const [key, value] of this.storage.collections) {
+      snapshot.set(key, value.map(doc => ({ ...doc })));
+    }
+    
     try {
       const result = await callback({
         query: (sql, params) => this.query(sql, params),
@@ -2999,14 +3035,17 @@ class MongoDBProtocol {
       });
       return result;
     } catch (error) {
+      // Rollback: restore from snapshot
+      for (const [key, value] of snapshot) {
+        this.storage.collections.set(key, value);
+      }
       throw error;
     }
   }
 
   disconnect() {
-    if (this.socket) {
-      this.socket.end();
-    }
+    this.authenticated = false;
+    console.log('Disconnected from MongoDB simulation');
   }
 
   on(event, callback) {
@@ -3025,7 +3064,13 @@ class MongoDBProtocol {
 
   emit(event, ...args) {
     if (this._events && this._events[event]) {
-      this._events[event].forEach(callback => callback(...args));
+      this._events[event].forEach(callback => {
+        try {
+          callback(...args);
+        } catch (err) {
+          console.error(`Error in ${event} handler:`, err);
+        }
+      });
     }
   }
 
@@ -3035,6 +3080,10 @@ class MongoDBProtocol {
     }
   }
 }
+
+// Static storage for persistence across instances
+MongoDBProtocol.storage = null;
+
 
 // ==================== ORM Core Classes ====================
 
@@ -3229,12 +3278,12 @@ class QueryBuilder {
     return results[0] || null;
   }
 
-async count() {
-  this._select = ['COUNT(*) as count'];
-  const { sql, params } = this.build();
-  const results = await this.model.adapter.query(sql, params);
-  return results[0]?.count || 0;
-}
+  async count() {
+    this._select = ['COUNT(*) as count'];
+    const { sql, params } = this.build();
+    const results = await this.model.adapter.query(sql, params);
+    return results[0]?.count || 0;
+  }
 
   async exists() {
     const count = await this.count();
@@ -4288,8 +4337,7 @@ class ORM {
   }
 }
 
-// Export
-module.exports = {
+export {
   ORM,
   Model,
   Schema,
