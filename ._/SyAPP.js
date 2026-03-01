@@ -2919,6 +2919,97 @@ class SyAPP_Func {
         await new Promise(resolve => setTimeout(resolve, ms));
       }
 
+      // Add this method to the SyAPP_Func class, after the DropDown method
+
+      this.Page = async (id, name = '', code = async () => {}, config = {
+        pagelabel: undefined,
+        jumpTo: 1,
+        lock: false,
+        lockKey: undefined
+      }) => {
+        if (this.Builds.has(id)) {
+          const userBuild = this.Builds.get(id);
+          const currentProps = userBuild.Session.ActualProps || {};
+          const currentPage = currentProps.page || '';
+          
+          if (config.lock) {
+            const lockKey = config.lockKey || `page-lock-${name}`;
+            const isLocked = this.Storages.Get(id, lockKey);
+            
+            if (isLocked && !currentProps._unlock) {
+              return;
+            }
+            
+            if (!isLocked && name === currentPage) {
+              this.Storages.Set(id, lockKey, true);
+            }
+            
+            if (currentProps._unlock === lockKey) {
+              this.Storages.Clear(id, lockKey);
+              delete userBuild.Session.ActualProps._unlock;
+            }
+          }
+          
+          const shouldExecute = (name === currentPage) || (name === '' && !currentPage);
+          
+          if (shouldExecute) {
+            if (config.pagelabel) {
+              this.Text(id, `• ${config.pagelabel}`);
+            }
+            
+            await code();
+          }
+        } else {
+          if (this.Log) {
+            console.log(`this.Page() Error - userBuild not found | BuildID: ${id} | Page: ${name}`);
+          }
+        }
+      };
+      
+      this.LockPage = (id, pageName, lockKey = null) => {
+        if (this.Builds.has(id)) {
+          const key = lockKey || `page-lock-${pageName}`;
+          this.Storages.Set(id, key, true);
+        }
+      };
+      
+      this.UnlockPage = (id, pageName, lockKey = null) => {
+        if (this.Builds.has(id)) {
+          const key = lockKey || `page-lock-${pageName}`;
+          this.Storages.Clear(id, key);
+        }
+      };
+      
+      this.IsPageLocked = (id, pageName, lockKey = null) => {
+        if (this.Builds.has(id)) {
+          const key = lockKey || `page-lock-${pageName}`;
+          return !!this.Storages.Get(id, key);
+        }
+        return false;
+      };
+
+
+
+// Enhanced SetPage with unlock option
+this.SetPage = (id, page, unlock = false) => {
+  if (this.Builds.has(id)) {
+    const userBuild = this.Builds.get(id);
+    if (!userBuild.Session.ActualProps) {
+      userBuild.Session.ActualProps = {};
+    }
+    userBuild.Session.ActualProps.page = page;
+    
+    // Add unlock flag if needed
+    if (unlock && page) {
+      userBuild.Session.ActualProps._unlock = `page-lock-${page}`;
+    }
+  } else {
+    if (this.Log) {
+      console.log(`this.SetPage() Error - userBuild not found | BuildID: ${id}`);
+    }
+  }
+};
+
       this.Pagination = {
         Button: (id, name = '', data = [], config = {
           actual_page: 1,
@@ -3575,12 +3666,36 @@ class SyAPP {
           
       }
 
-      this.HUD.on(this.HUD.eventTypes.MENU_SELECTION,(e) => {
-        this.LoadScreen(e.metadata.path,{jumpTo :  e.metadata.jumpTo || false,resetSelection : e.metadata.resetSelection || false,props : e.metadata.props})
-        .catch(er => {
-          this.LoadScreen('error',{props : {error_message : er,error_func : e.metadata.path,mainfunc : this.MainFunc.Name}})
-        })
-    })
+    // In the SyAPP constructor, replace the HUD.on menu selection handler:
+
+this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
+  // Get current session props before navigation
+  const currentSession = this.Sessions.get(this.MainSessionID);
+  const currentProps = currentSession.ActualProps || {};
+  const currentPage = currentProps.page || '';
+  
+  // Merge current page with new props if not explicitly overridden
+  const newProps = e.metadata.props || {};
+  
+  // If the new props don't have a 'page' property, preserve the current page
+  if (!('page' in newProps) && currentPage) {
+    newProps.page = currentPage;
+  }
+  
+  this.LoadScreen(e.metadata.path, {
+    jumpTo: e.metadata.jumpTo || false,
+    resetSelection: e.metadata.resetSelection || false,
+    props: newProps
+  }).catch(er => {
+    this.LoadScreen('error', {
+      props: {
+        error_message: er,
+        error_func: e.metadata.path,
+        mainfunc: this.MainFunc.Name
+      }
+    });
+  });
+});
 
       this.LoadScreen()
   }
@@ -3589,9 +3704,41 @@ static Func(){return SyAPP_Func}
 
 }
 
+class MyFunction extends SyAPP_Func {
+  constructor() {
+    super(
+      'myfunction',
+      async (props) => {
+        const uid = props.session.UniqueID;
+        
+        await this.Page(uid,'',async () => {
+          this.Text(uid,'Main menu')
+          this.Button(uid,{name : 'Pagina 1',props : {page : 'page1'}})
+          this.Button(uid,{name : 'Pagina 2',props : {page : 'page2'}})
+        })
+
+        await this.Page(uid,'page1',async () => {
+          this.Text(uid,'PAGINA 1')
+          this.Button(uid,{name : 'Button test'})
+          this.Button(uid,{name : 'Button test'})
+          this.Button(uid,{name : '<- voltar',props : {page : ''}})
+        })
+
+        await this.Page(uid,'page2',async () => {
+          this.Text(uid,'PAGINA 2')
+          this.Button(uid,{name : 'Button test'})
+          this.Button(uid,{name : 'Button test'})
+          this.Button(uid,{name : '<- voltar',props : {page : ''}})
+        })
+      
+      }
+    );
+  }
+}
+
 // If this file is run directly, execute the CLI
 if (import.meta.url === `file://${process.argv[1]}`) {
-    new SyAPP()
+    new SyAPP({mainfunc : MyFunction})
 }
 
 
