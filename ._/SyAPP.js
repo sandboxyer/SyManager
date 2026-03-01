@@ -3704,42 +3704,9 @@ static Func(){return SyAPP_Func}
 
 }
 
-class MyFunction extends SyAPP_Func {
-  constructor() {
-    super(
-      'myfunction',
-      async (props) => {
-        const uid = props.session.UniqueID;
-        
-        await this.Page(uid,'',async () => {
-          this.Text(uid,'Main menu')
-          this.Button(uid,{name : 'Pagina 1',props : {page : 'page1'}})
-          this.Button(uid,{name : 'Pagina 2',props : {page : 'page2'}})
-        })
-
-        await this.Page(uid,'page1',async () => {
-          this.Text(uid,'PAGINA 1')
-          this.Button(uid,{name : 'Button test'})
-          this.Button(uid,{name : 'Button test'})
-          this.Button(uid,{name : '<- voltar',props : {page : ''}})
-        })
-
-        await this.Page(uid,'page2',async () => {
-          this.Text(uid,'PAGINA 2')
-          this.Button(uid,{name : 'Button test'})
-          this.Button(uid,{name : 'Button test'})
-          this.Button(uid,{name : '<- voltar',props : {page : ''}})
-        })
-      
-      }
-    );
-  }
-}
-
 // If this file is run directly, execute the CLI
 if (import.meta.url === `file://${process.argv[1]}`) {
-    new SyAPP({mainfunc : MyFunction})
+    new SyAPP({mainfunc : TemplateFunc})
 }
-
 
 export default SyAPP
