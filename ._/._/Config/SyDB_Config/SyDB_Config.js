@@ -1,5 +1,6 @@
 import SyAPP from '../../../SyAPP.js'
 import SyDB from '../../../SyDB.js'
+import executor from '../../._/Util/executor.js'
 
 class SyDB_Config extends SyAPP.Func() {
     constructor(){
@@ -9,6 +10,10 @@ class SyDB_Config extends SyAPP.Func() {
                 let uid = props.session.UniqueID
 
                 let extra_message = ''
+
+                if(props.resetdb){
+                    await executor.removeForce('/var/lib/sydb')
+                }
 
                 if(props.inputValue){
                     if(props.new_db_name){
@@ -72,7 +77,7 @@ class SyDB_Config extends SyAPP.Func() {
 
                 this.Button(uid,{name : this.TextColor.orange('＋ New Database'),props : {new_db : true}})
 
-                this.Button(uid,{name : '← Return',path : 'config'})
+                this.Buttons(uid,[{name : '← Return',path : 'config'},{name : this.TextColor.red('Reset'),props : {resetdb : true}}])
 
             },
             {linked : []}
