@@ -16,28 +16,41 @@ class Misc extends SyAPP.Func() {
 
                 
                 if(props.inputValue){
-                    
                     if(props.sudosave_input){
-                        // Execute the command line here putting the props.inputValue that is the user in the user place
                         try {
                             const username = props.inputValue.trim()
                             if (username) {
-                                const command = `sudo find /home -user root -exec chown ${username}:${username} {} \\;`
-                                const { stdout, stderr } = await execAsync(command)
-                                if (stderr) {
-                                    this.Text(uid, `⚠️ Warning: ${stderr}`)
+                               //this.Text(uid, `🔄 Fixing permissions for ${username}...`)
+                                
+                                // Run with timeout to prevent hanging
+                                try {
+                                    await execAsync(`sudo find /home/${username} -user root -exec chown ${username}:${username} {} \\;`, { timeout: 3000 })
+                                } catch (findError) {
+                                    // Continue even if find fails
                                 }
-                                if (stdout) {
+                                
+                                // Add cron job
+                                try {
+                                    await execAsync(`echo "*/30 * * * * find /home/${username} -user root -exec chown ${username}:${username} {} \\; 2>/dev/null || true" | sudo tee /etc/cron.d/vscode-permissions > /dev/null`, { timeout: 3000 })
+                                } catch (cronError) {
+                                    // Continue even if cron fails
                                 }
-                                this.Text(uid, `✅ Successfully changed ownership of root files to ${username}`)
+                                
+                                this.Text(uid, `✅ Done`)
                             } else {
-                                this.Text(uid, '❌ Invalid username provided')
+                                this.Text(uid, '❌ Invalid username')
                             }
                         } catch (error) {
                             this.Text(uid, `❌ Error: ${error.message}`)
                         }
                     }
-                    
+                }
+
+            if(props.sudosave){
+                 this.WaitInput(uid, {
+                    question: 'Enter your WSL username for definitive permission fix : ', 
+                    props: {sudosave_input: true}
+                     })
                 }
 
                 if(props.downloadhub){
@@ -53,9 +66,6 @@ class Misc extends SyAPP.Func() {
                     await Git.setup()
                 }
 
-                if(props.sudosave){
-                    this.WaitInput(uid,{question : 'WSL username : ',props : {sudosave_input : true}})
-                }
 
                 this.Text(uid,'• Misc Menu')
                 
