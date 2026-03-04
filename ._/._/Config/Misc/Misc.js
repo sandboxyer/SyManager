@@ -4,6 +4,7 @@ import ClipInstaller from '../../._/Util/clip.js'
 import Git from '../../._/Util/Git.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import os from 'os'
 
 const execAsync = promisify(exec)
 
@@ -14,43 +15,39 @@ class Misc extends SyAPP.Func() {
             async (props) => {
                 let uid = props.session.UniqueID
 
-                
-                if(props.inputValue){
-                    if(props.sudosave_input){
-                        try {
-                            const username = props.inputValue.trim()
-                            if (username) {
-                               //this.Text(uid, `🔄 Fixing permissions for ${username}...`)
-                                
-                                // Run with timeout to prevent hanging
-                                try {
-                                    await execAsync(`sudo find /home/${username} -user root -exec chown ${username}:${username} {} \\;`, { timeout: 3000 })
-                                } catch (findError) {
-                                    // Continue even if find fails
-                                }
-                                
-                                // Add cron job
-                                try {
-                                    await execAsync(`echo "*/30 * * * * find /home/${username} -user root -exec chown ${username}:${username} {} \\; 2>/dev/null || true" | sudo tee /etc/cron.d/vscode-permissions > /dev/null`, { timeout: 3000 })
-                                } catch (cronError) {
-                                    // Continue even if cron fails
-                                }
-                                
-                                this.Text(uid, `✅ Done`)
-                            } else {
-                                this.Text(uid, '❌ Invalid username')
-                            }
-                        } catch (error) {
-                            this.Text(uid, `❌ Error: ${error.message}`)
-                        }
-                    }
-                }
+                if (props.sudosave) {
+                    let resultMessage = '';
+                    
+                    try {
+                        const username = process.env.SUDO_USER || process.env.USER || os.userInfo().username;
+                        const targetDir = '/home'; 
 
-            if(props.sudosave){
-                 this.WaitInput(uid, {
-                    question: 'Enter your WSL username for definitive permission fix : ', 
-                    props: {sudosave_input: true}
-                     })
+                        this.Text(uid, `⏳ Surgically fixing permissions across ${targetDir} (Git-safe mode)...`);
+
+                        // 1. THE GIT-SAFE COMMAND
+                        // chown: Gives you ownership of all files so VS Code can save.
+                        // chmod u+rwX: Gives the user (u) read/write (rw) and directory-only execute (X). 
+                        // It does NOT make standard files executable, so Git stays perfectly quiet.
+                        const safeCmd = `
+                            chown -R ${username}:${username} ${targetDir} 2>/dev/null || sudo -n chown -R ${username}:${username} ${targetDir} 2>/dev/null;
+                            chmod -R u+rwX ${targetDir} 2>/dev/null || sudo -n chmod -R u+rwX ${targetDir} 2>/dev/null
+                        `.replace(/\n/g, ' ');
+
+                        await execAsync(safeCmd, { timeout: 300000 }); 
+                        
+                        // 2. THE GIT-SAFE BACKGROUND SWEEPER
+                        // Runs every 5 minutes but uses the same Git-safe Capital X flag.
+                        try {
+                            const cronCmd = `*/5 * * * * chown -R ${username}:${username} ${targetDir} 2>/dev/null; chmod -R u+rwX ${targetDir} 2>/dev/null`;
+                            await execAsync(`echo '${cronCmd}' | sudo -n tee /etc/cron.d/vscode-permissions-home > /dev/null`, { timeout: 10000 });
+                        } catch (cronError) {}
+
+                        resultMessage = `✅ Vscode save permission applied !`;
+                    } catch (error) {
+                        resultMessage = `❌ Fatal Error: ${error.message}`;
+                    }
+                    
+                    this.Text(uid, resultMessage);
                 }
 
                 if(props.downloadhub){
@@ -66,19 +63,16 @@ class Misc extends SyAPP.Func() {
                     await Git.setup()
                 }
 
-
                 this.Text(uid,'• Misc Menu')
                 
                 this.Button(uid,{name : 'DownloadHUD',props : {downloadhub : true}})
                 this.Button(uid,{name : 'Git Config',props : {gitconfig : true}})
                 await this.DropDown(uid,'windows-drop',async () => {
                     this.Button(uid,{name : 'Clip',props : {clip : true}})
-                    this.Button(uid,{name :'WSL | /home sudo save',props : {sudosave : true}})
+                    this.Button(uid,{name :'WSL | Vscode save',props : {sudosave : true}})
                 },{up_buttontext : 'Windows Toolkit',down_buttontext : 'Windows Toolkit'})
                 
-               
-
-		this.Button(uid,{name : ' '})
+                this.Button(uid,{name : ' '})
                 this.Button(uid,{name : '← Return',path : 'config'})
 
             }
