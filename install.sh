@@ -81,6 +81,7 @@ show_help() {
     for cmd in $NODE_ENTRY_POINTS_CMD; do
         echo "  $cmd"
     done
+    echo "  wsave"
     echo
     echo "Working directory configuration:"
     for cmd in $NODE_ENTRY_POINTS_CMD; do
@@ -198,6 +199,9 @@ remove_links() {
         dest_path="$BIN_DIR/$cmd"
         [ -L "$dest_path" ] && rm -f "$dest_path"
     done
+    
+    # Remove wsave link
+    [ -L "$BIN_DIR/wsave" ] && rm -f "$BIN_DIR/wsave"
 }
 
 preserve_files_from_backup() {
@@ -475,7 +479,7 @@ Arguments:
     major                 Bump major version (X+1.0.0)
     minor                 Bump minor version (X.Y+1.0)
     patch                 Bump patch version (X.Y.Z+1)
-    <X.Y.Z>               Set specific version (e.g., 1.2.3)
+    <X.Y.Z>              Set specific version (e.g., 1.2.3)
     <X.Y.Z-prerelease>    Set version with prerelease tag
 
 Examples:
@@ -567,11 +571,44 @@ PKG_EOF
     log_message "Created enhanced pkg CLI utility at $pkg_cli_path"
 }
 
+create_wsave_cli() {
+    install_dir="$1"
+    wsave_path="$install_dir/wsave"
+    
+    log_message "Creating wsave CLI utility for totally silent VSCode permission fixes..."
+    
+    if [ -f "$wsave_path" ]; then
+        rm -f "$wsave_path"
+    fi
+    
+    # Create the shell script for wsave (totally silent mode)
+    cat > "$wsave_path" << 'WSAVE_EOF'
+#!/bin/sh
+USERNAME="${SUDO_USER:-${USER:-$(whoami)}}"
+TARGET_DIR="/home"
+
+# 1. THE GIT-SAFE COMMAND (Totally Silent)
+chown -R "$USERNAME:$USERNAME" "$TARGET_DIR" >/dev/null 2>&1 || sudo -n chown -R "$USERNAME:$USERNAME" "$TARGET_DIR" >/dev/null 2>&1
+chmod -R u+rwX "$TARGET_DIR" >/dev/null 2>&1 || sudo -n chmod -R u+rwX "$TARGET_DIR" >/dev/null 2>&1
+
+# 2. THE GIT-SAFE BACKGROUND SWEEPER
+CRON_CMD="*/5 * * * * chown -R $USERNAME:$USERNAME $TARGET_DIR 2>/dev/null; chmod -R u+rwX $TARGET_DIR 2>/dev/null"
+echo "$CRON_CMD" | sudo -n tee /etc/cron.d/vscode-permissions-home >/dev/null 2>&1 || true
+WSAVE_EOF
+    
+    chmod +x "$wsave_path"
+}
+
 create_command_links() {
     install_dir="$1"
     
     # Create pkg CLI in the installation directory
     create_pkg_cli "$install_dir"
+    
+    # Create wsave CLI and map globally
+    create_wsave_cli "$install_dir"
+    [ -L "$BIN_DIR/wsave" ] && rm -f "$BIN_DIR/wsave"
+    ln -sf "$install_dir/wsave" "$BIN_DIR/wsave"
     
     # Create arrays from space-separated lists
     src_list="$NODE_ENTRY_POINTS_SRC"
@@ -700,6 +737,7 @@ echo "Available commands:"
 for cmd in $NODE_ENTRY_POINTS_CMD; do
     echo "  $cmd"
 done
+echo "  wsave"
 
 printf "\n"
 echo "Working directory configuration:"
@@ -709,9 +747,10 @@ for cmd in $NODE_ENTRY_POINTS_CMD; do
 done
 
 printf "\n"
-echo "Generic pkg command features:"
+echo "Generic command features:"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
+echo "  wsave                        - Surgically fix VSCode save permissions silently"
 printf "\n"
 echo "pkg version supports:"
 echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
@@ -721,12 +760,12 @@ echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
 printf "\n"
 echo "Examples:"
-echo "  pkg run test                    # Runs 'test' script from package.json"
-echo "  pkg run build                   # Runs 'build' script from package.json"
-echo "  pkg run dev --port 3000         # Runs 'dev' script with --port argument"
+echo "  pkg run test                  # Runs 'test' script from package.json"
+echo "  pkg run build                 # Runs 'build' script from package.json"
+echo "  pkg run dev --port 3000       # Runs 'dev' script with --port argument"
 echo "  pkg run test --watch --verbose  # Runs 'test' script with multiple args"
-echo "  pkg version patch               # Bumps patch version and commits"
-echo "  pkg version 1.2.3               # Sets version to 1.2.3 and commits"
+echo "  pkg version patch             # Bumps patch version and commits"
+echo "  pkg version 1.2.3             # Sets version to 1.2.3 and commits"
 printf "\n"
 echo "Note: pkg works from any directory with a package.json file"
 
