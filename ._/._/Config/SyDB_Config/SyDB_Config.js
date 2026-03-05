@@ -74,11 +74,12 @@ class SyDB_Config extends SyAPP.Func() {
                     }
                 }
 
-
+                this.Button(uid,{name : ' '})
                 this.Button(uid,{name : this.TextColor.orange('＋ New Database'),props : {new_db : true}})
+                this.Button(uid,{name : ' '})
 
-                this.Buttons(uid,[{name : '← Return',path : 'config'},{name : this.TextColor.red('Reset'),props : {resetdb : true}}])
-
+                this.Buttons(uid,[{name : '← Return',path : 'config'},{name : this.TextColor.cyan('⚙️  Settings'),props : {resetdb : true}}])
+            //{name : this.TextColor.red('Reset'),props : {resetdb : true}}
             },
             {linked : []}
         )
