@@ -13,6 +13,7 @@ class SyDB_Config extends SyAPP.Func() {
 
                 if(props.resetdb){
                     await executor.removeForce('/var/lib/sydb')
+                    extra_message = ` | ${this.TextColor.green('✅ SyDB reseted !')}`
                 }
 
                 if(props.inputValue){
@@ -38,48 +39,68 @@ class SyDB_Config extends SyAPP.Func() {
                     
                 }
 
-                let databases = await SyDB.listDatabases()
-                if(databases.success){
-                    this.Text(uid,`Databases(${databases.databases.length})${extra_message}`)
-                    
-                    // Use for...of to ensure sequential processing
-                    for(const dbName of databases.databases) {
-                        await this.DropDown(uid, `drop-${dbName}`, async() => {
+                await this.Page(uid,'',async () => {
 
-                            let collections = await SyDB.listCollections(dbName)
-                            .catch(e => {
 
-                            })
-                            
-                                 await this.DropDown(uid,`drop-l2-1-${dbName}`,async () => {
+                    let databases = await SyDB.listDatabases()
+                    if(databases.success){
+                        this.Text(uid,`Databases(${databases.databases.length})${extra_message}`)
+                        
+                        // Use for...of to ensure sequential processing
+                        for(const dbName of databases.databases) {
+                            await this.DropDown(uid, `drop-${dbName}`, async() => {
+    
+                                let collections = await SyDB.listCollections(dbName)
+                                .catch(e => {
+    
+                                })
                                 
-                                if(collections.success){
-                                    collections.collections.forEach(e => {
-                                        this.Button(uid,{name : e})
-                                    })
-                                }
-
-                                
-                                
-                            },{up_buttontext : `Collections(${(collections.success) ? collections.collections.length : '0'})`,down_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,horizontal : true,jumpTo : 0,up_emoji : '🔍'})
-                          
-
-                            this.Button(uid,{name : '🗃️  Create Collection'})
-                           
-                            this.Button(uid,{name : '⚙️  Database Settings'})
-                        }, {
-                            up_buttontext: dbName,
-                            down_buttontext: dbName
-                        });
+                                     await this.DropDown(uid,`drop-l2-1-${dbName}`,async () => {
+                                    
+                                    if(collections.success){
+                                        collections.collections.forEach(e => {
+                                            this.Button(uid,{name : e})
+                                        })
+                                    }
+    
+                                    
+                                    
+                                },{up_buttontext : `Collections(${(collections.success) ? collections.collections.length : '0'})`,down_buttontext : `🔍 Collections(${(collections.success) ? collections.collections.length : '0'})`,horizontal : true,jumpTo : 0,up_emoji : '🔍'})
+                              
+    
+                                this.Button(uid,{name : '🗃️  Create Collection'})
+                               
+                                this.Button(uid,{name : '⚙️  Database Settings'})
+                            }, {
+                                up_buttontext: dbName,
+                                down_buttontext: dbName
+                            });
+                        }
                     }
-                }
+                    
+                    if(databases.databases.length > 0){
+                        this.Button(uid,{name : ' '})
+                    }
+                    
+                    this.Button(uid,{name : this.TextColor.orange('＋ New Database'),props : {new_db : true}})
+                    this.Button(uid,{name : ' '})
+    
+                    this.Buttons(uid,[{name : '← Return',path : 'config'},{name : this.TextColor.cyan('⚙️  Settings'),props : {page : 'settings'}}])
+                
 
-                this.Button(uid,{name : ' '})
-                this.Button(uid,{name : this.TextColor.orange('＋ New Database'),props : {new_db : true}})
-                this.Button(uid,{name : ' '})
 
-                this.Buttons(uid,[{name : '← Return',path : 'config'},{name : this.TextColor.cyan('⚙️  Settings'),props : {resetdb : true}}])
-            //{name : this.TextColor.red('Reset'),props : {resetdb : true}}
+
+                })
+
+
+                await this.Page(uid,'settings',async () => {
+                    this.Text(uid,`SyDB Settings${extra_message}`)
+                    this.Button(uid,{name : this.TextColor.red('Reset'),props : {resetdb : true}})
+                    this.Button(uid,{name : ' '})
+                    this.Button(uid,{name : '← Return',props : {page : ''}})
+                })
+
+               
             },
             {linked : []}
         )
