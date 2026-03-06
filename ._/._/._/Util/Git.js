@@ -18,6 +18,8 @@ class Git {
         
         if (this.#isExecuting) {
             await this.#handleCommandLine();
+            // Force exit after handling command line
+            process.exit(0);
         }
     }
 
@@ -174,6 +176,11 @@ Examples:
                 authProcess.on('error', (error) => {
                     reject(error);
                 });
+                
+                // Add timeout to prevent hanging
+                setTimeout(() => {
+                    reject(new Error('Authentication process timed out after 60 seconds'));
+                }, 60000);
             });
 
             if (exitCode === 0) {
@@ -359,12 +366,22 @@ Examples:
      */
     static #execCommand(command, options = {}) {
         return new Promise((resolve, reject) => {
-            exec(command, options, (error, stdout, stderr) => {
+            const child = exec(command, options, (error, stdout, stderr) => {
                 if (error) {
                     reject(error);
                     return;
                 }
                 resolve(stdout);
+            });
+            
+            // Add timeout to prevent hanging
+            const timeout = setTimeout(() => {
+                child.kill();
+                reject(new Error(`Command timed out: ${command}`));
+            }, 30000);
+            
+            child.on('exit', () => {
+                clearTimeout(timeout);
             });
         });
     }
@@ -400,6 +417,11 @@ Examples:
      * Cleanup method
      */
     static close() {
+        // Remove all listeners
+        process.stdin.removeAllListeners('data');
+        process.stdin.removeAllListeners('end');
+        process.stdin.removeAllListeners('error');
+        
         // Don't close the readline interface as it might be used elsewhere
         // Just clean up our reference
         this.#rl = null;
@@ -410,6 +432,10 @@ Examples:
 if (import.meta.url === `file://${process.argv[1]}`) {
     Git.init().then(() => {
         Git.close();
+        // Force exit after cleanup
+        setTimeout(() => {
+            process.exit(0);
+        }, 100);
     }).catch((error) => {
         console.error('Error:', error);
         Git.close();
