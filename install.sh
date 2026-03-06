@@ -37,6 +37,7 @@ get_command_working_dir() {
         "sypm") echo "caller" ;;
         "sydb") echo "global" ;;
         "pkg") echo "caller" ;;
+        "git-config") echo "global" ;;
         *) echo "global" ;;
     esac
 }
@@ -82,12 +83,14 @@ show_help() {
         echo "  $cmd"
     done
     echo "  wsave"
+    echo "  git-config"
     echo
     echo "Working directory configuration:"
     for cmd in $NODE_ENTRY_POINTS_CMD; do
         working_dir=$(get_command_working_dir "$cmd")
         echo "  $cmd: $working_dir"
     done
+    echo "  git-config: global"
     echo
     echo "Generic pkg command features:"
     echo "  pkg run <script>          Run npm script from any package.json"
@@ -202,6 +205,9 @@ remove_links() {
     
     # Remove wsave link
     [ -L "$BIN_DIR/wsave" ] && rm -f "$BIN_DIR/wsave"
+    
+    # Remove git-config link
+    [ -L "$BIN_DIR/git-config" ] && rm -f "$BIN_DIR/git-config"
 }
 
 preserve_files_from_backup() {
@@ -599,6 +605,43 @@ WSAVE_EOF
     chmod +x "$wsave_path"
 }
 
+create_git_config_command() {
+    install_dir="$1"
+    
+    log_message "Creating git-config command that finds Git.js anywhere in installation tree..."
+    
+    # Create wrapper that finds Git.js dynamically and ensures proper exit
+    git_config_wrapper="$install_dir/wrappers/git-config"
+    mkdir -p "$(dirname "$git_config_wrapper")"
+    
+    cat > "$git_config_wrapper" << 'EOF'
+#!/bin/sh
+# Find Git.js anywhere in the installation directory
+INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+GIT_JS=$(find "$INSTALL_DIR" -name "Git.js" -type f | head -1)
+
+if [ -z "$GIT_JS" ]; then
+    echo "Error: Git.js not found in installation directory" >&2
+    exit 1
+fi
+
+# Change to installation directory
+cd "$INSTALL_DIR" || exit 1
+
+# Use exec to replace the shell process with Node.js
+# This ensures proper signal handling and process termination
+exec node "$GIT_JS" --setup "$@"
+EOF
+    
+    chmod +x "$git_config_wrapper"
+    
+    # Create symlink in bin directory
+    [ -L "$BIN_DIR/git-config" ] && rm -f "$BIN_DIR/git-config"
+    ln -sf "$git_config_wrapper" "$BIN_DIR/git-config"
+    
+    log_message "Created git-config command that finds Git.js dynamically"
+}
+
 create_command_links() {
     install_dir="$1"
     
@@ -609,6 +652,9 @@ create_command_links() {
     create_wsave_cli "$install_dir"
     [ -L "$BIN_DIR/wsave" ] && rm -f "$BIN_DIR/wsave"
     ln -sf "$install_dir/wsave" "$BIN_DIR/wsave"
+    
+    # Create git-config command
+    create_git_config_command "$install_dir"
     
     # Create arrays from space-separated lists
     src_list="$NODE_ENTRY_POINTS_SRC"
@@ -738,6 +784,7 @@ for cmd in $NODE_ENTRY_POINTS_CMD; do
     echo "  $cmd"
 done
 echo "  wsave"
+echo "  git-config"
 
 printf "\n"
 echo "Working directory configuration:"
@@ -745,12 +792,14 @@ for cmd in $NODE_ENTRY_POINTS_CMD; do
     working_dir=$(get_command_working_dir "$cmd")
     echo "  $cmd: $working_dir"
 done
+echo "  git-config: global"
 
 printf "\n"
 echo "Generic command features:"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
 echo "  wsave                        - Surgically fix VSCode save permissions silently"
+echo "  git-config                    - Complete Git setup (finds and runs Git.js --setup)"
 printf "\n"
 echo "pkg version supports:"
 echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
@@ -763,11 +812,11 @@ echo "Examples:"
 echo "  pkg run test                  # Runs 'test' script from package.json"
 echo "  pkg run build                 # Runs 'build' script from package.json"
 echo "  pkg run dev --port 3000       # Runs 'dev' script with --port argument"
-echo "  pkg run test --watch --verbose  # Runs 'test' script with multiple args"
 echo "  pkg version patch             # Bumps patch version and commits"
-echo "  pkg version 1.2.3             # Sets version to 1.2.3 and commits"
+echo "  git-config                     # Complete Git setup (Git.js --setup)"
 printf "\n"
 echo "Note: pkg works from any directory with a package.json file"
+echo "Note: git-config finds Git.js anywhere in the installation tree"
 
 printf "\n"
 if [ "$LOCAL_DIR_MODE" = true ]; then
