@@ -92,9 +92,10 @@ show_help() {
     done
     echo "  git-config: global"
     echo
-    echo "Generic pkg command features:"
-    echo "  pkg run <script>          Run npm script from any package.json"
-    echo "  pkg version <type|ver>    Update version (major|minor|patch|X.Y.Z) and git commit"
+    echo "pkg command features:"
+    echo "  pkg start                    Create package.json (if missing) with version 0.0.1 and type:module"
+    echo "  pkg run <script> [args...]   Run npm script from any package.json with arguments"
+    echo "  pkg version <type|ver>        Update version (major|minor|patch|X.Y.Z) and git commit"
     exit 0
 }
 
@@ -244,14 +245,14 @@ create_pkg_cli() {
     install_dir="$1"
     pkg_cli_path="$install_dir/pkg-cli.js"
     
-    log_message "Creating generic pkg CLI utility with enhanced terminal handling..."
+    log_message "Creating enhanced pkg CLI utility with start command that creates minimal package.json..."
     
     # Always remove existing pkg-cli.js to ensure fresh creation
     if [ -f "$pkg_cli_path" ]; then
         rm -f "$pkg_cli_path"
     fi
     
-    # Create the generic pkg CLI JavaScript file with ES module syntax
+    # Create the enhanced pkg CLI JavaScript file with ES module syntax
     cat > "$pkg_cli_path" << 'PKG_EOF'
 #!/usr/bin/env node
 
@@ -289,14 +290,47 @@ function readPackageJson() {
     const content = fs.readFileSync(packageJsonPath, 'utf8');
     return JSON.parse(content);
   } catch (error) {
-    console.error(`Error reading package.json: ${error.message}`);
-    console.error(`Make sure you're in a project directory with a package.json file`);
+    return null;
+  }
+}
+
+function createMinimalPackageJson() {
+  const packageJson = {
+    version: "0.0.1",
+    type: "module"
+  };
+  
+  try {
+    fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    console.log(`✓ Created package.json with version 0.0.1 and type:module in ${callerCwd}`);
+    return packageJson;
+  } catch (error) {
+    console.error(`Error creating package.json: ${error.message}`);
     process.exit(1);
   }
 }
 
+function start() {
+  const existingPackageJson = readPackageJson();
+  
+  if (existingPackageJson) {
+    console.log(`package.json already exists in ${callerCwd}`);
+    console.log(`Current version: ${existingPackageJson.version || 'not specified'}`);
+    console.log(`Current type: ${existingPackageJson.type || 'not specified'}`);
+    process.exit(0);
+  }
+  
+  createMinimalPackageJson();
+}
+
 async function runScript(scriptName, ...scriptArgs) {
   const packageJson = readPackageJson();
+  
+  if (!packageJson) {
+    console.error(`Error: No package.json found in ${callerCwd}`);
+    console.error(`Run 'pkg start' first to create one, or ensure you're in a project with package.json`);
+    process.exit(1);
+  }
   
   if (!packageJson.scripts || !packageJson.scripts[scriptName]) {
     console.error(`Script "${scriptName}" not found in package.json`);
@@ -373,6 +407,13 @@ async function runScript(scriptName, ...scriptArgs) {
 
 function bumpVersion(bumpType) {
   const packageJson = readPackageJson();
+  
+  if (!packageJson) {
+    console.error(`Error: No package.json found in ${callerCwd}`);
+    console.error(`Run 'pkg start' first to create one`);
+    process.exit(1);
+  }
+  
   const currentVersion = packageJson.version || '0.0.0';
   
   // Parse current version
@@ -425,11 +466,10 @@ function bumpVersion(bumpType) {
       newVersion = bumpType;
   }
   
-  return updateVersion(currentVersion, newVersion);
+  return updateVersion(packageJson, newVersion);
 }
 
-async function updateVersion(oldVersion, newVersion) {
-  const packageJson = readPackageJson();
+async function updateVersion(packageJson, newVersion) {
   packageJson.version = newVersion;
   
   try {
@@ -473,10 +513,14 @@ pkg - Generic package.json utility
 Usage: pkg <command> [options]
 
 Commands:
+  start                  Create minimal package.json with version 0.0.1 and type:module (if missing)
   run <script> [args...]  Run any script from package.json with arguments
   version <type|ver>      Update version and create git commit
   
 Arguments:
+  For 'start' command:
+    No arguments - creates package.json only if it doesn't exist
+  
   For 'run' command:
     <script>              Script name from package.json scripts section
     [args...]            Arguments to pass to the script
@@ -489,6 +533,7 @@ Arguments:
     <X.Y.Z-prerelease>    Set version with prerelease tag
 
 Examples:
+  pkg start               Create package.json with version 0.0.1 and type:module
   pkg run test            Run the 'test' script from package.json
   pkg run build           Run the 'build' script from package.json
   pkg run dev --port 3000 Run 'dev' script with --port argument
@@ -533,7 +578,11 @@ async function main() {
   const command = args[0];
   
   switch (command) {
-      case 'run':
+    case 'start':
+      start();
+      break;
+      
+    case 'run':
       if (args.length < 2) {
         console.error('Usage: pkg run <script-name> [script-args...]');
         process.exit(1);
@@ -795,7 +844,8 @@ done
 echo "  git-config: global"
 
 printf "\n"
-echo "Generic command features:"
+echo "pkg command features:"
+echo "  pkg start                    - Create package.json with version 0.0.1 and type:module (if missing)"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
 echo "  wsave                        - Surgically fix VSCode save permissions silently"
@@ -809,13 +859,14 @@ echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
 printf "\n"
 echo "Examples:"
+echo "  pkg start                     # Creates package.json with version 0.0.1 and type:module"
 echo "  pkg run test                  # Runs 'test' script from package.json"
 echo "  pkg run build                 # Runs 'build' script from package.json"
 echo "  pkg run dev --port 3000       # Runs 'dev' script with --port argument"
 echo "  pkg version patch             # Bumps patch version and commits"
 echo "  git-config                     # Complete Git setup (Git.js --setup)"
 printf "\n"
-echo "Note: pkg works from any directory with a package.json file"
+echo "Note: pkg works from any directory. 'pkg start' creates minimal package.json only if missing"
 echo "Note: git-config finds Git.js anywhere in the installation tree"
 
 printf "\n"
