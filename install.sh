@@ -313,14 +313,42 @@ function createMinimalPackageJson() {
 function start() {
   const existingPackageJson = readPackageJson();
   
-  if (existingPackageJson) {
-    console.log(`package.json already exists in ${callerCwd}`);
-    console.log(`Current version: ${existingPackageJson.version || 'not specified'}`);
-    console.log(`Current type: ${existingPackageJson.type || 'not specified'}`);
-    process.exit(0);
+  if (!existingPackageJson) {
+    // No package.json exists - create it
+    createMinimalPackageJson();
+    return;
   }
   
-  createMinimalPackageJson();
+  // Package.json exists - check if type needs updating
+  let modified = false;
+  let updateMessage = [];
+  
+  // Check if type exists and is not "module"
+  if (!existingPackageJson.type || existingPackageJson.type !== "module") {
+    existingPackageJson.type = "module";
+    modified = true;
+    updateMessage.push("Added/updated type: 'module'");
+  }
+  
+  // Also ensure version exists for consistency
+  if (!existingPackageJson.version) {
+    existingPackageJson.version = "0.0.1";
+    modified = true;
+    updateMessage.push("Added version: 0.0.1");
+  }
+  
+  if (modified) {
+    try {
+      fs.writeFileSync(packageJsonPath, JSON.stringify(existingPackageJson, null, 2));
+      console.log(`✓ Updated package.json in ${callerCwd}:`);
+      updateMessage.forEach(msg => console.log(`  • ${msg}`));
+    } catch (error) {
+      console.error(`Error updating package.json: ${error.message}`);
+      process.exit(1);
+    }
+  } else {
+    console.log(`package.json already exists in ${callerCwd} with type:module and version: ${existingPackageJson.version || '0.0.1'}`);
+  }
 }
 
 async function runScript(scriptName, ...scriptArgs) {
@@ -513,13 +541,13 @@ pkg - Generic package.json utility
 Usage: pkg <command> [options]
 
 Commands:
-  start                  Create minimal package.json with version 0.0.1 and type:module (if missing)
+  start                  Create/ensure package.json has version 0.0.1 and type:module
   run <script> [args...]  Run any script from package.json with arguments
   version <type|ver>      Update version and create git commit
   
 Arguments:
   For 'start' command:
-    No arguments - creates package.json only if it doesn't exist
+    No arguments - creates package.json if missing, or adds/updates type:module if needed
   
   For 'run' command:
     <script>              Script name from package.json scripts section
@@ -533,7 +561,7 @@ Arguments:
     <X.Y.Z-prerelease>    Set version with prerelease tag
 
 Examples:
-  pkg start               Create package.json with version 0.0.1 and type:module
+  pkg start               Create package.json with version 0.0.1 and type:module, or update existing
   pkg run test            Run the 'test' script from package.json
   pkg run build           Run the 'build' script from package.json
   pkg run dev --port 3000 Run 'dev' script with --port argument
@@ -845,7 +873,7 @@ echo "  git-config: global"
 
 printf "\n"
 echo "pkg command features:"
-echo "  pkg start                    - Create package.json with version 0.0.1 and type:module (if missing)"
+echo "  pkg start                    - Create/ensure package.json has version 0.0.1 and type:module"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
 echo "  wsave                        - Surgically fix VSCode save permissions silently"
@@ -859,14 +887,14 @@ echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
 printf "\n"
 echo "Examples:"
-echo "  pkg start                     # Creates package.json with version 0.0.1 and type:module"
+echo "  pkg start                     # Creates/ensures package.json has version 0.0.1 and type:module"
 echo "  pkg run test                  # Runs 'test' script from package.json"
 echo "  pkg run build                 # Runs 'build' script from package.json"
 echo "  pkg run dev --port 3000       # Runs 'dev' script with --port argument"
 echo "  pkg version patch             # Bumps patch version and commits"
 echo "  git-config                     # Complete Git setup (Git.js --setup)"
 printf "\n"
-echo "Note: pkg works from any directory. 'pkg start' creates minimal package.json only if missing"
+echo "Note: pkg works from any directory. 'pkg start' ensures package.json has version 0.0.1 and type:module"
 echo "Note: git-config finds Git.js anywhere in the installation tree"
 
 printf "\n"
