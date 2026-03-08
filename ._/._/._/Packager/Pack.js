@@ -42,6 +42,10 @@ const colors = {
   bgWhite: '\x1b[47m'
 };
 
+// Get terminal size
+const terminalWidth = process.stdout.columns || 80;
+const terminalHeight = process.stdout.rows || 24;
+
 // Directories to ignore
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.cache', 'tmp', 'temp']);
 
@@ -90,32 +94,19 @@ const ARCHIVE_EXTENSIONS = new Set([
 
 // Binary file extensions
 const BINARY_EXTENSIONS = new Set([
-  // Executables
   '.exe', '.dll', '.so', '.dylib', '.bin', '.out', '.elf', '.app',
-  
-  // Images
   '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg', '.webp', '.tiff', '.psd',
   '.raw', '.cr2', '.nef', '.orf', '.sr2', '.eps', '.ai', '.cdr', '.wmf',
-  
-  // Fonts
   '.ttf', '.otf', '.woff', '.woff2', '.eot', '.pfb', '.pfm', '.afm',
-  
-  // Audio/Video
   '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv', '.flac', '.ogg', '.webm',
   '.m4a', '.m4v', '.wma', '.wmv', '.aac', '.ac3', '.ape', '.mid', '.midi',
   '.mpg', '.mpeg', '.m2v', '.mts', '.m2ts', '.ts', '.flv', '.swf', '.vob',
   '.3gp', '.3g2', '.asf', '.rm', '.ra', '.ram', '.divx', '.xvid',
-  
-  // Documents
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods',
   '.odp', '.odg', '.odf', '.pub', '.rtf', '.wpd', '.wps', '.key', '.numbers',
   '.pages', '.ps', '.epub', '.mobi', '.azw', '.djvu',
-  
-  // Databases
   '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb', '.dbf', '.pdb', '.frm',
   '.myd', '.myi', '.ibd', '.fdb', '.gdb', '.kdb', '.kdbx',
-  
-  // Object files
   '.o', '.obj', '.lib', '.a', '.la', '.lo', '.mod', '.ko', '.prx',
   '.class', '.dex', '.odex'
 ]);
@@ -136,6 +127,23 @@ function formatMB(bytes) {
   return (bytes / (1024 * 1024)).toFixed(2);
 }
 
+// Helper to truncate string with ellipsis
+function truncate(str, maxLength) {
+  if (str.length <= maxLength) return str;
+  return str.slice(0, maxLength - 3) + '...';
+}
+
+// Helper to create a horizontal line
+function horizontalLine(char = '─', color = colors.dim) {
+  return color + char.repeat(terminalWidth - 1) + colors.reset;
+}
+
+// Helper to center text
+function centerText(text, width = terminalWidth) {
+  const padding = Math.max(0, Math.floor((width - text.length) / 2));
+  return ' '.repeat(padding) + text;
+}
+
 // ===== GENERIC BINARY DETECTION =====
 
 /**
@@ -148,39 +156,29 @@ function isArchiveFile(filename) {
 
 /**
  * GENERIC: Check if a file is a binary executable
- * This works for ANY file without extension that's executable
  */
 async function isExecutableBinary(filePath, stats) {
   try {
-    // Check if it's a file and has execute permission
     if (stats.isFile()) {
-      // Check execute permission (fs.constants.X_OK)
       await access(filePath, fs.constants.X_OK);
-      
-      // Files with execute permission and no extension are likely binaries
       const ext = path.extname(filePath).toLowerCase();
       if (ext === '') {
         return true;
       }
-      
-      // Also check common binary extensions
       if (BINARY_EXTENSIONS.has(ext)) {
         return true;
       }
     }
     return false;
   } catch {
-    // No execute permission
     return false;
   }
 }
 
 /**
  * GENERIC: Quick check for binary content (looks for null bytes)
- * This catches any file that's likely binary regardless of extension
  */
 async function isBinaryContent(filePath, stats) {
-  // Skip very small files
   if (stats.size < 1024) return false;
   
   try {
@@ -189,7 +187,6 @@ async function isBinaryContent(filePath, stats) {
       const buffer = Buffer.alloc(1024);
       const { bytesRead } = await fd.read(buffer, 0, 1024, 0);
       
-      // Check for null bytes in the first chunk
       for (let i = 0; i < bytesRead; i++) {
         if (buffer[i] === 0) {
           return true;
@@ -206,31 +203,24 @@ async function isBinaryContent(filePath, stats) {
 
 /**
  * GENERIC: Main function to determine if a file is binary
- * Uses multiple strategies:
- * 1. Common binary extensions
- * 2. Execute permission + no extension (Unix executables)
- * 3. Binary content detection (null bytes)
  */
 async function isBinaryFile(filePath, stats) {
   const filename = path.basename(filePath);
   const ext = path.extname(filename).toLowerCase();
   
-  // Rule 1: Check by extension (fastest)
   if (BINARY_EXTENSIONS.has(ext)) {
     return true;
   }
   
-  // Rule 2: Check if it's an executable with no extension
   if (ext === '') {
     try {
       await access(filePath, fs.constants.X_OK);
-      return true; // It's executable with no extension = binary
+      return true;
     } catch {
-      // Not executable, continue to next check
+      // Not executable
     }
   }
   
-  // Rule 3: For larger files, check content for null bytes
   if (stats.size > 1024) {
     return await isBinaryContent(filePath, stats);
   }
@@ -260,7 +250,7 @@ class BaseAnalyzer {
 }
 
 /**
- * Analyzer for total directory size (with GENERIC binary detection)
+ * Analyzer for total directory size
  */
 class TotalSizeAnalyzer extends BaseAnalyzer {
   constructor(ignoreDirs) {
@@ -278,7 +268,6 @@ class TotalSizeAnalyzer extends BaseAnalyzer {
   }
 
   async processFile(filePath, stats) {
-    // Check if we're in an ignored directory
     const relativePath = path.relative(process.cwd(), filePath);
     const pathParts = relativePath.split(path.sep);
     
@@ -295,23 +284,17 @@ class TotalSizeAnalyzer extends BaseAnalyzer {
     if (stats.isFile()) {
       const filename = path.basename(filePath);
       
-      // Check archives first
       if (isArchiveFile(filename)) {
         this.archiveSize += stats.size;
       }
-      // Use GENERIC binary detection
       else if (await isBinaryFile(filePath, stats)) {
         this.binarySize += stats.size;
       }
       else {
-        // Check if it's a code file
         const ext = path.extname(filename).toLowerCase();
-        let isCode = false;
-        
         for (const extensions of Object.values(LANGUAGE_EXTENSIONS)) {
           if (extensions.includes(ext) || extensions.includes(filename)) {
             this.codeSize += stats.size;
-            isCode = true;
             break;
           }
         }
@@ -448,17 +431,14 @@ class LocAnalyzer extends BaseAnalyzer {
     const filename = path.basename(filePath);
     const ext = path.extname(filename).toLowerCase();
     
-    // Skip archive files
     if (isArchiveFile(filename)) {
       return;
     }
     
-    // Skip binary files (using GENERIC detection)
     if (await isBinaryFile(filePath, stats)) {
       return;
     }
     
-    // Check for assembly language
     if (ASSEMBLY_EXTENSIONS.has(ext)) {
       try {
         const content = await readFile(filePath, 'utf8');
@@ -467,12 +447,9 @@ class LocAnalyzer extends BaseAnalyzer {
         this.filesByLanguage['assembly'] = (this.filesByLanguage['assembly'] || 0) + 1;
         this.totalLines += lines;
         return;
-      } catch (error) {
-        // Skip files that can't be read
-      }
+      } catch (error) {}
     }
     
-    // Check for special files without extensions
     if (filename === 'Dockerfile') {
       try {
         const content = await readFile(filePath, 'utf8');
@@ -495,7 +472,6 @@ class LocAnalyzer extends BaseAnalyzer {
       } catch (error) {}
     }
     
-    // Check for other languages by extension
     for (const [language, extensions] of Object.entries(LANGUAGE_EXTENSIONS)) {
       if (extensions.includes(ext) || extensions.includes(filename)) {
         try {
@@ -505,9 +481,7 @@ class LocAnalyzer extends BaseAnalyzer {
           this.linesByLanguage[language] = (this.linesByLanguage[language] || 0) + lines;
           this.filesByLanguage[language] = (this.filesByLanguage[language] || 0) + 1;
           this.totalLines += lines;
-        } catch (error) {
-          // Skip files that can't be read as text
-        }
+        } catch (error) {}
         break;
       }
     }
@@ -590,7 +564,7 @@ class ArchiveAnalyzer extends BaseAnalyzer {
 }
 
 /**
- * Analyzer for binary files (GENERIC version)
+ * Analyzer for binary files
  */
 class BinaryAnalyzer extends BaseAnalyzer {
   constructor() {
@@ -605,12 +579,10 @@ class BinaryAnalyzer extends BaseAnalyzer {
   async processFile(filePath, stats) {
     const filename = path.basename(filePath);
     
-    // Skip archives
     if (isArchiveFile(filename)) {
       return;
     }
     
-    // Use GENERIC binary detection
     if (await isBinaryFile(filePath, stats)) {
       const ext = path.extname(filename).toLowerCase() || '[no ext]';
       
@@ -672,7 +644,6 @@ class DirectoryAnalyzer {
       const items = await readdir(dir);
       
       for (const item of items) {
-        // Skip ignored directories
         if (IGNORE_DIRS.has(item)) {
           continue;
         }
@@ -690,11 +661,11 @@ class DirectoryAnalyzer {
             await this.traverseDirectory(fullPath);
           }
         } catch (error) {
-          console.error(`${colors.red}Error processing ${fullPath}: ${error.message}${colors.reset}`);
+          // Silently skip files that can't be accessed
         }
       }
     } catch (error) {
-      console.error(`${colors.red}Error reading directory ${dir}: ${error.message}${colors.reset}`);
+      // Silently skip directories that can't be read
     }
   }
 
@@ -708,53 +679,203 @@ class DirectoryAnalyzer {
 }
 
 /**
- * Print functions
+ * Print functions for single directory mode
  */
 function printHeader(title, color = colors.cyan) {
-  console.log('\n' + color + colors.bright + '='.repeat(60) + colors.reset);
-  console.log(color + colors.bright + `  ${title}` + colors.reset);
-  console.log(color + colors.bright + '='.repeat(60) + colors.reset);
+  console.log('\n' + color + colors.bright + '┌' + '─'.repeat(terminalWidth - 2) + '┐' + colors.reset);
+  console.log(color + colors.bright + '│' + centerText(title, terminalWidth - 2) + '│' + colors.reset);
+  console.log(color + colors.bright + '└' + '─'.repeat(terminalWidth - 2) + '┘' + colors.reset);
 }
 
-function printStat(label, value, color = colors.white) {
-  console.log(`  ${colors.dim}${label}:${colors.reset} ${color}${value}${colors.reset}`);
+function printSubHeader(title, color = colors.cyan) {
+  console.log('\n' + color + colors.bright + '┌─ ' + title + ' ' + '─'.repeat(Math.max(0, terminalWidth - title.length - 6)) + '┐' + colors.reset);
 }
 
-function printProgressBar(value, max, width = 20, color = colors.green) {
+function printStat(label, value, color = colors.white, indent = 2) {
+  const indentStr = ' '.repeat(indent);
+  const line = `${indentStr}${colors.dim}${label}:${colors.reset} ${color}${value}${colors.reset}`;
+  console.log(line);
+}
+
+function printProgressBar(value, max, width = Math.min(30, terminalWidth - 20), color = colors.green) {
   if (max === 0) return;
   const percentage = Math.min(100, Math.round((value / max) * 100));
   const filled = Math.round((percentage / 100) * width);
   const empty = width - filled;
   const bar = color + '█'.repeat(filled) + colors.dim + '░'.repeat(empty) + colors.reset;
-  console.log(`  ${bar} ${colors.bright}${percentage}%${colors.reset}`);
+  console.log(`   ${bar} ${colors.bright}${percentage}%${colors.reset}`);
 }
 
-async function main() {
-  const targetDir = process.argv[2];
+function printKeyValue(label, value, color = colors.white, width1 = 20, width2 = 15) {
+  const truncatedLabel = truncate(label, width1);
+  const truncatedValue = truncate(value.toString(), width2);
+  console.log(`  ${colors.dim}${truncatedLabel.padEnd(width1)}:${colors.reset} ${color}${truncatedValue.padEnd(width2)}${colors.reset}`);
+}
+
+/**
+ * Print functions for multi-directory comparison mode
+ */
+function printComparisonHeader(directories) {
+  console.log('\n' + colors.bgBlue + colors.white + colors.bright + '╔' + '═'.repeat(terminalWidth - 2) + '╗' + colors.reset);
+  console.log(colors.bgBlue + colors.white + colors.bright + '║' + centerText('📊 DIRECTORY COMPARISON ANALYZER', terminalWidth - 2) + '║' + colors.reset);
+  console.log(colors.bgBlue + colors.white + colors.bright + '╚' + '═'.repeat(terminalWidth - 2) + '╝' + colors.reset);
   
-  if (!targetDir) {
-    console.error(`${colors.red}Please provide a directory path${colors.reset}`);
-    console.error(`${colors.yellow}Usage: node script.js <directory-path>${colors.reset}`);
-    process.exit(1);
-  }
+  console.log(`\n${colors.cyan}${colors.bright}Comparing:${colors.reset}`);
+  directories.forEach((dir, i) => {
+    const displayDir = truncate(dir, terminalWidth - 10);
+    console.log(`  ${colors.bright}${i + 1}.${colors.reset} ${colors.yellow}${displayDir}${colors.reset}`);
+  });
+  console.log(`\n${colors.dim}Ignoring: ${Array.from(IGNORE_DIRS).join(', ')}${colors.reset}`);
+  console.log();
+}
+
+function createTable(directories, metrics, reportsByDir) {
+  const dirCount = directories.length;
+  const maxDirNameLength = Math.min(25, Math.floor(terminalWidth * 0.2));
+  const valueWidth = Math.min(15, Math.floor((terminalWidth - maxDirNameLength - 10) / dirCount));
   
+  // Header
+  let headerLine = ' '.repeat(maxDirNameLength);
+  directories.forEach(dir => {
+    const shortName = truncate(path.basename(dir), valueWidth);
+    headerLine += `│ ${colors.bright}${shortName.padEnd(valueWidth)}${colors.reset} `;
+  });
+  
+  console.log('\n' + colors.dim + '┌' + '─'.repeat(maxDirNameLength + 2) + '┬' + '─'.repeat((valueWidth + 4) * dirCount - 1) + '┐' + colors.reset);
+  console.log(headerLine);
+  console.log(colors.dim + '├' + '─'.repeat(maxDirNameLength + 2) + '┼' + '─'.repeat((valueWidth + 4) * dirCount - 1) + '┤' + colors.reset);
+  
+  // Rows
+  metrics.forEach((metric, idx) => {
+    const values = directories.map(dir => {
+      const report = reportsByDir[dir];
+      if (metric.getValue) {
+        return metric.getValue(report);
+      }
+      return report[metric.key];
+    });
+    
+    // Determine winners
+    const numericValues = values.map(v => {
+      if (typeof v === 'string' && v.includes(' ')) {
+        // Handle formatted sizes like "1.23 MB"
+        const num = parseFloat(v.split(' ')[0]);
+        return isNaN(num) ? 0 : num;
+      }
+      const num = parseFloat(v);
+      return isNaN(num) ? 0 : num;
+    });
+    
+    const winnerValue = metric.winner === 'largest' 
+      ? Math.max(...numericValues) 
+      : Math.min(...numericValues);
+    
+    let row = `  ${truncate(metric.label, maxDirNameLength - 2).padEnd(maxDirNameLength)}`;
+    directories.forEach((dir, i) => {
+      const value = values[i];
+      const isWinner = numericValues[i] === winnerValue;
+      const color = isWinner ? colors.green + colors.bright : colors.white;
+      row += `│ ${color}${truncate(value.toString(), valueWidth).padEnd(valueWidth)}${colors.reset} `;
+    });
+    console.log(row);
+    
+    if (idx < metrics.length - 1) {
+      console.log(colors.dim + '├' + '─'.repeat(maxDirNameLength + 2) + '┼' + '─'.repeat((valueWidth + 4) * dirCount - 1) + '┤' + colors.reset);
+    }
+  });
+  
+  console.log(colors.dim + '└' + '─'.repeat(maxDirNameLength + 2) + '┴' + '─'.repeat((valueWidth + 4) * dirCount - 1) + '┘' + colors.reset);
+}
+
+function printLanguagesComparison(directories, reportsByDir) {
+  const dirCount = directories.length;
+  const maxDirNameLength = Math.min(20, Math.floor(terminalWidth * 0.15));
+  const langWidth = Math.min(15, Math.floor((terminalWidth - maxDirNameLength - 10) / dirCount));
+  
+  // Get top languages across all directories
+  const allLanguages = new Set();
+  directories.forEach(dir => {
+    const languages = reportsByDir[dir]['Lines of Code Analyzer'].languages || [];
+    languages.slice(0, 3).forEach(l => allLanguages.add(l.language));
+  });
+  
+  const topLanguages = Array.from(allLanguages).slice(0, 5);
+  
+  if (topLanguages.length === 0) return;
+  
+  console.log('\n' + colors.cyan + colors.bright + '📊 TOP LANGUAGES' + colors.reset);
+  console.log(colors.dim + '┌' + '─'.repeat(maxDirNameLength + 2) + '┬' + '─'.repeat((langWidth + 4) * dirCount - 1) + '┐' + colors.reset);
+  
+  let headerLine = ' '.repeat(maxDirNameLength);
+  directories.forEach(dir => {
+    const shortName = truncate(path.basename(dir), langWidth);
+    headerLine += `│ ${colors.bright}${shortName.padEnd(langWidth)}${colors.reset} `;
+  });
+  console.log(headerLine);
+  console.log(colors.dim + '├' + '─'.repeat(maxDirNameLength + 2) + '┼' + '─'.repeat((langWidth + 4) * dirCount - 1) + '┤' + colors.reset);
+  
+  topLanguages.forEach((language, idx) => {
+    let row = `  ${truncate(language, maxDirNameLength - 2).padEnd(maxDirNameLength)}`;
+    directories.forEach(dir => {
+      const langData = (reportsByDir[dir]['Lines of Code Analyzer'].languages || [])
+        .find(l => l.language === language);
+      const value = langData ? langData.lines.toLocaleString() : '-';
+      row += `│ ${colors.yellow}${truncate(value, langWidth).padEnd(langWidth)}${colors.reset} `;
+    });
+    console.log(row);
+    
+    if (idx < topLanguages.length - 1) {
+      console.log(colors.dim + '├' + '─'.repeat(maxDirNameLength + 2) + '┼' + '─'.repeat((langWidth + 4) * dirCount - 1) + '┤' + colors.reset);
+    }
+  });
+  
+  console.log(colors.dim + '└' + '─'.repeat(maxDirNameLength + 2) + '┴' + '─'.repeat((langWidth + 4) * dirCount - 1) + '┘' + colors.reset);
+}
+
+function printWinnerPodium(winners) {
+  const sortedWinners = Object.entries(winners)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 3);
+  
+  if (sortedWinners.length === 0) return;
+  
+  console.log('\n' + colors.green + colors.bright + '🏆 WINNER PODIUM' + colors.reset);
+  console.log(colors.dim + '┌' + '─'.repeat(terminalWidth - 2) + '┐' + colors.reset);
+  
+  sortedWinners.forEach(([dir, wins], i) => {
+    const medal = i === 0 ? '🥇 GOLD' : i === 1 ? '🥈 SILVER' : '🥉 BRONZE';
+    const displayDir = truncate(dir, terminalWidth - 30);
+    const line = `│ ${colors.bright}${medal}${colors.reset}  ${colors.yellow}${displayDir.padEnd(terminalWidth - 25)}${colors.reset} ${colors.green}${wins} wins${colors.reset} │`;
+    console.log(line);
+  });
+  
+  console.log(colors.dim + '└' + '─'.repeat(terminalWidth - 2) + '┘' + colors.reset);
+}
+
+/**
+ * Process a single directory
+ */
+async function processSingleDirectory(targetDir) {
   const absolutePath = path.resolve(targetDir);
   
   try {
     const stats = await stat(absolutePath);
     if (!stats.isDirectory()) {
-      console.error(`${colors.red}The provided path is not a directory${colors.reset}`);
+      console.error(`${colors.red}Error: The provided path is not a directory${colors.reset}`);
       process.exit(1);
     }
   } catch (error) {
-    console.error(`${colors.red}Directory does not exist: ${absolutePath}${colors.reset}`);
+    console.error(`${colors.red}Error: Directory does not exist: ${absolutePath}${colors.reset}`);
     process.exit(1);
   }
   
-  console.log('\n' + colors.bgBlue + colors.white + colors.bright + '🔍 DIRECTORY ANALYZER ' + colors.reset);
-  console.log(`${colors.cyan}Scanning: ${colors.bright}${absolutePath}${colors.reset}`);
-  console.log(`${colors.yellow}Ignoring: ${Array.from(IGNORE_DIRS).join(', ')}${colors.reset}`);
-  console.log(`${colors.dim}Note: ._ directories are processed normally${colors.reset}\n`);
+  console.clear();
+  console.log('\n' + colors.bgBlue + colors.white + colors.bright + '╔' + '═'.repeat(terminalWidth - 2) + '╗' + colors.reset);
+  console.log(colors.bgBlue + colors.white + colors.bright + '║' + centerText('🔍 DIRECTORY ANALYZER', terminalWidth - 2) + '║' + colors.reset);
+  console.log(colors.bgBlue + colors.white + colors.bright + '╚' + '═'.repeat(terminalWidth - 2) + '╝' + colors.reset);
+  
+  console.log(`\n${colors.cyan}${colors.bright}Scanning:${colors.reset} ${colors.white}${absolutePath}${colors.reset}`);
+  console.log(`${colors.cyan}${colors.bright}Ignoring:${colors.reset} ${colors.dim}${Array.from(IGNORE_DIRS).join(', ')}${colors.reset}`);
   
   const analyzer = new DirectoryAnalyzer();
   
@@ -764,9 +885,10 @@ async function main() {
   analyzer.registerAnalyzer(new ArchiveAnalyzer());
   analyzer.registerAnalyzer(new BinaryAnalyzer());
   
-  console.log(`${colors.dim}Registered analyzers:${colors.reset}`);
+  console.log(`\n${colors.dim}Registered analyzers:${colors.reset}`);
   analyzer.analyzers.forEach(a => console.log(`  ${colors.green}✓${colors.reset} ${a.name}`));
-  console.log(`\n${colors.yellow}Processing files...${colors.reset}\n`);
+  
+  console.log(`\n${colors.yellow}Processing files...${colors.reset}`);
   
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
@@ -783,172 +905,360 @@ async function main() {
   
   const reports = analyzer.getReport();
   
+  // Total Size Report
+  printHeader('📊 DIRECTORY STATISTICS', colors.cyan);
+  const sizeReport = reports['Total Size Analyzer'];
+  
+  const statsData = [
+    { label: 'Total Size', value: sizeReport.totalSizeFormatted, color: colors.green },
+    { label: '├─ Pure Code', value: sizeReport.codeSizeFormatted, color: colors.green },
+    { label: '├─ Binary Files', value: sizeReport.binarySizeFormatted, color: colors.blue },
+    { label: '└─ Archive Files', value: sizeReport.archiveSizeFormatted, color: colors.yellow },
+    { label: 'Files Scanned', value: sizeReport.fileCount.toLocaleString(), color: colors.cyan },
+    { label: 'Directories', value: sizeReport.dirCount.toLocaleString(), color: colors.cyan }
+  ];
+  
+  statsData.forEach(({label, value, color}) => {
+    printKeyValue(label, value, color, 20, 15);
+  });
+  
+  if (sizeReport.skippedDirs.length > 0) {
+    console.log(`\n  ${colors.dim}Ignored: ${colors.yellow}${Array.from(new Set(sizeReport.skippedDirs)).slice(0, 3).join(', ')}${colors.reset}`);
+    if (sizeReport.skippedCount > 3) {
+      console.log(`  ${colors.dim}  and ${sizeReport.skippedCount - 3} more items${colors.reset}`);
+    }
+  }
+  
   // Package.json Report
   printHeader('📦 PACKAGE.JSON ANALYSIS', colors.magenta);
   const pkgReport = reports['Package.json Analyzer'];
+  
   if (pkgReport.totalFiles > 0) {
-    printStat('Total package.json files', pkgReport.totalFiles, colors.bright);
-    printStat('Total production dependencies', pkgReport.totalDeps, colors.yellow);
-    printStat('Total dev dependencies', pkgReport.totalDevDeps, colors.cyan);
-    printStat('Average deps per project', pkgReport.averageDeps, colors.white);
+    const pkgData = [
+      { label: 'package.json files', value: pkgReport.totalFiles, color: colors.bright },
+      { label: 'Production deps', value: pkgReport.totalDeps, color: colors.yellow },
+      { label: 'Dev dependencies', value: pkgReport.totalDevDeps, color: colors.cyan },
+      { label: 'Average deps', value: pkgReport.averageDeps, color: colors.white },
+      { label: 'Purity', value: `${pkgReport.purityPercentage}%`, color: pkgReport.purityPercentage > 80 ? colors.green : pkgReport.purityPercentage > 50 ? colors.yellow : colors.red }
+    ];
     
-    console.log(`\n  ${colors.dim}Directory Purity:${colors.reset}`);
-    printProgressBar(pkgReport.pureProjects, pkgReport.totalFiles, 20, 
+    pkgData.forEach(({label, value, color}) => {
+      printKeyValue(label, value, color, 20, 15);
+    });
+    
+    console.log(`\n  ${colors.dim}Purity bar:${colors.reset}`);
+    printProgressBar(pkgReport.pureProjects, pkgReport.totalFiles, 30, 
       pkgReport.purityPercentage > 80 ? colors.green : pkgReport.purityPercentage > 50 ? colors.yellow : colors.red);
-    console.log(`   ${pkgReport.pureProjects} pure projects (no production deps) - ${pkgReport.purityPercentage}%`);
+    console.log(`   ${pkgReport.pureProjects} pure projects (no production deps)`);
   } else {
     console.log(`  ${colors.yellow}No package.json files found${colors.reset}`);
   }
   
   // Lines of Code Report
-  printHeader('📝 LINES OF CODE BY LANGUAGE', colors.green);
+  printHeader('📝 LINES OF CODE', colors.green);
   const locReport = reports['Lines of Code Analyzer'];
+  
   if (locReport.totalLines > 0) {
-    printStat('Total lines of code', locReport.totalLinesFormatted, colors.bright);
+    printKeyValue('Total lines', locReport.totalLinesFormatted, colors.bright, 20, 15);
     
     const assemblyLang = locReport.languages.find(l => l.language === 'assembly');
     if (assemblyLang) {
-      console.log(`  ${colors.yellow}🔧 Assembly detected: ${assemblyLang.lines.toLocaleString()} lines in ${assemblyLang.files} files${colors.reset}`);
+      console.log(`\n  ${colors.yellow}🔧 Assembly detected: ${assemblyLang.lines.toLocaleString()} lines in ${assemblyLang.files} files${colors.reset}`);
     }
     
-    console.log(`\n  ${colors.dim}Languages by lines of code:${colors.reset}`);
-    locReport.languages.slice(0, 8).forEach(({language, lines, files, percentage}) => {
+    console.log(`\n  ${colors.dim}Top languages:${colors.reset}`);
+    locReport.languages.slice(0, 5).forEach(({language, lines, percentage}) => {
       const langColor = language === 'assembly' ? colors.yellow : 
                        percentage > 30 ? colors.green : 
                        percentage > 10 ? colors.yellow : colors.blue;
-      console.log(`  ${langColor}${language.padEnd(12)}${colors.reset} ${lines.toLocaleString().padStart(8)} lines ${colors.dim}(${files} files, ${percentage}%)${colors.reset}`);
-      printProgressBar(lines, locReport.totalLines, 15, langColor);
+      console.log(`    ${langColor}${language.padEnd(12)}${colors.reset} ${lines.toLocaleString().padStart(8)} lines ${colors.dim}(${percentage}%)${colors.reset}`);
+      printProgressBar(lines, locReport.totalLines, 25, langColor);
     });
     
-    if (locReport.languages.length > 8) {
-      console.log(`  ${colors.dim}... and ${locReport.languages.length - 8} more languages${colors.reset}`);
+    if (locReport.languages.length > 5) {
+      console.log(`    ${colors.dim}... and ${locReport.languages.length - 5} more languages${colors.reset}`);
     }
   } else {
     console.log(`  ${colors.yellow}No code files found${colors.reset}`);
   }
   
   // Archive Files Report
-  printHeader('📦 ARCHIVE & DATA FILES', colors.yellow);
+  printHeader('📦 ARCHIVE FILES', colors.yellow);
   const archiveReport = reports['Archive Files Analyzer'];
+  
   if (archiveReport.totalCount > 0) {
-    printStat('Total archives/data files', archiveReport.totalCount, colors.bright);
-    printStat('Total size', archiveReport.totalSizeFormatted, colors.yellow);
+    printKeyValue('Archive files', archiveReport.totalCount, colors.bright, 20, 15);
+    printKeyValue('Total size', archiveReport.totalSizeFormatted, colors.yellow, 20, 15);
     
     console.log(`\n  ${colors.dim}By type:${colors.reset}`);
-    Object.entries(archiveReport.byType).slice(0, 5).forEach(([type, count]) => {
-      console.log(`  ${colors.cyan}${type.padEnd(8)}${colors.reset}: ${count} files`);
+    Object.entries(archiveReport.byType).slice(0, 4).forEach(([type, count]) => {
+      console.log(`    ${colors.cyan}${type.padEnd(8)}${colors.reset}: ${count} files`);
     });
     
-    const jsonCount = archiveReport.byType['.json'] || 0;
-    if (jsonCount > 0) {
-      console.log(`\n  ${colors.dim}JSON files:${colors.reset} ${jsonCount} files`);
-    }
-    
     if (archiveReport.largest.length > 0) {
-      console.log(`\n  ${colors.dim}Largest archives/data files:${colors.reset}`);
-      archiveReport.largest.slice(0, 3).forEach(archive => {
-        console.log(`  ${colors.red}▸${colors.reset} ${archive.name} ${colors.yellow}(${archive.sizeFormatted})${colors.reset}`);
+      console.log(`\n  ${colors.dim}Largest:${colors.reset}`);
+      archiveReport.largest.slice(0, 2).forEach(archive => {
+        console.log(`    ${colors.red}▸${colors.reset} ${truncate(archive.name, 40)} ${colors.yellow}(${archive.sizeFormatted})${colors.reset}`);
       });
     }
   } else {
-    console.log(`  ${colors.yellow}No archive or data files found${colors.reset}`);
+    console.log(`  ${colors.yellow}No archive files found${colors.reset}`);
   }
   
-  // Binary Files Report (GENERIC)
+  // Binary Files Report
   printHeader('💾 BINARY FILES', colors.blue);
   const binaryReport = reports['Binary Files Analyzer'];
+  
   if (binaryReport.totalCount > 0) {
-    printStat('Total binary files', binaryReport.totalCount, colors.bright);
-    printStat('Total size', binaryReport.totalSizeFormatted, colors.blue);
+    printKeyValue('Binary files', binaryReport.totalCount, colors.bright, 20, 15);
+    printKeyValue('Total size', binaryReport.totalSizeFormatted, colors.blue, 20, 15);
     
-    console.log(`\n  ${colors.dim}Binary files detected:${colors.reset}`);
-    binaryReport.largest.slice(0, 10).forEach(binary => {
+    console.log(`\n  ${colors.dim}Largest:${colors.reset}`);
+    binaryReport.largest.slice(0, 3).forEach(binary => {
       const execMarker = binary.type === '[no ext]' ? ' (executable)' : '';
-      console.log(`  ${colors.blue}▸${colors.reset} ${binary.name}${colors.dim}${execMarker}${colors.reset} - ${colors.blue}${binary.sizeFormatted}${colors.reset}`);
+      console.log(`    ${colors.blue}▸${colors.reset} ${truncate(binary.name, 40)}${colors.dim}${execMarker}${colors.reset} - ${colors.blue}${binary.sizeFormatted}${colors.reset}`);
     });
-    
-    console.log(`\n  ${colors.dim}By type:${colors.reset}`);
-    Object.entries(binaryReport.byType)
-      .sort(([,a], [,b]) => b - a)
-      .slice(0, 5)
-      .forEach(([type, count]) => {
-        console.log(`  ${colors.cyan}${type.padEnd(10)}${colors.reset}: ${count} files`);
-      });
   } else {
     console.log(`  ${colors.yellow}No binary files found${colors.reset}`);
   }
   
-  // Total Size Report
-  printHeader('📊 TOTAL DIRECTORY SIZE', colors.cyan);
-  const sizeReport = reports['Total Size Analyzer'];
-  printStat('Total size (excluding ignored)', sizeReport.totalSizeFormatted, colors.bright + colors.green);
-  printStat('Pure code size', sizeReport.codeSizeFormatted, colors.green);
-  printStat('Binary files size', sizeReport.binarySizeFormatted, colors.blue);
-  printStat('Archive/data files size', sizeReport.archiveSizeFormatted, colors.yellow);
-  printStat('Total files scanned', sizeReport.fileCount.toLocaleString(), colors.cyan);
-  printStat('Total directories scanned', sizeReport.dirCount.toLocaleString(), colors.cyan);
+  // Summary
+  printHeader('⚡ SUMMARY', colors.white + colors.bgBlue);
   
-  if (sizeReport.skippedDirs.length > 0) {
-    console.log(`\n  ${colors.dim}Ignored directories encountered:${colors.reset}`);
-    console.log(`  ${colors.yellow}${Array.from(new Set(sizeReport.skippedDirs)).slice(0, 5).join(', ')}${colors.reset}`);
-    console.log(`  ${colors.dim}Total items skipped: ${sizeReport.skippedCount}${colors.reset}`);
-  }
-  
-  // Quick Summary
-  printHeader('⚡ QUICK SUMMARY', colors.white + colors.bgBlue);
-  
-  const jsonFileCount = archiveReport.byType['.json'] || 0;
-  
-  const summaryData = [
-    { label: 'Total Size', value: sizeReport.totalSizeFormatted, color: colors.green },
-    { label: 'Pure Code', value: sizeReport.codeSizeFormatted, color: colors.green },
-    { label: 'Binaries', value: `${binaryReport.totalCount} files (${sizeReport.binarySizeFormatted})`, color: colors.blue },
-    { label: 'Archives/Data', value: `${archiveReport.totalCount} files (${sizeReport.archiveSizeFormatted})`, color: colors.yellow },
-    { label: 'Lines of Code', value: locReport.totalLinesFormatted, color: colors.green }
+  const summaryItems = [
+    { icon: '📁', label: 'Total', value: sizeReport.totalSizeFormatted, color: colors.green },
+    { icon: '📝', label: 'Code', value: sizeReport.codeSizeFormatted, color: colors.green },
+    { icon: '💾', label: 'Binary', value: `${binaryReport.totalCount} files (${sizeReport.binarySizeFormatted})`, color: colors.blue },
+    { icon: '📦', label: 'Archive', value: `${archiveReport.totalCount} files (${sizeReport.archiveSizeFormatted})`, color: colors.yellow },
+    { icon: '📊', label: 'Lines', value: locReport.totalLinesFormatted, color: colors.green },
+    { icon: '📋', label: 'Files', value: sizeReport.fileCount.toLocaleString(), color: colors.cyan }
   ];
   
-  if (jsonFileCount > 0) {
-    summaryData.push({ 
-      label: 'JSON files', 
-      value: `${jsonFileCount} files (archived)`, 
-      color: colors.yellow 
-    });
-  }
-  
-  if (pkgReport.totalFiles > 0) {
-    summaryData.push({ 
-      label: 'Package.json', 
-      value: `${pkgReport.totalFiles} files, ${pkgReport.totalDeps} deps (${pkgReport.purityPercentage}% pure)`, 
-      color: colors.magenta 
-    });
-  } else {
-    summaryData.push({ 
-      label: 'Package.json', 
-      value: `0 files, 0 deps`, 
-      color: colors.magenta 
-    });
-  }
-  
-  summaryData.push({ label: 'Files Scanned', value: sizeReport.fileCount.toLocaleString(), color: colors.cyan });
-  
-  const maxLabelLength = Math.max(...summaryData.map(d => d.label.length));
-  
-  summaryData.forEach(({label, value, color}) => {
-    console.log(`  ${colors.bright}${label.padEnd(maxLabelLength)}:${colors.reset} ${color}${value}${colors.reset}`);
+  summaryItems.forEach(({icon, label, value, color}) => {
+    console.log(`  ${icon} ${colors.bright}${label}:${colors.reset} ${color}${value}${colors.reset}`);
   });
   
   if (pkgReport.totalFiles > 0) {
     const purityEmoji = pkgReport.purityPercentage > 80 ? '🟢' : pkgReport.purityPercentage > 50 ? '🟡' : '🔴';
-    console.log(`\n  ${colors.dim}Dependency Purity:${colors.reset} ${purityEmoji} ${pkgReport.pureProjects}/${pkgReport.totalFiles} projects without deps (${pkgReport.totalDeps} total deps)`);
+    console.log(`\n  ${purityEmoji} ${colors.dim}Purity:${colors.reset} ${pkgReport.pureProjects}/${pkgReport.totalFiles} projects without deps`);
   }
   
-  if (locReport.languages.some(l => l.language === 'assembly')) {
-    console.log(`  ${colors.yellow}🔧 Assembly language detected${colors.reset}`);
-  }
-  
-  console.log('\n' + colors.dim + '─'.repeat(60) + colors.reset);
+  console.log('\n' + colors.dim + '─'.repeat(terminalWidth - 1) + colors.reset);
   console.log(colors.green + '✓ Analysis complete!' + colors.reset);
-  console.log(colors.dim + `Scanned ${sizeReport.fileCount.toLocaleString()} files in ${sizeReport.dirCount.toLocaleString()} directories` + colors.reset);
+}
+
+/**
+ * Process multiple directories in comparison mode
+ */
+async function processMultipleDirectories(directories) {
+  // Validate all directories
+  const validDirs = [];
+  for (const dir of directories) {
+    const absolutePath = path.resolve(dir);
+    try {
+      const stats = await stat(absolutePath);
+      if (!stats.isDirectory()) {
+        console.error(`${colors.red}Warning: ${dir} is not a directory, skipping${colors.reset}`);
+        continue;
+      }
+      validDirs.push(absolutePath);
+    } catch (error) {
+      console.error(`${colors.red}Warning: Directory does not exist: ${dir}, skipping${colors.reset}`);
+    }
+  }
+
+  if (validDirs.length === 0) {
+    console.error(`${colors.red}Error: No valid directories to analyze${colors.reset}`);
+    process.exit(1);
+  }
+
+  if (validDirs.length === 1) {
+    console.log(`${colors.yellow}Only one valid directory provided, switching to single mode${colors.reset}\n`);
+    await processSingleDirectory(validDirs[0]);
+    return;
+  }
+
+  console.clear();
+  printComparisonHeader(validDirs);
+
+  // Create analyzer for each directory
+  const reports = {};
+
+  // Progress tracking
+  let completedDirs = 0;
+  const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinnerIndex = 0;
+
+  const spinnerInterval = setInterval(() => {
+    const progress = Math.floor((completedDirs / validDirs.length) * 100);
+    process.stdout.write(`\r${colors.cyan}${spinnerFrames[spinnerIndex]} Processing directories... ${progress}% (${completedDirs}/${validDirs.length})${colors.reset}`);
+    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+  }, 100);
+
+  // Process each directory
+  for (const dir of validDirs) {
+    const analyzer = new DirectoryAnalyzer();
+    
+    analyzer.registerAnalyzer(new TotalSizeAnalyzer(IGNORE_DIRS));
+    analyzer.registerAnalyzer(new PackageJsonAnalyzer());
+    analyzer.registerAnalyzer(new LocAnalyzer());
+    analyzer.registerAnalyzer(new ArchiveAnalyzer());
+    analyzer.registerAnalyzer(new BinaryAnalyzer());
+    
+    analyzer.resetAll();
+    await analyzer.traverseDirectory(dir);
+    
+    reports[dir] = analyzer.getReport();
+    completedDirs++;
+  }
+
+  clearInterval(spinnerInterval);
+  process.stdout.write('\r' + ' '.repeat(60) + '\r');
+
+  // Flatten reports for easier access
+  const flattenedReports = {};
+  validDirs.forEach(dir => {
+    const sizeReport = reports[dir]['Total Size Analyzer'];
+    const pkgReport = reports[dir]['Package.json Analyzer'];
+    const locReport = reports[dir]['Lines of Code Analyzer'];
+    const archiveReport = reports[dir]['Archive Files Analyzer'];
+    const binaryReport = reports[dir]['Binary Files Analyzer'];
+    
+    flattenedReports[dir] = {
+      ...sizeReport,
+      'Package.json Analyzer': pkgReport,
+      'Lines of Code Analyzer': locReport,
+      'Archive Files Analyzer': archiveReport,
+      'Binary Files Analyzer': binaryReport
+    };
+  });
+
+  // Directory Statistics Table
+  console.log('\n' + colors.cyan + colors.bright + '📁 DIRECTORY STATISTICS' + colors.reset);
+  const dirMetrics = [
+    { label: 'Total Size', key: 'totalSizeFormatted', winner: 'smallest', getValue: (r) => r.totalSizeFormatted },
+    { label: 'Code Size', key: 'codeSizeFormatted', winner: 'largest', getValue: (r) => r.codeSizeFormatted },
+    { label: 'Binary Size', key: 'binarySizeFormatted', winner: 'smallest', getValue: (r) => r.binarySizeFormatted },
+    { label: 'Archive Size', key: 'archiveSizeFormatted', winner: 'smallest', getValue: (r) => r.archiveSizeFormatted },
+    { label: 'Files', key: 'fileCount', winner: 'largest', getValue: (r) => r.fileCount.toLocaleString() },
+    { label: 'Directories', key: 'dirCount', winner: 'largest', getValue: (r) => r.dirCount.toLocaleString() }
+  ];
+  createTable(validDirs, dirMetrics, flattenedReports);
+
+  // Package.json Table
+  const hasPackageJson = validDirs.some(dir => flattenedReports[dir]['Package.json Analyzer'].totalFiles > 0);
+  if (hasPackageJson) {
+    console.log('\n' + colors.magenta + colors.bright + '📦 PACKAGE.JSON ANALYSIS' + colors.reset);
+    const pkgMetrics = [
+      { label: 'package.json', key: 'totalFiles', winner: 'largest', getValue: (r) => r['Package.json Analyzer'].totalFiles },
+      { label: 'Dependencies', key: 'totalDeps', winner: 'smallest', getValue: (r) => r['Package.json Analyzer'].totalDeps },
+      { label: 'Purity %', key: 'purityPercentage', winner: 'largest', getValue: (r) => `${r['Package.json Analyzer'].purityPercentage}%` }
+    ];
+    createTable(validDirs, pkgMetrics, flattenedReports);
+  }
+
+  // Lines of Code Table
+  const hasLoc = validDirs.some(dir => flattenedReports[dir]['Lines of Code Analyzer'].totalLines > 0);
+  if (hasLoc) {
+    console.log('\n' + colors.green + colors.bright + '📝 LINES OF CODE' + colors.reset);
+    const locMetrics = [
+      { label: 'Total Lines', key: 'totalLines', winner: 'largest', getValue: (r) => r['Lines of Code Analyzer'].totalLinesFormatted }
+    ];
+    createTable(validDirs, locMetrics, flattenedReports);
+    printLanguagesComparison(validDirs, flattenedReports);
+  }
+
+  // Archive Files Table
+  const hasArchives = validDirs.some(dir => flattenedReports[dir]['Archive Files Analyzer'].totalCount > 0);
+  if (hasArchives) {
+    console.log('\n' + colors.yellow + colors.bright + '📦 ARCHIVE FILES' + colors.reset);
+    const archiveMetrics = [
+      { label: 'Archive Files', key: 'totalCount', winner: 'smallest', getValue: (r) => r['Archive Files Analyzer'].totalCount },
+      { label: 'Archive Size', key: 'totalSize', winner: 'smallest', getValue: (r) => r['Archive Files Analyzer'].totalSizeFormatted }
+    ];
+    createTable(validDirs, archiveMetrics, flattenedReports);
+  }
+
+  // Binary Files Table
+  const hasBinaries = validDirs.some(dir => flattenedReports[dir]['Binary Files Analyzer'].totalCount > 0);
+  if (hasBinaries) {
+    console.log('\n' + colors.blue + colors.bright + '💾 BINARY FILES' + colors.reset);
+    const binaryMetrics = [
+      { label: 'Binary Files', key: 'totalCount', winner: 'smallest', getValue: (r) => r['Binary Files Analyzer'].totalCount },
+      { label: 'Binary Size', key: 'totalSize', winner: 'smallest', getValue: (r) => r['Binary Files Analyzer'].totalSizeFormatted }
+    ];
+    createTable(validDirs, binaryMetrics, flattenedReports);
+  }
+
+  // Calculate winners
+  const winners = {};
+  validDirs.forEach(dir => winners[dir] = 0);
+
+  const allMetrics = [...dirMetrics];
+  if (hasPackageJson) allMetrics.push(...[
+    { label: 'package.json', key: 'totalFiles', winner: 'largest' },
+    { label: 'Dependencies', key: 'totalDeps', winner: 'smallest' },
+    { label: 'Purity %', key: 'purityPercentage', winner: 'largest' }
+  ]);
+  if (hasLoc) allMetrics.push({ label: 'Total Lines', key: 'totalLines', winner: 'largest' });
+  if (hasArchives) allMetrics.push({ label: 'Archive Files', key: 'totalCount', winner: 'smallest' });
+  if (hasBinaries) allMetrics.push({ label: 'Binary Files', key: 'totalCount', winner: 'smallest' });
+
+  allMetrics.forEach(metric => {
+    const values = validDirs.map(dir => {
+      if (metric.key.includes('Formatted') || metric.key === 'totalLinesFormatted') {
+        const report = flattenedReports[dir];
+        if (metric.key === 'totalSizeFormatted') return parseFloat(report.totalSizeMB);
+        if (metric.key === 'codeSizeFormatted') return parseFloat(report.codeSizeMB);
+        if (metric.key === 'binarySizeFormatted') return parseFloat(report.binarySizeMB);
+        if (metric.key === 'archiveSizeFormatted') return parseFloat(report.archiveSizeMB);
+        if (metric.key === 'totalLinesFormatted') return flattenedReports[dir]['Lines of Code Analyzer'].totalLines;
+      }
+      if (metric.key === 'totalFiles' || metric.key === 'totalDeps' || metric.key === 'purityPercentage') {
+        return parseFloat(flattenedReports[dir]['Package.json Analyzer'][metric.key]) || 0;
+      }
+      if (metric.key === 'totalCount') {
+        if (metric.label.includes('Archive')) {
+          return flattenedReports[dir]['Archive Files Analyzer'].totalCount;
+        }
+        if (metric.label.includes('Binary')) {
+          return flattenedReports[dir]['Binary Files Analyzer'].totalCount;
+        }
+      }
+      return parseFloat(flattenedReports[dir][metric.key]) || 0;
+    });
+
+    const winnerValue = metric.winner === 'largest' ? Math.max(...values) : Math.min(...values);
+    const winnerIndex = values.indexOf(winnerValue);
+    if (winnerIndex !== -1) {
+      winners[validDirs[winnerIndex]]++;
+    }
+  });
+
+  printWinnerPodium(winners);
+
+  console.log('\n' + colors.dim + '─'.repeat(terminalWidth - 1) + colors.reset);
+  console.log(colors.green + '✓ Comparison complete!' + colors.reset);
+  console.log(colors.dim + `Analyzed ${validDirs.length} directories` + colors.reset);
+}
+
+/**
+ * Main function
+ */
+async function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.length === 0) {
+    console.error(`${colors.red}Error: Please provide at least one directory path${colors.reset}`);
+    console.error(`${colors.yellow}Usage: node script.js <directory-path> [directory-path2 ...]${colors.reset}`);
+    process.exit(1);
+  }
+  
+  if (args.length === 1) {
+    await processSingleDirectory(args[0]);
+  } else {
+    await processMultipleDirectories(args);
+  }
 }
 
 process.on('unhandledRejection', (error) => {
