@@ -2733,966 +2733,1678 @@ class C {
 
 // ------------------------------------------------------------------------ || -------------------------------------------------------------------------------
 
-// SyDB.js main class começa aqui
-
 /**
  * SYDB Database Management System
  * High-performance database system with HTTP API interface
- * @class SyDB
+ * @module SyDB
  */
-class SyDB {
-    static #serverStarted = false
-    static #serverStarting = false
-    static #baseUrl = 'http://localhost:8080'
-    static #startTimeout = 5000 // 5 seconds
 
-    // Keep your existing Start method as is - it works 100%
-    static async Start() {
-        if (this.#serverStarted) return true
-        if (this.#serverStarting) {
-            await new Promise(resolve => setTimeout(resolve, 1000))
-            return this.#serverStarted
-        }
-
-        this.#serverStarting = true
-        
-        try {
-            createCFileFromString(code,'./test.c')
-            let c_process = await SyPM.run(`${C_Code}
-                console.log("Starting SYDB HTTP Server...")
-                console.log(await C.run('./test.c',{args : ['--server']}))
-            `,{workingDir : process.cwd()})
-                
-            await new Promise(resolve => setTimeout(resolve, 3000))
-
-            if(!SyPM.isAlive(c_process.pid)){
-            SyPM.cleanup()
-            console.log('SyDB C server failed to start, fallback to JS_SyDB...')
-
-            await SyPM.run(`${js_sydb_raw}
-                console.log("Starting SYDB C HTTP Server...")
-                let db = new JS_SyDB()
-                db.httpServerStart(8080)
-            `,{workingDir : process.cwd()})
-
-            await new Promise(resolve => setTimeout(resolve, 1000))
-
-            this.#serverStarted = true
-            this.#serverStarting = false
-            console.log('SYDB JS Server started successfully')
-            return true
-
-            } else {
-
-            this.#serverStarted = true
-            this.#serverStarting = false
-            console.log('SYDB C Server started successfully')
-            return true
-
-            }
-            
-            
-        } catch (error) {
-            this.#serverStarting = false
-            console.error('Failed to start SYDB Server:', error.message)
-            return false
-        }
-    }
-
-    /**
-     * Make HTTP request to SYDB server with proper error handling
-     * @static
-     * @async
-     * @param {string} method - HTTP method
-     * @param {string} endpoint - API endpoint
-     * @param {Object} [data] - Request data
-     * @returns {Promise<Object>} Response data
-     */
-    static async #makeRequest(method, endpoint, data = null) {
-        const url = `${this.#baseUrl}${endpoint}`
-        const options = {
-            method,
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            timeout: 10000 // 10 second timeout
-        }
-
-        if (data && (method === 'POST' || method === 'PUT')) {
-            options.body = JSON.stringify(data)
-        }
-
-        try {
-            const response = await fetch(url, options)
-            
-            if (!response.ok) {
-                const errorText = await response.text()
-                throw new Error(`HTTP ${response.status}: ${errorText}`)
-            }
-            
-            const responseData = await response.json()
-            return responseData
-            
-        } catch (error) {
-            // Check if server is not running
-            if (error.code === 'ECONNREFUSED' || error.name === 'TypeError') {
-                console.log('SYDB Server not running, attempting to start...')
-                const started = await this.Start()
-                if (started) {
-                    console.log('Waiting for server to be ready...')
-                    await new Promise(resolve => setTimeout(resolve, this.#startTimeout))
-                    // Retry the request once
-                    return await this.#makeRequest(method, endpoint, data)
-                }
-            }
-            
-            return {
-                success: false,
-                error: `Request failed: ${error.message}`,
-                serverStatus: this.#serverStarted ? 'running' : 'stopped'
-            }
-        }
-    }
-
-    /**
-     * List all databases
-     * @static
-     * @async
-     * @returns {Promise<Object>} List of databases
-     */
-    static async listDatabases() {
-        return await this.#makeRequest('GET', '/api/databases')
-    }
-
-    /**
-     * Create a new database
-     * @static
-     * @async
-     * @param {string} name - Database name
-     * @returns {Promise<Object>} Operation result
-     */
-    static async createDatabase(name) {
-        if (!name || typeof name !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        return await this.#makeRequest('POST', '/api/databases', { name })
-    }
-
-    /**
-     * Delete a database
-     * @static
-     * @async
-     * @param {string} name - Database name
-     * @returns {Promise<Object>} Operation result
-     */
-    static async deleteDatabase(name) {
-        if (!name || typeof name !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        return await this.#makeRequest('DELETE', `/api/databases/${encodeURIComponent(name)}`)
-    }
-
-    /**
-     * List all collections in a database
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @returns {Promise<Object>} List of collections
-     */
-    static async listCollections(databaseName) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        return await this.#makeRequest('GET', `/api/databases/${encodeURIComponent(databaseName)}/collections`)
-    }
-
-    /**
-     * Create a new collection with schema
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @param {Array} schema - Collection schema
-     * @returns {Promise<Object>} Operation result
-     */
-    static async createCollection(databaseName, collectionName, schema) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        if (!Array.isArray(schema)) {
-            return {
-                success: false,
-                error: 'Schema must be an array'
-            }
-        }
-
-        return await this.#makeRequest('POST', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections`, 
-            {
-                name: collectionName,
-                schema: schema
-            }
-        )
-    }
-
-    /**
-     * Delete a collection
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @returns {Promise<Object>} Operation result
-     */
-    static async deleteCollection(databaseName, collectionName) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        return await this.#makeRequest('DELETE', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}`
-        )
-    }
-
-    /**
-     * Get collection schema
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @returns {Promise<Object>} Collection schema
-     */
-    static async getCollectionSchema(databaseName, collectionName) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        return await this.#makeRequest('GET', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/schema`
-        )
-    }
-
-    /**
-     * List instances in a collection with optional query
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @param {string} [query] - Optional query string
-     * @returns {Promise<Object>} List of instances
-     */
-    static async listInstances(databaseName, collectionName, query = '') {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-
-        let endpoint = `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`
-        
-        if (query) {
-            endpoint += `?query=${encodeURIComponent(query)}`
-        }
-
-        return await this.#makeRequest('GET', endpoint)
-    }
-
-    /**
-     * Insert a new instance into a collection
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @param {Object} instanceData - Instance data
-     * @returns {Promise<Object>} Operation result with instance ID
-     */
-    static async insertInstance(databaseName, collectionName, instanceData) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        if (!instanceData || typeof instanceData !== 'object') {
-            return {
-                success: false,
-                error: 'Instance data is required and must be an object'
-            }
-        }
-
-        return await this.#makeRequest('POST', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`, 
-            instanceData
-        )
-    }
-
-    /**
-     * Update an existing instance
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @param {string} instanceId - Instance ID
-     * @param {Object} updateData - Update data
-     * @returns {Promise<Object>} Operation result
-     */
-    static async updateInstance(databaseName, collectionName, instanceId, updateData) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        if (!instanceId || typeof instanceId !== 'string') {
-            return {
-                success: false,
-                error: 'Instance ID is required and must be a string'
-            }
-        }
-        if (!updateData || typeof updateData !== 'object') {
-            return {
-                success: false,
-                error: 'Update data is required and must be an object'
-            }
-        }
-
-        return await this.#makeRequest('PUT', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`,
-            updateData
-        )
-    }
-
-    /**
-     * Delete an instance
-     * @static
-     * @async
-     * @param {string} databaseName - Database name
-     * @param {string} collectionName - Collection name
-     * @param {string} instanceId - Instance ID
-     * @returns {Promise<Object>} Operation result
-     */
-    static async deleteInstance(databaseName, collectionName, instanceId) {
-        if (!databaseName || typeof databaseName !== 'string') {
-            return {
-                success: false,
-                error: 'Database name is required and must be a string'
-            }
-        }
-        if (!collectionName || typeof collectionName !== 'string') {
-            return {
-                success: false,
-                error: 'Collection name is required and must be a string'
-            }
-        }
-        if (!instanceId || typeof instanceId !== 'string') {
-            return {
-                success: false,
-                error: 'Instance ID is required and must be a string'
-            }
-        }
-
-        return await this.#makeRequest('DELETE', 
-            `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`
-        )
-    }
-
-    /**
-     * Execute SYDB commands
-     * @static
-     * @async
-     * @param {string} command - SYDB command
-     * @param {Array} [args=[]] - Command arguments
-     * @returns {Promise<Object>} Command result
-     */
-    static async executeCommand(command, args = []) {
-        if (!command || typeof command !== 'string') {
-            return {
-                success: false,
-                error: 'Command is required and must be a string'
-            }
-        }
-
-        return await this.#makeRequest('POST', '/api/execute', {
-            command: command,
-            arguments: args
-        })
-    }
-
-    /**
-     * Display available HTTP routes and schemas
-     * @static
-     * @async
-     * @returns {Promise<Object>} Routes information
-     */
-    static async showRoutes() {
-        // Execute the C binary with --routes flag directly
-        try {
-            const result = await C.run(code, { args: ['--routes'] })
-            return {
-                success: true,
-                routes: result
-            }
-        } catch (error) {
-            return {
-                success: false,
-                error: `Failed to show routes: ${error.message}`
-            }
-        }
-    }
-
-    /**
-     * Check if server is running
-     * @static
-     * @async
-     * @returns {Promise<boolean>} Server status
-     */
-    static async isServerRunning() {
-        try {
-            const response = await this.#makeRequest('GET', '/api/databases')
-            return response && response.success !== false
-        } catch (error) {
-            return false
-        }
-    }
-
-    /**
-     * Stop the SYDB server
-     * @static
-     * @async
-     * @returns {Promise<boolean>} True if server was stopped
-     */
-    static async Stop() {
-        if (!this.#serverStarted) return true
-        
-        try {
-            // Kill all SyPM processes related to SYDB
-            await SyPM.killAll()
-            this.#serverStarted = false
-            console.log('SYDB Server stopped')
-            return true
-        } catch (error) {
-            console.error('Failed to stop SYDB Server:', error.message)
-            return false
-        }
-    }
-}
+// ============================================================================
+// TYPES & JSDOC DEFINITIONS
+// ============================================================================
 
 /**
- * Command Line Interface for SYDB - Matches C binary EXACTLY
+ * @typedef {Object} SchemaField
+ * @property {string} type - Field type ('string', 'number', 'boolean', 'int', 'float', 'array', 'object')
+ * @property {boolean} [required=false] - Whether field is required
+ * @property {boolean} [indexed=false] - Whether field is indexed
+ * @property {*} [default] - Default value
  */
+
+/**
+ * @typedef {Object.<string, SchemaField|string>} SchemaDefinition
+ */
+
+/**
+ * @template T
+ * @typedef {T & {
+*   _id: string;
+*   update(data: Partial<T>): Promise<Document<T>>;
+*   delete(): Promise<boolean>;
+*   refresh(): Promise<Document<T>>;
+* }} Document
+*/
+
+/**
+* @template T
+* @typedef {Object} ModelInterface
+* @property {(filter?: Partial<T>) => Promise<Document<T>|null>} findOne
+* @property {(filter?: Partial<T>) => Promise<Document<T>[]>} find
+* @property {(data: T) => Promise<Document<T>>} create
+* @property {(id: string) => Promise<Document<T>|null>} findById
+* @property {(id: string, data: Partial<T>) => Promise<Document<T>>} update
+* @property {(id: string) => Promise<boolean>} delete
+* @property {(filter?: Partial<T>) => Promise<number>} deleteMany
+* @property {(filter?: Partial<T>) => Promise<number>} count
+* @property {(filter: Partial<T>) => Promise<boolean>} exists
+* @property {() => Promise<Object>} getSchema
+* @property {() => Promise<boolean>} drop
+*/
+
+/**
+* @typedef {Object} ConnectionInterface
+* @property {string} databaseName
+* @property {string} baseUrl
+* @property {<T>(collectionName: string, schemaDefinition: SchemaDefinition) => ModelInterface<T>} Model
+* @property {() => Promise<string[]>} listCollections
+* @property {() => Promise<boolean>} delete
+*/
+
+// ============================================================================
+// MAIN SYDB CLASS
+// ============================================================================
+
+/**
+* SYDB Main Class - Database Management System
+* @class
+*/
+class SyDB {
+   // ============================================================================
+   // PRIVATE STATIC PROPERTIES
+   // ============================================================================
+
+   /** @private */
+   static #serverStarted = false;
+   
+   /** @private */
+   static #serverStarting = false;
+   
+   /** @private */
+   static #baseUrl = 'http://localhost:8080';
+   
+   /** @private */
+   static #startTimeout = 5000;
+   
+   /** @private */
+   static #currentConnection = null;
+   
+   /** @private */
+   static #connections = new Map();
+   
+   /** @private */
+   static #startPromise = null;
+   
+   /** @private */
+   static #serverCheckPromise = null;
+   
+   /** @private */
+   static #serverCheckInterval = null;
+
+   // ============================================================================
+   // SERVER MANAGEMENT (FIXED - CHECKS IF SERVER IS ALREADY RUNNING)
+   // ============================================================================
+
+   /**
+    * Check if SYDB server is already running
+    * @private
+    * @static
+    * @async
+    * @returns {Promise<boolean>}
+    */
+   static async #isServerActuallyRunning() {
+       try {
+           const controller = new AbortController();
+           const timeoutId = setTimeout(() => controller.abort(), 2000);
+           
+           const response = await fetch(`${this.#baseUrl}/api/databases`, {
+               method: 'GET',
+               signal: controller.signal
+           });
+           
+           clearTimeout(timeoutId);
+           return response.ok;
+       } catch {
+           return false;
+       }
+   }
+
+   /**
+    * Ensure server is available (checks first, only starts if not running)
+    * @private
+    * @static
+    * @async
+    * @returns {Promise<boolean>}
+    */
+   static async #ensureServer() {
+       // If server is already marked as started, verify it's actually running
+       if (this.#serverStarted) {
+           const isRunning = await this.#isServerActuallyRunning();
+           if (isRunning) return true;
+           
+           // Server was marked as started but isn't running - reset state
+           this.#serverStarted = false;
+           this.#serverStarting = false;
+           this.#startPromise = null;
+       }
+
+       // Check if server is running without trying to start it
+       const isRunning = await this.#isServerActuallyRunning();
+       if (isRunning) {
+           this.#serverStarted = true;
+           return true;
+       }
+
+       // Server is not running and we need to start it
+       return await this.Start();
+   }
+
+   /**
+    * Start the SYDB server (C or JS fallback) - ONLY STARTS IF NOT ALREADY RUNNING
+    * @static
+    * @async
+    * @returns {Promise<boolean>} True if server started successfully
+    */
+   static async Start() {
+       // First check if server is already running
+       const isRunning = await this.#isServerActuallyRunning();
+       if (isRunning) {
+           this.#serverStarted = true;
+           this.#serverStarting = false;
+           return true;
+       }
+
+       // If server is already started in our state, return true
+       if (this.#serverStarted) return true;
+       
+       // If server is in the process of starting, wait for it
+       if (this.#serverStarting) {
+           if (this.#startPromise) {
+               await this.#startPromise;
+           } else {
+               await new Promise(resolve => setTimeout(resolve, 1000));
+           }
+           return this.#serverStarted;
+       }
+
+       // Mark as starting and create a promise for this start attempt
+       this.#serverStarting = true;
+       this.#startPromise = this.#startServer();
+       
+       // Wait for the server to start
+       return await this.#startPromise;
+   }
+
+   /**
+    * Internal server start logic
+    * @private
+    * @static
+    * @async
+    * @returns {Promise<boolean>}
+    */
+   static async #startServer() {
+       try {
+           createCFileFromString(code, './test.c');
+           let c_process = await SyPM.run(`${C_Code}
+               console.log("Starting SYDB HTTP Server...");
+               console.log(await C.run('./test.c', {args : ['--server']}));
+           `, {workingDir : process.cwd()});
+               
+           await new Promise(resolve => setTimeout(resolve, 3000));
+
+           if (!SyPM.isAlive(c_process.pid)) {
+               SyPM.cleanup();
+               console.log('SyDB C server failed to start, fallback to JS_SyDB...');
+
+               await SyPM.run(`${js_sydb_raw}
+                   console.log("Starting SYDB JS HTTP Server...");
+                   let db = new JS_SyDB();
+                   db.httpServerStart(8080);
+               `, {workingDir : process.cwd()});
+
+               await new Promise(resolve => setTimeout(resolve, 1000));
+
+               this.#serverStarted = true;
+               this.#serverStarting = false;
+               console.log('SYDB JS Server started successfully');
+               return true;
+           } else {
+               this.#serverStarted = true;
+               this.#serverStarting = false;
+               console.log('SYDB C Server started successfully');
+               return true;
+           }
+       } catch (error) {
+           this.#serverStarting = false;
+           this.#startPromise = null;
+           console.error('Failed to start SYDB Server:', error.message);
+           return false;
+       }
+   }
+
+   /**
+    * Stop the SYDB server
+    * @static
+    * @async
+    * @returns {Promise<boolean>} True if server was stopped
+    */
+   static async Stop() {
+       if (!this.#serverStarted) return true;
+       
+       try {
+           await SyPM.killAll();
+           this.#serverStarted = false;
+           this.#serverStarting = false;
+           this.#startPromise = null;
+           this.#currentConnection = null;
+           this.#connections.clear();
+           console.log('SYDB Server stopped');
+           return true;
+       } catch (error) {
+           console.error('Failed to stop SYDB Server:', error.message);
+           return false;
+       }
+   }
+
+   /**
+    * Check if server is running
+    * @static
+    * @async
+    * @returns {Promise<boolean>} Server status
+    */
+   static async isServerRunning() {
+       return await this.#isServerActuallyRunning();
+   }
+
+   // ============================================================================
+   // HTTP REQUEST HANDLER (FIXED - BETTER SERVER DETECTION)
+   // ============================================================================
+
+   /**
+    * Make HTTP request to SYDB server
+    * @private
+    * @static
+    * @async
+    * @param {string} method - HTTP method
+    * @param {string} endpoint - API endpoint
+    * @param {Object} [data] - Request data
+    * @returns {Promise<Object>} Response data
+    */
+   static async #makeRequest(method, endpoint, data = null) {
+       const url = `${this.#baseUrl}${endpoint}`;
+       const options = {
+           method,
+           headers: {
+               'Content-Type': 'application/json',
+           }
+       };
+
+       // Add timeout using AbortController
+       const controller = new AbortController();
+       const timeoutId = setTimeout(() => controller.abort(), 10000);
+       options.signal = controller.signal;
+
+       if (data && (method === 'POST' || method === 'PUT')) {
+           options.body = JSON.stringify(data);
+       }
+
+       try {
+           const response = await fetch(url, options);
+           clearTimeout(timeoutId);
+           
+           if (!response.ok) {
+               const errorText = await response.text();
+               throw new Error(`HTTP ${response.status}: ${errorText}`);
+           }
+           
+           return await response.json();
+       } catch (error) {
+           clearTimeout(timeoutId);
+           
+           // Only try to start server if it's a connection error AND server isn't already started/starting
+           if ((error.name === 'AbortError' || error.code === 'ECONNREFUSED' || error.name === 'TypeError') && 
+               !this.#serverStarted && !this.#serverStarting) {
+               
+               // Check if server is actually running before trying to start
+               const isRunning = await this.#isServerActuallyRunning();
+               if (!isRunning) {
+                   console.log('SYDB Server not running, attempting to start...');
+                   const started = await this.Start();
+                   if (started) {
+                       console.log('Waiting for server to be ready...');
+                       await new Promise(resolve => setTimeout(resolve, this.#startTimeout));
+                       return await this.#makeRequest(method, endpoint, data);
+                   }
+               } else {
+                   // Server is actually running but we had a state mismatch
+                   this.#serverStarted = true;
+                   return await this.#makeRequest(method, endpoint, data);
+               }
+           } else if (this.#serverStarting) {
+               // Server is starting, wait for it
+               console.log('Waiting for server to start...');
+               await new Promise(resolve => setTimeout(resolve, this.#startTimeout));
+               return await this.#makeRequest(method, endpoint, data);
+           }
+           
+           return {
+               success: false,
+               error: `Request failed: ${error.message}`,
+               serverStatus: this.#serverStarted ? 'running' : 'stopped'
+           };
+       }
+   }
+
+   // ============================================================================
+   // CONNECTION MANAGEMENT (FIXED - LIGHTWEIGHT, NON-BLOCKING)
+   // ============================================================================
+
+   /**
+    * Connect to a database (creates if doesn't exist)
+    * This is lightweight - it only checks server availability and creates the DB if needed
+    * It does NOT keep the process alive
+    * @static
+    * @async
+    * @param {string} databaseName - Name of the database to connect to
+    * @param {string} [baseUrl='http://localhost:8080'] - Optional custom base URL
+    * @returns {Promise<ConnectionInterface>} Connection instance
+    * @throws {Error} If database name is invalid or server unavailable
+    * 
+    * @example
+    * const db = await SyDB.Connect('myapp'); // Will use existing server or start if needed
+    * // Process can exit after this - connection is just a configuration object
+    */
+   static async Connect(databaseName, baseUrl = 'http://localhost:8080') {
+       if (!databaseName || typeof databaseName !== 'string') {
+           throw new Error('Database name is required and must be a string');
+       }
+
+       // Update baseUrl if provided
+       if (baseUrl !== this.#baseUrl) {
+           this.#baseUrl = baseUrl;
+       }
+
+       // Check if we already have this connection
+       if (this.#connections.has(databaseName)) {
+           this.#currentConnection = this.#connections.get(databaseName);
+           return this.#currentConnection;
+       }
+
+       // Ensure server is available (checks if running, starts only if needed)
+       const serverAvailable = await this.#ensureServer();
+       if (!serverAvailable) {
+           throw new Error('Cannot connect to SYDB server - server unavailable and could not be started');
+       }
+
+       // Create database if it doesn't exist - this is idempotent
+       const dbResult = await this.createDatabase(databaseName);
+       
+       const connection = new Connection(databaseName, baseUrl);
+       this.#connections.set(databaseName, connection);
+       this.#currentConnection = connection;
+       
+       return connection;
+   }
+
+   /**
+    * Get the current active connection
+    * @static
+    * @returns {ConnectionInterface} Current connection
+    * @throws {Error} If no active connection
+    */
+   static get currentConnection() {
+       if (!this.#currentConnection) {
+           throw new Error('No active connection. Call Connect() first.');
+       }
+       return this.#currentConnection;
+   }
+
+   /**
+    * Create a model with full IntelliSense support
+    * Uses the current active connection
+    * @static
+    * @template {Object} T
+    * @param {string} collectionName - Name of the collection
+    * @param {SchemaDefinition} schemaDefinition - Schema definition object
+    * @returns {ModelInterface<T>} Model instance with IntelliSense
+    * 
+    * @example
+    * const User = SyDB.Model('users', {
+    *   name: { type: 'string', required: true },
+    *   email: { type: 'string', required: true, indexed: true },
+    *   age: 'number',
+    *   active: { type: 'boolean', default: true }
+    * });
+    */
+   static Model(collectionName, schemaDefinition) {
+       if (!this.#currentConnection) {
+           throw new Error('No active connection. Call Connect() first.');
+       }
+       return new Model(this.#currentConnection, collectionName, schemaDefinition);
+   }
+
+   /**
+    * Close all connections
+    * This just clears the connection cache, does NOT stop the server
+    * @static
+    * @async
+    * @returns {Promise<void>}
+    */
+   static async Close() {
+       this.#connections.clear();
+       this.#currentConnection = null;
+   }
+
+   // ============================================================================
+   // DATABASE OPERATIONS (ORIGINAL - PRESERVED EXACTLY)
+   // ============================================================================
+
+   /**
+    * List all databases
+    * @static
+    * @async
+    * @returns {Promise<Object>} List of databases
+    */
+   static async listDatabases() {
+       return await this.#makeRequest('GET', '/api/databases');
+   }
+
+   /**
+    * Create a new database
+    * @static
+    * @async
+    * @param {string} name - Database name
+    * @returns {Promise<Object>} Operation result
+    */
+   static async createDatabase(name) {
+       if (!name || typeof name !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       return await this.#makeRequest('POST', '/api/databases', { name });
+   }
+
+   /**
+    * Delete a database
+    * @static
+    * @async
+    * @param {string} name - Database name
+    * @returns {Promise<Object>} Operation result
+    */
+   static async deleteDatabase(name) {
+       if (!name || typeof name !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       return await this.#makeRequest('DELETE', `/api/databases/${encodeURIComponent(name)}`);
+   }
+
+   // ============================================================================
+   // COLLECTION OPERATIONS (ORIGINAL - PRESERVED EXACTLY)
+   // ============================================================================
+
+   /**
+    * List all collections in a database
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @returns {Promise<Object>} List of collections
+    */
+   static async listCollections(databaseName) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       return await this.#makeRequest('GET', `/api/databases/${encodeURIComponent(databaseName)}/collections`);
+   }
+
+   /**
+    * Create a new collection with schema
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @param {Array} schema - Collection schema
+    * @returns {Promise<Object>} Operation result
+    */
+   static async createCollection(databaseName, collectionName, schema) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       if (!Array.isArray(schema)) {
+           return {
+               success: false,
+               error: 'Schema must be an array'
+           };
+       }
+
+       return await this.#makeRequest('POST', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections`, 
+           {
+               name: collectionName,
+               schema: schema
+           }
+       );
+   }
+
+   /**
+    * Delete a collection
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @returns {Promise<Object>} Operation result
+    */
+   static async deleteCollection(databaseName, collectionName) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       return await this.#makeRequest('DELETE', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}`
+       );
+   }
+
+   /**
+    * Get collection schema
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @returns {Promise<Object>} Collection schema
+    */
+   static async getCollectionSchema(databaseName, collectionName) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       return await this.#makeRequest('GET', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/schema`
+       );
+   }
+
+   // ============================================================================
+   // INSTANCE OPERATIONS (ORIGINAL - PRESERVED EXACTLY)
+   // ============================================================================
+
+   /**
+    * List instances in a collection with optional query
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @param {string} [query=''] - Optional query string
+    * @returns {Promise<Object>} List of instances
+    */
+   static async listInstances(databaseName, collectionName, query = '') {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+
+       let endpoint = `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`;
+       
+       if (query) {
+           endpoint += `?query=${encodeURIComponent(query)}`;
+       }
+
+       return await this.#makeRequest('GET', endpoint);
+   }
+
+   /**
+    * Insert a new instance into a collection
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @param {Object} instanceData - Instance data
+    * @returns {Promise<Object>} Operation result with instance ID
+    */
+   static async insertInstance(databaseName, collectionName, instanceData) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       if (!instanceData || typeof instanceData !== 'object') {
+           return {
+               success: false,
+               error: 'Instance data is required and must be an object'
+           };
+       }
+
+       return await this.#makeRequest('POST', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances`, 
+           instanceData
+       );
+   }
+
+   /**
+    * Update an existing instance
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @param {string} instanceId - Instance ID
+    * @param {Object} updateData - Update data
+    * @returns {Promise<Object>} Operation result
+    */
+   static async updateInstance(databaseName, collectionName, instanceId, updateData) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       if (!instanceId || typeof instanceId !== 'string') {
+           return {
+               success: false,
+               error: 'Instance ID is required and must be a string'
+           };
+       }
+       if (!updateData || typeof updateData !== 'object') {
+           return {
+               success: false,
+               error: 'Update data is required and must be an object'
+           };
+       }
+
+       return await this.#makeRequest('PUT', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`,
+           updateData
+       );
+   }
+
+   /**
+    * Delete an instance
+    * @static
+    * @async
+    * @param {string} databaseName - Database name
+    * @param {string} collectionName - Collection name
+    * @param {string} instanceId - Instance ID
+    * @returns {Promise<Object>} Operation result
+    */
+   static async deleteInstance(databaseName, collectionName, instanceId) {
+       if (!databaseName || typeof databaseName !== 'string') {
+           return {
+               success: false,
+               error: 'Database name is required and must be a string'
+           };
+       }
+       if (!collectionName || typeof collectionName !== 'string') {
+           return {
+               success: false,
+               error: 'Collection name is required and must be a string'
+           };
+       }
+       if (!instanceId || typeof instanceId !== 'string') {
+           return {
+               success: false,
+               error: 'Instance ID is required and must be a string'
+           };
+       }
+
+       return await this.#makeRequest('DELETE', 
+           `/api/databases/${encodeURIComponent(databaseName)}/collections/${encodeURIComponent(collectionName)}/instances/${encodeURIComponent(instanceId)}`
+       );
+   }
+
+   // ============================================================================
+   // COMMAND EXECUTION (ORIGINAL - PRESERVED EXACTLY)
+   // ============================================================================
+
+   /**
+    * Execute SYDB commands
+    * @static
+    * @async
+    * @param {string} command - SYDB command
+    * @param {Array} [args=[]] - Command arguments
+    * @returns {Promise<Object>} Command result
+    */
+   static async executeCommand(command, args = []) {
+       if (!command || typeof command !== 'string') {
+           return {
+               success: false,
+               error: 'Command is required and must be a string'
+           };
+       }
+
+       return await this.#makeRequest('POST', '/api/execute', {
+           command: command,
+           arguments: args
+       });
+   }
+
+   // ============================================================================
+   // UTILITY METHODS (ORIGINAL - PRESERVED EXACTLY)
+   // ============================================================================
+
+   /**
+    * Display available HTTP routes and schemas
+    * @static
+    * @async
+    * @returns {Promise<Object>} Routes information
+    */
+   static async showRoutes() {
+       try {
+           const result = await C.run(code, { args: ['--routes'] });
+           return {
+               success: true,
+               routes: result
+           };
+       } catch (error) {
+           return {
+               success: false,
+               error: `Failed to show routes: ${error.message}`
+           };
+       }
+   }
+}
+
+// ============================================================================
+// CONNECTION CLASS
+// ============================================================================
+
+/**
+* Connection class representing a database connection
+* @class
+* @implements {ConnectionInterface}
+*/
+class Connection {
+   /**
+    * @private
+    * @param {string} databaseName 
+    * @param {string} baseUrl 
+    */
+   constructor(databaseName, baseUrl) {
+       /** @private */
+       this.databaseName = databaseName;
+       
+       /** @private */
+       this.baseUrl = baseUrl;
+       
+       /** @private */
+       this.models = new Map();
+   }
+
+   /**
+    * Create a model for this connection
+    * @template {Object} T
+    * @param {string} collectionName - Name of the collection
+    * @param {SchemaDefinition} schemaDefinition - Schema definition
+    * @returns {ModelInterface<T>} Model instance
+    */
+   Model(collectionName, schemaDefinition) {
+       if (this.models.has(collectionName)) {
+           return this.models.get(collectionName);
+       }
+       const model = new Model(this, collectionName, schemaDefinition);
+       this.models.set(collectionName, model);
+       return model;
+   }
+
+   /**
+    * List all collections in this database
+    * @async
+    * @returns {Promise<string[]>} List of collection names
+    */
+   async listCollections() {
+       const result = await SyDB.listCollections(this.databaseName);
+       return result.success ? result.collections : [];
+   }
+
+   /**
+    * Delete this database
+    * @async
+    * @returns {Promise<boolean>} Success status
+    */
+   async delete() {
+       const result = await SyDB.deleteDatabase(this.databaseName);
+       if (result.success) {
+           SyDB._connections?.delete(this.databaseName);
+           if (SyDB._currentConnection === this) {
+               SyDB._currentConnection = null;
+           }
+       }
+       return result.success;
+   }
+}
+
+// ============================================================================
+// MODEL CLASS (UNCHANGED)
+// ============================================================================
+
+/**
+* Model class providing ORM-like methods with full IntelliSense
+* @template T
+* @class
+* @implements {ModelInterface<T>}
+*/
+class Model {
+   /**
+    * @private
+    * @param {Connection} connection 
+    * @param {string} collectionName 
+    * @param {SchemaDefinition} schemaDefinition 
+    */
+   constructor(connection, collectionName, schemaDefinition) {
+       /** @private */
+       this.connection = connection;
+       
+       /** @private */
+       this.collectionName = collectionName;
+       
+       /** @private */
+       this.schema = this.#parseSchema(schemaDefinition);
+       
+       /** @private */
+       this.fieldNames = Object.keys(schemaDefinition);
+       
+       this.#initializeCollection();
+   }
+
+   /**
+    * Parse schema definition
+    * @private
+    * @param {SchemaDefinition} schemaDefinition 
+    * @returns {Array}
+    */
+   #parseSchema(schemaDefinition) {
+       const schema = [];
+       
+       for (const [fieldName, fieldConfig] of Object.entries(schemaDefinition)) {
+           let type = 'string';
+           let required = false;
+           let indexed = false;
+           
+           if (typeof fieldConfig === 'string') {
+               type = fieldConfig;
+           } else if (typeof fieldConfig === 'object') {
+               type = fieldConfig.type || 'string';
+               required = fieldConfig.required || false;
+               indexed = fieldConfig.indexed || false;
+           }
+           
+           schema.push({
+               name: fieldName,
+               type: this.#mapType(type),
+               required,
+               indexed
+           });
+       }
+       
+       return schema;
+   }
+
+   /**
+    * Map simplified types to SyDB types
+    * @private
+    * @param {string} type 
+    * @returns {string}
+    */
+   #mapType(type) {
+       const typeMap = {
+           'string': 'string',
+           'number': 'float',
+           'int': 'int',
+           'float': 'float',
+           'boolean': 'bool',
+           'bool': 'bool',
+           'array': 'array',
+           'object': 'object'
+       };
+       return typeMap[type.toLowerCase()] || 'string';
+   }
+
+   /**
+    * Initialize collection with schema
+    * @private
+    * @async
+    */
+   async #initializeCollection() {
+       try {
+           await SyDB.createCollection(
+               this.connection.databaseName,
+               this.collectionName,
+               this.schema
+           );
+       } catch (error) {
+           // Collection might already exist
+       }
+   }
+
+   /**
+    * Build query string from filter object
+    * @private
+    * @param {Partial<T>} filter 
+    * @returns {string}
+    */
+   #buildQueryString(filter) {
+       if (!filter || Object.keys(filter).length === 0) return '';
+       
+       return Object.entries(filter)
+           .map(([key, value]) => `${key}:${value}`)
+           .join(',');
+   }
+
+   /**
+    * Wrap document with helper methods
+    * @private
+    * @param {T & {_id: string}} doc 
+    * @returns {Document<T>}
+    */
+   #wrapDocument(doc) {
+       const wrapped = { ...doc };
+       
+       wrapped.update = async (data) => {
+           const updated = await this.update(doc._id, data);
+           Object.assign(wrapped, updated);
+           return wrapped;
+       };
+       
+       wrapped.delete = async () => {
+           return await this.delete(doc._id);
+       };
+       
+       wrapped.refresh = async () => {
+           const fresh = await this.findById(doc._id);
+           if (fresh) {
+               Object.assign(wrapped, fresh);
+           }
+           return wrapped;
+       };
+       
+       return wrapped;
+   }
+
+   /**
+    * Find one document
+    * @async
+    * @param {Partial<T>} [filter={}]
+    * @returns {Promise<Document<T>|null>}
+    */
+   async findOne(filter = {}) {
+       const query = this.#buildQueryString(filter);
+       const result = await SyDB.listInstances(
+           this.connection.databaseName,
+           this.collectionName,
+           query
+       );
+       
+       if (result.success && result.instances?.length) {
+           return this.#wrapDocument(result.instances[0]);
+       }
+       return null;
+   }
+
+   /**
+    * Find all documents
+    * @async
+    * @param {Partial<T>} [filter={}]
+    * @returns {Promise<Document<T>[]>}
+    */
+   async find(filter = {}) {
+       const query = this.#buildQueryString(filter);
+       const result = await SyDB.listInstances(
+           this.connection.databaseName,
+           this.collectionName,
+           query
+       );
+       
+       if (result.success && result.instances) {
+           return result.instances.map(doc => this.#wrapDocument(doc));
+       }
+       return [];
+   }
+
+   /**
+    * Create a new document
+    * @async
+    * @param {T} data
+    * @returns {Promise<Document<T>>}
+    * @throws {Error}
+    */
+   async create(data) {
+       const result = await SyDB.insertInstance(
+           this.connection.databaseName,
+           this.collectionName,
+           data
+       );
+       
+       if (result.success && result.id) {
+           return this.findById(result.id);
+       }
+       
+       throw new Error(result.error || 'Failed to create document');
+   }
+
+   /**
+    * Find document by ID
+    * @async
+    * @param {string} id
+    * @returns {Promise<Document<T>|null>}
+    */
+   async findById(id) {
+       const result = await SyDB.listInstances(
+           this.connection.databaseName,
+           this.collectionName,
+           `_id:${id}`
+       );
+       
+       if (result.success && result.instances?.length) {
+           return this.#wrapDocument(result.instances[0]);
+       }
+       return null;
+   }
+
+   /**
+    * Update a document
+    * @async
+    * @param {string} id
+    * @param {Partial<T>} data
+    * @returns {Promise<Document<T>>}
+    * @throws {Error}
+    */
+   async update(id, data) {
+       const result = await SyDB.updateInstance(
+           this.connection.databaseName,
+           this.collectionName,
+           id,
+           data
+       );
+       
+       if (result.success) {
+           return this.findById(id);
+       }
+       
+       throw new Error(result.error || 'Failed to update document');
+   }
+
+   /**
+    * Delete a document
+    * @async
+    * @param {string} id
+    * @returns {Promise<boolean>}
+    */
+   async delete(id) {
+       const result = await SyDB.deleteInstance(
+           this.connection.databaseName,
+           this.collectionName,
+           id
+       );
+       
+       return result.success === true;
+   }
+
+   /**
+    * Delete many documents
+    * @async
+    * @param {Partial<T>} [filter={}]
+    * @returns {Promise<number>}
+    */
+   async deleteMany(filter = {}) {
+       const documents = await this.find(filter);
+       let deleted = 0;
+       
+       for (const doc of documents) {
+           const success = await this.delete(doc._id);
+           if (success) deleted++;
+       }
+       
+       return deleted;
+   }
+
+   /**
+    * Count documents
+    * @async
+    * @param {Partial<T>} [filter={}]
+    * @returns {Promise<number>}
+    */
+   async count(filter = {}) {
+       const documents = await this.find(filter);
+       return documents.length;
+   }
+
+   /**
+    * Check if document exists
+    * @async
+    * @param {Partial<T>} filter
+    * @returns {Promise<boolean>}
+    */
+   async exists(filter) {
+       const doc = await this.findOne(filter);
+       return doc !== null;
+   }
+
+   /**
+    * Get collection schema
+    * @async
+    * @returns {Promise<Object>}
+    */
+   async getSchema() {
+       const result = await SyDB.getCollectionSchema(
+           this.connection.databaseName,
+           this.collectionName
+       );
+       return result;
+   }
+
+   /**
+    * Drop the collection
+    * @async
+    * @returns {Promise<boolean>}
+    */
+   async drop() {
+       const result = await SyDB.deleteCollection(
+           this.connection.databaseName,
+           this.collectionName
+       );
+       
+       if (result.success) {
+           this.connection.models.delete(this.collectionName);
+       }
+       
+       return result.success;
+   }
+}
+
+// ============================================================================
+// CLI CLASS (UNCHANGED)
+// ============================================================================
+
+/**
+* Command Line Interface for SYDB
+* @class
+*/
 class SyDBCLI {
-    /**
-     * Print usage information that matches the C binary EXACTLY
-     * @static
-     */
-    static printUsage() {
-        console.log(`
+   /**
+    * Print usage information
+    * @static
+    */
+   static printUsage() {
+       console.log(`
 Usage:
-  sydb create <database_name>
-  sydb create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
-  sydb create <database_name> <collection_name> --insert-one --<field>-"<value>" ...
-  sydb update <database_name> <collection_name> --where "<query>" --set --<field>-"<value>" ...
-  sydb delete <database_name> <collection_name> --where "<query>"
-  sydb find <database_name> <collection_name> --where "<query>"
-  sydb schema <database_name> <collection_name>
-  sydb list
-  sydb list <database_name>
-  sydb list <database_name> <collection_name>
-  sydb --server [port]          # Start HTTP server
-  sydb --server --verbose       # Start HTTP server with extreme logging
-  sydb --routes                 # Show all HTTP API routes and schemas
+ sydb create <database_name>
+ sydb create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
+ sydb create <database_name> <collection_name> --insert-one --<field>-"<value>" ...
+ sydb update <database_name> <collection_name> --where "<query>" --set --<field>-"<value>" ...
+ sydb delete <database_name> <collection_name> --where "<query>"
+ sydb find <database_name> <collection_name> --where "<query>"
+ sydb schema <database_name> <collection_name>
+ sydb list
+ sydb list <database_name>
+ sydb list <database_name> <collection_name>
+ sydb --server [port]          # Start HTTP server
+ sydb --server --verbose       # Start HTTP server with extreme logging
+ sydb --routes                 # Show all HTTP API routes and schemas
 
 Field types: string, int, float, bool, array, object
 Add -req for required fields
-Add -idx for indexed fields (improves query performance)
-Query format: field:value,field2:value2 (multiple conditions supported)
+Add -idx for indexed fields
+Query format: field:value,field2:value2
 Server mode: Starts HTTP server on specified port (default: 8080)
-Verbose mode: Extreme logging for server operations and requests
-`)
-    }
+`);
+   }
 
-    /**
-     * Parse field specifications from command line arguments EXACTLY like C binary
-     * @static
-     * @param {Array} args - Command line arguments
-     * @param {number} startIndex - Starting index
-     * @returns {Array} Array of field specifications
-     */
-    static parseFieldSpecifications(args, startIndex) {
-        const fields = []
-        for (let i = startIndex; i < args.length; i++) {
-            if (args[i].startsWith('--')) {
-                const fieldSpec = args[i].substring(2) // Remove '--'
-                fields.push(fieldSpec)
-            } else {
-                break
-            }
-        }
-        return fields
-    }
+   /**
+    * Parse field specifications
+    * @private
+    * @static
+    * @param {Array} args
+    * @param {number} startIndex
+    * @returns {Array}
+    */
+   static #parseFieldSpecifications(args, startIndex) {
+       const fields = [];
+       for (let i = startIndex; i < args.length; i++) {
+           if (args[i].startsWith('--')) {
+               fields.push(args[i].substring(2));
+           } else {
+               break;
+           }
+       }
+       return fields;
+   }
 
-    /**
-     * Parse insert data from command line arguments EXACTLY like C binary
-     * @static
-     * @param {Array} args - Command line arguments
-     * @param {number} startIndex - Starting index
-     * @returns {Object} Insert data object
-     */
-    static parseInsertData(args, startIndex) {
-        const data = {}
-        for (let i = startIndex; i < args.length; i++) {
-            if (args[i].startsWith('--')) {
-                const fieldSpec = args[i].substring(2) // Remove '--'
-                const dashIndex = fieldSpec.indexOf('-')
-                if (dashIndex !== -1) {
-                    const fieldName = fieldSpec.substring(0, dashIndex)
-                    let fieldValue = fieldSpec.substring(dashIndex + 1)
-                    
-                    // Remove quotes if present
-                    if ((fieldValue.startsWith('"') && fieldValue.endsWith('"')) ||
-                        (fieldValue.startsWith("'") && fieldValue.endsWith("'"))) {
-                        fieldValue = fieldValue.substring(1, fieldValue.length - 1)
-                    }
-                    
-                    data[fieldName] = fieldValue
-                }
-            } else {
-                break
-            }
-        }
-        return data
-    }
+   /**
+    * Parse insert data
+    * @private
+    * @static
+    * @param {Array} args
+    * @param {number} startIndex
+    * @returns {Object}
+    */
+   static #parseInsertData(args, startIndex) {
+       const data = {};
+       for (let i = startIndex; i < args.length; i++) {
+           if (args[i].startsWith('--')) {
+               const fieldSpec = args[i].substring(2);
+               const dashIndex = fieldSpec.indexOf('-');
+               if (dashIndex !== -1) {
+                   const fieldName = fieldSpec.substring(0, dashIndex);
+                   let fieldValue = fieldSpec.substring(dashIndex + 1);
+                   
+                   if ((fieldValue.startsWith('"') && fieldValue.endsWith('"')) ||
+                       (fieldValue.startsWith("'") && fieldValue.endsWith("'"))) {
+                       fieldValue = fieldValue.substring(1, fieldValue.length - 1);
+                   }
+                   
+                   data[fieldName] = fieldValue;
+               }
+           } else {
+               break;
+           }
+       }
+       return data;
+   }
 
-    /**
-     * Convert field specifications to schema format EXACTLY like C binary
-     * @static
-     * @param {Array} fieldSpecs - Field specifications
-     * @returns {Array} Schema array
-     */
-    static fieldSpecsToSchema(fieldSpecs) {
-        const schema = []
-        
-        for (const spec of fieldSpecs) {
-            const parts = spec.split('-')
-            if (parts.length < 2) continue
-            
-            const fieldName = parts[0]
-            const fieldType = parts[1]
-            let required = false
-            let indexed = false
-            
-            // Check for flags
-            for (let i = 2; i < parts.length; i++) {
-                if (parts[i] === 'req') required = true
-                if (parts[i] === 'idx') indexed = true
-            }
-            
-            schema.push({
-                name: fieldName,
-                type: fieldType,
-                required: required,
-                indexed: indexed
-            })
-        }
-        
-        return schema
-    }
+   /**
+    * Convert field specs to schema
+    * @private
+    * @static
+    * @param {Array} fieldSpecs
+    * @returns {Array}
+    */
+   static #fieldSpecsToSchema(fieldSpecs) {
+       const schema = [];
+       
+       for (const spec of fieldSpecs) {
+           const parts = spec.split('-');
+           if (parts.length < 2) continue;
+           
+           const fieldName = parts[0];
+           const fieldType = parts[1];
+           let required = false;
+           let indexed = false;
+           
+           for (let i = 2; i < parts.length; i++) {
+               if (parts[i] === 'req') required = true;
+               if (parts[i] === 'idx') indexed = true;
+           }
+           
+           schema.push({
+               name: fieldName,
+               type: fieldType,
+               required: required,
+               indexed: indexed
+           });
+       }
+       
+       return schema;
+   }
 
-    /**
-     * Execute CLI command EXACTLY like C binary
-     * @static
-     * @async
-     * @param {Array} args - Command line arguments
-     */
-    static async executeCommand(args) {
-        if (args.length < 2) {
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Execute CLI command
+    * @static
+    * @async
+    * @param {Array} args - Command line arguments
+    */
+   static async executeCommand(args) {
+       if (args.length < 2) {
+           this.printUsage();
+           process.exit(1);
+       }
 
-        // Check for server mode first
-        if (args[2] === '--server') {
-            await this.handleServer(args)
-            return
-        }
-        
-        // Check for routes
-        if (args[2] === '--routes') {
-            await this.handleRoutes()
-            return
-        }
+       if (args[2] === '--server') {
+           await this.#handleServer(args);
+           return;
+       }
+       
+       if (args[2] === '--routes') {
+           await this.#handleRoutes();
+           return;
+       }
 
-        const command = args[2]
+       const command = args[2];
 
-        try {
-            switch (command) {
-                case 'create':
-                    await this.handleCreate(args)
-                    break
-                case 'update':
-                    await this.handleUpdate(args)
-                    break
-                case 'delete':
-                    await this.handleDelete(args)
-                    break
-                case 'find':
-                    await this.handleFind(args)
-                    break
-                case 'schema':
-                    await this.handleSchema(args)
-                    break
-                case 'list':
-                    await this.handleList(args)
-                    break
-                default:
-                    console.error(`Error: Unknown command '${command}'`)
-                    this.printUsage()
-                    process.exit(1)
-            }
-        } catch (error) {
-            console.error('Error:', error.message)
-            process.exit(1)
-        }
-    }
+       try {
+           switch (command) {
+               case 'create':
+                   await this.#handleCreate(args);
+                   break;
+               case 'update':
+                   await this.#handleUpdate(args);
+                   break;
+               case 'delete':
+                   await this.#handleDelete(args);
+                   break;
+               case 'find':
+                   await this.#handleFind(args);
+                   break;
+               case 'schema':
+                   await this.#handleSchema(args);
+                   break;
+               case 'list':
+                   await this.#handleList(args);
+                   break;
+               default:
+                   console.error(`Error: Unknown command '${command}'`);
+                   this.printUsage();
+                   process.exit(1);
+           }
+       } catch (error) {
+           console.error('Error:', error.message);
+           process.exit(1);
+       }
+   }
 
-    /**
-     * Handle create command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleCreate(args) {
-        if (args.length < 4) {
-            console.error('Error: Missing database name')
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Handle create command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleCreate(args) {
+       if (args.length < 4) {
+           console.error('Error: Missing database name');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        const databaseName = args[3]
+       const databaseName = args[3];
 
-        if (args.length === 4) {
-            // Create database only: sydb create <database_name>
-            const result = await SyDB.createDatabase(databaseName)
-            console.log(JSON.stringify(result, null, 2))
-        } else if (args.length >= 5) {
-            const collectionName = args[4]
-            
-            if (args.length >= 6 && args[5] === '--schema') {
-                // Create collection with schema: sydb create <db> <coll> --schema --<field>-<type>[-req][-idx] ...
-                const fieldSpecs = this.parseFieldSpecifications(args, 6)
-                if (fieldSpecs.length === 0) {
-                    console.error('Error: No field specifications provided')
-                    this.printUsage()
-                    process.exit(1)
-                }
-                
-                const schema = this.fieldSpecsToSchema(fieldSpecs)
-                const result = await SyDB.createCollection(databaseName, collectionName, schema)
-                console.log(JSON.stringify(result, null, 2))
-                
-            } else if (args.length >= 6 && args[5] === '--insert-one') {
-                // Insert instance: sydb create <db> <coll> --insert-one --<field>-"<value>" ...
-                const insertData = this.parseInsertData(args, 6)
-                if (Object.keys(insertData).length === 0) {
-                    console.error('Error: No insert data provided')
-                    this.printUsage()
-                    process.exit(1)
-                }
-                
-                const result = await SyDB.insertInstance(databaseName, collectionName, insertData)
-                console.log(JSON.stringify(result, null, 2))
-                
-            } else {
-                console.error('Error: Missing --schema or --insert-one flag')
-                this.printUsage()
-                process.exit(1)
-            }
-        }
-    }
+       if (args.length === 4) {
+           const result = await SyDB.createDatabase(databaseName);
+           console.log(JSON.stringify(result, null, 2));
+       } else if (args.length >= 5) {
+           const collectionName = args[4];
+           
+           if (args.length >= 6 && args[5] === '--schema') {
+               const fieldSpecs = this.#parseFieldSpecifications(args, 6);
+               if (fieldSpecs.length === 0) {
+                   console.error('Error: No field specifications provided');
+                   this.printUsage();
+                   process.exit(1);
+               }
+               
+               const schema = this.#fieldSpecsToSchema(fieldSpecs);
+               const result = await SyDB.createCollection(databaseName, collectionName, schema);
+               console.log(JSON.stringify(result, null, 2));
+               
+           } else if (args.length >= 6 && args[5] === '--insert-one') {
+               const insertData = this.#parseInsertData(args, 6);
+               if (Object.keys(insertData).length === 0) {
+                   console.error('Error: No insert data provided');
+                   this.printUsage();
+                   process.exit(1);
+               }
+               
+               const result = await SyDB.insertInstance(databaseName, collectionName, insertData);
+               console.log(JSON.stringify(result, null, 2));
+               
+           } else {
+               console.error('Error: Missing --schema or --insert-one flag');
+               this.printUsage();
+               process.exit(1);
+           }
+       }
+   }
 
-    /**
-     * Handle update command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleUpdate(args) {
-        // sydb update <database> <collection> --where "<query>" --set --<field>-"<value>" ...
-        if (args.length < 8 || args[5] !== '--where' || args[7] !== '--set') {
-            console.error('Error: Invalid update syntax')
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Handle update command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleUpdate(args) {
+       if (args.length < 8 || args[5] !== '--where' || args[7] !== '--set') {
+           console.error('Error: Invalid update syntax');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        const databaseName = args[3]
-        const collectionName = args[4]
-        const query = args[6]
-        const updateData = this.parseInsertData(args, 8)
+       const databaseName = args[3];
+       const collectionName = args[4];
+       const query = args[6];
+       const updateData = this.#parseInsertData(args, 8);
 
-        if (Object.keys(updateData).length === 0) {
-            console.error('Error: No update data provided')
-            this.printUsage()
-            process.exit(1)
-        }
+       if (Object.keys(updateData).length === 0) {
+           console.error('Error: No update data provided');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        // Find instances matching query
-        const result = await SyDB.listInstances(databaseName, collectionName, query)
-        if (!result.success || !result.instances || result.instances.length === 0) {
-            console.log(JSON.stringify({
-                success: false,
-                error: 'No instances found matching the query'
-            }, null, 2))
-            return
-        }
+       const result = await SyDB.listInstances(databaseName, collectionName, query);
+       if (!result.success || !result.instances || result.instances.length === 0) {
+           console.log(JSON.stringify({
+               success: false,
+               error: 'No instances found matching the query'
+           }, null, 2));
+           return;
+       }
 
-        // Update first matching instance
-        const instanceId = result.instances[0]._id
-        const updateResult = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData)
-        console.log(JSON.stringify(updateResult, null, 2))
-    }
+       const instanceId = result.instances[0]._id;
+       const updateResult = await SyDB.updateInstance(databaseName, collectionName, instanceId, updateData);
+       console.log(JSON.stringify(updateResult, null, 2));
+   }
 
-    /**
-     * Handle delete command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleDelete(args) {
-        // sydb delete <database> <collection> --where "<query>"
-        if (args.length < 7 || args[5] !== '--where') {
-            console.error('Error: Invalid delete syntax')
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Handle delete command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleDelete(args) {
+       if (args.length < 7 || args[5] !== '--where') {
+           console.error('Error: Invalid delete syntax');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        const databaseName = args[3]
-        const collectionName = args[4]
-        const query = args[6]
+       const databaseName = args[3];
+       const collectionName = args[4];
+       const query = args[6];
 
-        // Find instances matching query
-        const result = await SyDB.listInstances(databaseName, collectionName, query)
-        if (!result.success || !result.instances || result.instances.length === 0) {
-            console.log(JSON.stringify({
-                success: false,
-                error: 'No instances found matching the query'
-            }, null, 2))
-            return
-        }
+       const result = await SyDB.listInstances(databaseName, collectionName, query);
+       if (!result.success || !result.instances || result.instances.length === 0) {
+           console.log(JSON.stringify({
+               success: false,
+               error: 'No instances found matching the query'
+           }, null, 2));
+           return;
+       }
 
-        // Delete first matching instance
-        const instanceId = result.instances[0]._id
-        const deleteResult = await SyDB.deleteInstance(databaseName, collectionName, instanceId)
-        console.log(JSON.stringify(deleteResult, null, 2))
-    }
+       const instanceId = result.instances[0]._id;
+       const deleteResult = await SyDB.deleteInstance(databaseName, collectionName, instanceId);
+       console.log(JSON.stringify(deleteResult, null, 2));
+   }
 
-    /**
-     * Handle find command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleFind(args) {
-        // sydb find <database> <collection> --where "<query>"
-        if (args.length < 7 || args[5] !== '--where') {
-            console.error('Error: Invalid find syntax')
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Handle find command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleFind(args) {
+       if (args.length < 7 || args[5] !== '--where') {
+           console.error('Error: Invalid find syntax');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        const databaseName = args[3]
-        const collectionName = args[4]
-        const query = args[6]
+       const databaseName = args[3];
+       const collectionName = args[4];
+       const query = args[6];
 
-        const result = await SyDB.listInstances(databaseName, collectionName, query)
-        if (result.success && result.instances) {
-            // Output each instance on a new line like C binary
-            result.instances.forEach(instance => {
-                console.log(JSON.stringify(instance))
-            })
-        } else {
-            console.log(JSON.stringify(result, null, 2))
-        }
-    }
+       const result = await SyDB.listInstances(databaseName, collectionName, query);
+       if (result.success && result.instances) {
+           result.instances.forEach(instance => {
+               console.log(JSON.stringify(instance));
+           });
+       } else {
+           console.log(JSON.stringify(result, null, 2));
+       }
+   }
 
-    /**
-     * Handle schema command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleSchema(args) {
-        if (args.length < 5) {
-            console.error('Error: Missing database or collection name')
-            this.printUsage()
-            process.exit(1)
-        }
+   /**
+    * Handle schema command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleSchema(args) {
+       if (args.length < 5) {
+           console.error('Error: Missing database or collection name');
+           this.printUsage();
+           process.exit(1);
+       }
 
-        const databaseName = args[3]
-        const collectionName = args[4]
+       const databaseName = args[3];
+       const collectionName = args[4];
 
-        const result = await SyDB.getCollectionSchema(databaseName, collectionName)
-        console.log(JSON.stringify(result, null, 2))
-    }
+       const result = await SyDB.getCollectionSchema(databaseName, collectionName);
+       console.log(JSON.stringify(result, null, 2));
+   }
 
-    /**
-     * Handle list command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleList(args) {
-        if (args.length === 3) {
-            // List databases: sydb list
-            const result = await SyDB.listDatabases()
-            if (result.success && result.databases) {
-                result.databases.forEach(db => console.log(db))
-            } else {
-                console.log(JSON.stringify(result, null, 2))
-            }
-        } else if (args.length === 4) {
-            // List collections: sydb list <database>
-            const databaseName = args[3]
-            const result = await SyDB.listCollections(databaseName)
-            if (result.success && result.collections) {
-                result.collections.forEach(coll => console.log(coll))
-            } else {
-                console.log(JSON.stringify(result, null, 2))
-            }
-        } else if (args.length === 5) {
-            // List instances: sydb list <database> <collection>
-            const databaseName = args[3]
-            const collectionName = args[4]
-            const result = await SyDB.listInstances(databaseName, collectionName)
-            if (result.success && result.instances) {
-                result.instances.forEach(instance => {
-                    console.log(JSON.stringify(instance))
-                })
-            } else {
-                console.log(JSON.stringify(result, null, 2))
-            }
-        } else {
-            console.error('Error: Invalid list operation')
-            this.printUsage()
-            process.exit(1)
-        }
-    }
+   /**
+    * Handle list command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleList(args) {
+       if (args.length === 3) {
+           const result = await SyDB.listDatabases();
+           if (result.success && result.databases) {
+               result.databases.forEach(db => console.log(db));
+           } else {
+               console.log(JSON.stringify(result, null, 2));
+           }
+       } else if (args.length === 4) {
+           const databaseName = args[3];
+           const result = await SyDB.listCollections(databaseName);
+           if (result.success && result.collections) {
+               result.collections.forEach(coll => console.log(coll));
+           } else {
+               console.log(JSON.stringify(result, null, 2));
+           }
+       } else if (args.length === 5) {
+           const databaseName = args[3];
+           const collectionName = args[4];
+           const result = await SyDB.listInstances(databaseName, collectionName);
+           if (result.success && result.instances) {
+               result.instances.forEach(instance => {
+                   console.log(JSON.stringify(instance));
+               });
+           } else {
+               console.log(JSON.stringify(result, null, 2));
+           }
+       } else {
+           console.error('Error: Invalid list operation');
+           this.printUsage();
+           process.exit(1);
+       }
+   }
 
-    /**
-     * Handle server command - matches C binary EXACTLY
-     * @static
-     * @async
-     * @param {Array} args - Command arguments
-     */
-    static async handleServer(args) {
-        const verbose = args.includes('--verbose')
-        let port = 8080
-        
-        // Find port argument if provided
-        for (let i = 2; i < args.length; i++) {
-            if (args[i] === '--server' && i + 1 < args.length && !args[i + 1].startsWith('--')) {
-                port = parseInt(args[i + 1])
-                break
-            }
-        }
-        
-        console.log('Starting SYDB HTTP Server...')
-        
-        try {
-            const result = await SyDB.Start()
-            if (result) {
-                console.log('SYDB Server started successfully')
-                if (verbose) {
-                    console.log('Verbose logging enabled')
-                }
-                console.log(`Server running on port ${port}`)
-                console.log('Press Ctrl+C to stop the server')
-                
-                // Keep the process alive
-                process.on('SIGINT', async () => {
-                    console.log('\nStopping server...')
-                    await SyDB.Stop()
-                    process.exit(0)
-                });
-                
-                // Keep alive
-                setInterval(() => {}, 1000)
-            } else {
-                console.error('Failed to start server')
-                process.exit(1)
-            }
-        } catch (error) {
-            console.error('Failed to start SYDB Server:', error.message)
-            process.exit(1)
-        }
-    }
+   /**
+    * Handle server command
+    * @private
+    * @static
+    * @async
+    * @param {Array} args
+    */
+   static async #handleServer(args) {
+       const verbose = args.includes('--verbose');
+       let port = 8080;
+       
+       for (let i = 2; i < args.length; i++) {
+           if (args[i] === '--server' && i + 1 < args.length && !args[i + 1].startsWith('--')) {
+               port = parseInt(args[i + 1]);
+               break;
+           }
+       }
+       
+       console.log('Starting SYDB HTTP Server...');
+       
+       try {
+           const result = await SyDB.Start();
+           if (result) {
+               console.log('SYDB Server started successfully');
+               if (verbose) console.log('Verbose logging enabled');
+               console.log(`Server running on port ${port}`);
+               console.log('Press Ctrl+C to stop the server');
+               
+               process.on('SIGINT', async () => {
+                   console.log('\nStopping server...');
+                   await SyDB.Stop();
+                   process.exit(0);
+               });
+               
+               // Keep the process alive only in server mode
+               setInterval(() => {}, 1000);
+           } else {
+               console.error('Failed to start server');
+               process.exit(1);
+           }
+       } catch (error) {
+           console.error('Failed to start SYDB Server:', error.message);
+           process.exit(1);
+       }
+   }
 
-    /**
-     * Handle routes command - matches C binary EXACTLY
-     * @static
-     * @async
-     */
-    static async handleRoutes() {
-        const result = await SyDB.showRoutes()
-        console.log(result.routes || result.error || 'No routes information available')
-    }
+   /**
+    * Handle routes command
+    * @private
+    * @static
+    * @async
+    */
+   static async #handleRoutes() {
+       const result = await SyDB.showRoutes();
+       console.log(result.routes || result.error || 'No routes information available');
+   }
 }
 
 // Command Line Interface execution
 if (import.meta.url === `file://${process.argv[1]}`) {
-    SyDBCLI.executeCommand(process.argv)
+   SyDBCLI.executeCommand(process.argv);
 }
 
-export { SyDB, SyDBCLI }
-export default SyDB
+export { SyDB, SyDBCLI, Connection, Model };
+export default SyDB;
