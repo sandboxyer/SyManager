@@ -10,3 +10,4 @@ tests
 sypm_temp_*
 log.json
 test_sydb.c
+*.sqlite
