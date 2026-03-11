@@ -3320,20 +3320,41 @@ this.SetPage = (id, page, unlock = false) => {
         }
       };
 
-      this.Button = (id, config = {name: undefined, path: this.Name, props: {}, action: () => {},jumpTo : false ,resetSelection: false, buttons: false}) => {
+      this.Button = (id, nameOrConfig, config = {}, ...rest) => {
         if (this.Builds.has(id)) {
-          if (typeof config === 'string') {
-            config = { name: config };
+          let finalConfig;
+          
+          // Check if second parameter is a string (new syntax)
+          if (typeof nameOrConfig === 'string') {
+            finalConfig = {
+              name: nameOrConfig,
+              ...config
+            };
+            
+            // If there are additional arguments, merge them
+            if (rest.length > 0) {
+              Object.assign(finalConfig, ...rest);
+            }
+          } else {
+            // Original syntax: second parameter is the config object
+            finalConfig = nameOrConfig || {};
           }
-          if (!config.path) { config.path = this.Name }
+          
+          // Ensure required properties exist
+          if (!finalConfig.path) { finalConfig.path = this.Name; }
           
           let button_obj = {
-            name: config.name || '',
-            metadata: { props: config.props || {}, path: config.path || this.Name, resetSelection: config.resetSelection || false ,jumpTo: config.jumpTo || false },
-            action: (config.action) ? config.action : () => {},
-          }
-      
-          // Apply dropdown styling
+            name: finalConfig.name || '',
+            metadata: { 
+              props: finalConfig.props || {}, 
+              path: finalConfig.path || this.Name, 
+              resetSelection: finalConfig.resetSelection || false,
+              jumpTo: finalConfig.jumpTo || false 
+            },
+            action: (finalConfig.action) ? finalConfig.action : () => {},
+          };
+          
+          // Apply dropdown styling (rest of the method remains the same)
           if (this.Builds.get(id).dropdown_color) {
             button_obj.name = this.TextColor.rgb(
               button_obj.name,
@@ -3342,7 +3363,7 @@ this.SetPage = (id, page, unlock = false) => {
               (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.3 + 1.5) * 128))
             );
           }
-      
+          
           if (this.Builds.get(id).dropdown_spacement) {
             let space = '';
             for (let i = 0; i < this.Builds.get(id).droplevel; i++) {
@@ -3350,8 +3371,8 @@ this.SetPage = (id, page, unlock = false) => {
             }
             button_obj.name = `${space}${button_obj.name}`;
           }
-      
-          // Handle horizontal dropdown layout
+          
+          // Handle horizontal dropdown layout (rest remains the same)
           if (this.Builds.get(id).dropdown_horizontal && 
               this.Builds.get(id).last_dropdown_button !== undefined) {
             
@@ -3392,7 +3413,7 @@ this.SetPage = (id, page, unlock = false) => {
               }
             }
             
-          } else if (config.buttons) {
+          } else if (finalConfig.buttons) {
             // Original grouped buttons behavior (for vertical layout)
             const buttonsArray = this.Builds.get(id).Buttons;
             if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
@@ -3574,139 +3595,152 @@ class TemplateFunc extends SyAPP_Func {
 
 
 class SyAPP {
-  constructor(config = {mainfunc : TemplateFunc, userid_only : false}){
-      this.HUD = new TerminalHUD()
-      
-      this.MainFunc = {Func : config.mainfunc || TemplateFunc,Name : undefined}
-      this.MainFunc.Name = new this.MainFunc.Func().Name
-      
-      /** @type {Map<string, SyAPP_Func>} */
-      this.Funcs = new Map()
-      
-      this.MainSessionID = `${getMachineID()}-P${process.pid}`
-
-      /** @type {Map<string, Session>} */
-      this.Sessions = new Map([[this.MainSessionID, new Session({
-          machine_id: getMachineID(),
-          process_id: process.pid
-      })]])
-
-      this.WaitLog = async (message,ms = 5000) => {
-        console.log(message)
-        await new Promise(resolve => setTimeout(resolve, ms));
-      }
-
+  constructor(mainFuncOrConfig, config = {}) {
+    this.HUD = new TerminalHUD();
+    
+    // Handle the new dual-parameter signature
+    let mainFunc;
+    let userConfig;
+    
+    if (typeof mainFuncOrConfig === 'function' || (mainFuncOrConfig && mainFuncOrConfig.prototype instanceof SyAPP_Func)) {
+      // First parameter is the main function
+      mainFunc = mainFuncOrConfig;
+      userConfig = config;
+    } else {
+      // First parameter is the config object (original behavior)
+      mainFunc = mainFuncOrConfig?.mainfunc || TemplateFunc;
+      userConfig = mainFuncOrConfig || {};
+    }
+    
+    this.MainFunc = { Func: mainFunc, Name: undefined };
+    this.MainFunc.Name = new this.MainFunc.Func().Name;
+    
+    /** @type {Map<string, SyAPP_Func>} */
+    this.Funcs = new Map();
+    
+    this.MainSessionID = `${getMachineID()}-P${process.pid}`;
+    
+    /** @type {Map<string, Session>} */
+    this.Sessions = new Map([[this.MainSessionID, new Session({
+      machine_id: getMachineID(),
+      process_id: process.pid
+    })]]);
+    
+    this.WaitLog = async (message, ms = 5000) => {
+      console.log(message);
+      await new Promise(resolve => setTimeout(resolve, ms));
+    };
+    
     this.ProcessFuncs = (FuncClass) => {
-          const tempInstance = new FuncClass()
-          const funcName = tempInstance.Name
-          
-          if (this.Funcs.has(funcName)) {
-              return
-          }
-          
-          const instance = new FuncClass()
-          this.Funcs.set(funcName, instance)
-          
-          instance.Linked.forEach(linkedFunc => {
-              const linkedTemp = new linkedFunc()
-              if (!this.Funcs.has(linkedTemp.Name)) {
-                  this.ProcessFuncs(linkedFunc)
-              }
-          })
+      const tempInstance = new FuncClass();
+      const funcName = tempInstance.Name;
+      
+      if (this.Funcs.has(funcName)) {
+        return;
       }
-
-      this.ProcessFuncs(this.MainFunc.Func)
-      this.ProcessFuncs(NotFounded)
-      this.ProcessFuncs(Error)
-
-      this.LoadScreen = async (funcname = this.MainFunc.Name,config = {jumpTo : false,resetSelection : false,props : {}}) => { 
-        if(!config.props){config.props = {}}
-
-        if(!this.Funcs.has(funcname)){
-          config.props.notfounded_func = funcname
-          funcname = 'notfounded'
+      
+      const instance = new FuncClass();
+      this.Funcs.set(funcName, instance);
+      
+      instance.Linked.forEach(linkedFunc => {
+        const linkedTemp = new linkedFunc();
+        if (!this.Funcs.has(linkedTemp.Name)) {
+          this.ProcessFuncs(linkedFunc);
         }
-          config.props.mainfunc = this.MainFunc.Name
-
-          this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath
-          this.Sessions.get(this.MainSessionID).ActualPath = funcname
-          this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps
-          config.props.session = this.Sessions.get(this.MainSessionID)
-          this.Sessions.get(this.MainSessionID).ActualProps = config.props
+      });
+    };
+    
+    this.ProcessFuncs(this.MainFunc.Func);
+    this.ProcessFuncs(NotFounded);
+    this.ProcessFuncs(Error);
+    
+    this.LoadScreen = async (funcname = this.MainFunc.Name, config = { jumpTo: false, resetSelection: false, props: {} }) => {
+      if (!config.props) { config.props = {}; }
+      
+      if (!this.Funcs.has(funcname)) {
+        config.props.notfounded_func = funcname;
+        funcname = 'notfounded';
+      }
+      config.props.mainfunc = this.MainFunc.Name;
+      
+      this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath;
+      this.Sessions.get(this.MainSessionID).ActualPath = funcname;
+      this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps;
+      config.props.session = this.Sessions.get(this.MainSessionID);
+      this.Sessions.get(this.MainSessionID).ActualProps = config.props;
+      
+      await this.Funcs.get(funcname).Build(config.props)
+        .then(async return_obj => {
           
-          await this.Funcs.get(funcname).Build(config.props)
-          .then(async return_obj => {
-
-           //after let it more robust and with func optional config to force inverse of it check
-            if (config.props) {
-              if (config.props.session) {
-               if (config.props.session.ActualPath && config.props.session.PreviousPath) {
-                  if (config.props.session.ActualPath != config.props.session.PreviousPath) {
-                    config.resetSelection = true
-                  }
+          //after let it more robust and with func optional config to force inverse of it check
+          if (config.props) {
+            if (config.props.session) {
+              if (config.props.session.ActualPath && config.props.session.PreviousPath) {
+                if (config.props.session.ActualPath != config.props.session.PreviousPath) {
+                  config.resetSelection = true;
+                }
               }
             }
           }
-            
-            this.HUD.displayMenu(return_obj.hud_obj,{remember : (!config.resetSelection) ? true : false,jumpToIndex : (!config.jumpTo) ? undefined : config.jumpTo})
-            .catch(e => {
-              this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-            })
-            if(return_obj.wait_input){
-              let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ')
-              .catch(e => {
-                this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-              })
-              this.LoadScreen(return_obj.input_obj.path,{props : {inputValue : response,...return_obj.input_obj.props}})
-            }
-          })
-          .catch(e => {
-            this.LoadScreen('error',{props : {error_message : e,error_func : funcname,mainfunc : this.MainFunc.Name}})
-          })
           
-      }
-
+          this.HUD.displayMenu(return_obj.hud_obj, { remember: (!config.resetSelection) ? true : false, jumpToIndex: (!config.jumpTo) ? undefined : config.jumpTo })
+            .catch(e => {
+              this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+            });
+          if (return_obj.wait_input) {
+            let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ')
+              .catch(e => {
+                this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+              });
+            this.LoadScreen(return_obj.input_obj.path, { props: { inputValue: response, ...return_obj.input_obj.props } });
+          }
+        })
+        .catch(e => {
+          this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+        });
+      
+    };
+    
     // In the SyAPP constructor, replace the HUD.on menu selection handler:
-
-this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
-  // Get current session props before navigation
-  const currentSession = this.Sessions.get(this.MainSessionID);
-  const currentProps = currentSession.ActualProps || {};
-  const currentPage = currentProps.page || '';
-  
-  // Merge current page with new props if not explicitly overridden
-  const newProps = e.metadata.props || {};
-  
-  // If the new props don't have a 'page' property, preserve the current page
-  if (!('page' in newProps) && currentPage) {
-    newProps.page = currentPage;
-  }
-  
-  this.LoadScreen(e.metadata.path, {
-    jumpTo: e.metadata.jumpTo || false,
-    resetSelection: e.metadata.resetSelection || false,
-    props: newProps
-  }).catch(er => {
-    this.LoadScreen('error', {
-      props: {
-        error_message: er,
-        error_func: e.metadata.path,
-        mainfunc: this.MainFunc.Name
+    
+    this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
+      // Get current session props before navigation
+      const currentSession = this.Sessions.get(this.MainSessionID);
+      const currentProps = currentSession.ActualProps || {};
+      const currentPage = currentProps.page || '';
+      
+      // Merge current page with new props if not explicitly overridden
+      const newProps = e.metadata.props || {};
+      
+      // If the new props don't have a 'page' property, preserve the current page
+      if (!('page' in newProps) && currentPage) {
+        newProps.page = currentPage;
       }
+      
+      this.LoadScreen(e.metadata.path, {
+        jumpTo: e.metadata.jumpTo || false,
+        resetSelection: e.metadata.resetSelection || false,
+        props: newProps
+      }).catch(er => {
+        this.LoadScreen('error', {
+          props: {
+            error_message: er,
+            error_func: e.metadata.path,
+            mainfunc: this.MainFunc.Name
+          }
+        });
+      });
     });
-  });
-});
-
-      this.LoadScreen()
+    
+    this.LoadScreen();
   }
-
-static Func(){return SyAPP_Func}
-
+  
+  static Func() { return SyAPP_Func; }
 }
 
 // If this file is run directly, execute the CLI
 if (import.meta.url === `file://${process.argv[1]}`) {
-    new SyAPP({mainfunc : TemplateFunc})
+    new SyAPP()
 }
 
 export default SyAPP
