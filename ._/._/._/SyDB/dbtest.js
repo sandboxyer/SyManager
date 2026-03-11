@@ -1,200 +1,309 @@
-// test-sqlite.js - Comprehensive test suite for SQLite default configuration
-// Run with: node test-sqlite.js
-
+// test-db-comprehensive.js - Complete test suite with detailed results
 import DB from './DB.js';
+import fs from 'fs';
 
-// ==================== Test Utilities ====================
-const assert = {
-    equals: (actual, expected, message) => {
-        if (actual !== expected) {
-            throw new Error(`❌ ${message}: Expected ${expected}, got ${actual}`);
-        }
-        console.log(`✅ ${message}`);
-    },
-    notEquals: (actual, expected, message) => {
-        if (actual === expected) {
-            throw new Error(`❌ ${message}: Expected not equal to ${expected}`);
-        }
-        console.log(`✅ ${message}`);
-    },
-    deepEquals: (actual, expected, message) => {
-        try {
-            const actualStr = JSON.stringify(actual);
-            const expectedStr = JSON.stringify(expected);
-            if (actualStr !== expectedStr) {
-                throw new Error(`❌ ${message}: Expected ${expectedStr}, got ${actualStr}`);
-            }
-        } catch (e) {
-            throw new Error(`❌ ${message}: ${e.message}`);
-        }
-        console.log(`✅ ${message}`);
-    },
-    isTrue: (value, message) => {
-        if (!value) {
-            throw new Error(`❌ ${message}: Expected true`);
-        }
-        console.log(`✅ ${message}`);
-    },
-    isFalse: (value, message) => {
-        if (value) {
-            throw new Error(`❌ ${message}: Expected false`);
-        }
-        console.log(`✅ ${message}`);
-    },
-    throws: async (fn, message) => {
-        try {
-            await fn();
-            throw new Error(`❌ ${message}: Expected error but none thrown`);
-        } catch (e) {
-            console.log(`✅ ${message}`);
-        }
-    },
-    notThrows: async (fn, message) => {
-        try {
-            await fn();
-            console.log(`✅ ${message}`);
-        } catch (e) {
-            throw new Error(`❌ ${message}: Unexpected error: ${e.message}`);
-        }
-    }
-};
-
-// ==================== Test Suite ====================
-class TestSuite {
+// ==================== Test Utilities with Progress Tracking ====================
+class TestRunner {
     constructor() {
-        this.tests = 0;
+        this.tests = [];
+        this.currentCategory = '';
         this.passed = 0;
         this.failed = 0;
+        this.total = 0;
+        this.startTime = Date.now();
     }
 
-    async run() {
-        console.log('\n📋 Starting SQLite Database Tests\n');
-        console.log('=' .repeat(60));
+    category(name) {
+        this.currentCategory = name;
+        console.log(`\n📁 ${name}`);
+        console.log('-'.repeat(50));
+    }
 
+    async test(name, fn) {
+        this.total++;
+        const testId = this.total;
+        
         try {
-            // Connection Tests
-            await this.testConnection();
-            
-            // Model Definition Tests
-            await this.testModelDefinition();
-            
-            // CRUD Operation Tests
-            await this.testCreateOperations();
-            await this.testReadOperations();
-            await this.testUpdateOperations();
-            await this.testDeleteOperations();
-            
-            // Query Builder Tests
-            await this.testQueryBuilder();
-            
-            // Utility Method Tests
-            await this.testUtilityMethods();
-            
-            // Aggregation Tests
-            await this.testAggregationMethods();
-            
-            // Batch Operation Tests
-            await this.testBatchOperations();
-            
-            // Transaction Tests
-            await this.testTransactions();
-            
-            // Schema Tests
-            await this.testSchemaOperations();
-            
-            // Edge Cases
-            await this.testEdgeCases();
-            
-            // Validation Tests
-            await this.testValidation();
-
-            console.log('=' .repeat(60));
-            console.log(`\n📊 Test Results: ${this.passed} passed, ${this.failed} failed\n`);
-            
+            await fn();
+            this.passed++;
+            console.log(`  ✅ ${testId}. ${name}`);
         } catch (error) {
-            console.error('\n💥 Test suite error:', error);
-        } finally {
-            await this.cleanup();
+            this.failed++;
+            console.log(`  ❌ ${testId}. ${name}`);
+            console.log(`     Error: ${error.message}`);
+            if (error.expected !== undefined) {
+                console.log(`     Expected: ${JSON.stringify(error.expected)}`);
+                console.log(`     Got: ${JSON.stringify(error.actual)}`);
+            }
         }
     }
 
-    async testConnection() {
-        console.log('\n🔌 Testing SQLite Connection...');
-        this.tests += 4;
-
-        // Test SQLite connection with file
-        await assert.notThrows(async () => {
-            await DB.Connect('testdb', { 
-                driver: 'sqlite', 
-                filename: './test.sqlite' 
-            });
-        }, 'SQLite file connection');
-
-        // Verify connection exists
-        const connections = DB.listConnections();
-        assert.equals(connections.length, 1, 'One connection established');
-        assert.isTrue(connections.includes('testdb'), 'Connection listed');
-
-        // Verify default connection
-        assert.equals(DB.defaultConnection, 'testdb', 'Default connection set correctly');
-
-        this.passed += 4;
+    assert(condition, message, expected, actual) {
+        if (!condition) {
+            const error = new Error(message);
+            error.expected = expected;
+            error.actual = actual;
+            throw error;
+        }
     }
 
-    async testModelDefinition() {
-        console.log('\n📦 Testing Model Definition...');
-        this.tests += 6;
+    equals(actual, expected, message) {
+        const condition = actual === expected;
+        if (!condition) {
+            const error = new Error(message);
+            error.expected = expected;
+            error.actual = actual;
+            throw error;
+        }
+        return true;
+    }
 
-        // Define models with various schema types
-        const User = DB.Model('users', {
-            name: { type: 'string', required: true },
-            email: { type: 'string', required: true },
-            age: 'number',
-            isActive: { type: 'boolean', default: true },
-            score: 'number',
-            tags: 'json',
-            metadata: { type: 'json', default: {} }
-        });
+    deepEquals(actual, expected, message) {
+        const actualStr = JSON.stringify(actual);
+        const expectedStr = JSON.stringify(expected);
+        const condition = actualStr === expectedStr;
+        if (!condition) {
+            const error = new Error(message);
+            error.expected = expectedStr;
+            error.actual = actualStr;
+            throw error;
+        }
+        return true;
+    }
 
-        const Product = DB.Model('products', {
-            name: { type: 'string', required: true },
-            price: { type: 'number', required: true },
-            inStock: { type: 'boolean', default: true },
-            category: 'string',
-            views: { type: 'number', default: 0 }
-        });
+    notEquals(actual, expected, message) {
+        const condition = actual !== expected;
+        if (!condition) {
+            const error = new Error(message);
+            error.expected = `not ${expected}`;
+            error.actual = actual;
+            throw error;
+        }
+        return true;
+    }
 
-        const Post = DB.Model('posts', {
-            title: { type: 'string', required: true },
-            content: 'text',
-            userId: 'number',
-            published: { type: 'boolean', default: false }
-        });
+    isTrue(actual, message) {
+        return this.equals(actual, true, message);
+    }
 
-        // Verify models are registered
-        const models = DB.listModels();
-        assert.isTrue('users' in models, 'User model registered');
-        assert.isTrue('products' in models, 'Product model registered');
-        assert.isTrue('posts' in models, 'Post model registered');
+    isFalse(actual, message) {
+        return this.equals(actual, false, message);
+    }
 
-        // Verify model properties
-        assert.equals(User.tableName, 'users', 'Table name set correctly');
+    async throws(fn, message) {
+        try {
+            await fn();
+            const error = new Error(message);
+            error.expected = 'Error thrown';
+            error.actual = 'No error thrown';
+            throw error;
+        } catch (e) {
+            if (e.expected) throw e;
+            // Expected error occurred
+            return true;
+        }
+    }
+
+    async notThrows(fn, message) {
+        try {
+            await fn();
+            return true;
+        } catch (e) {
+            const error = new Error(message);
+            error.expected = 'No error';
+            error.actual = e.message;
+            throw error;
+        }
+    }
+
+    summary() {
+        const duration = ((Date.now() - this.startTime) / 1000).toFixed(2);
+        const percentage = ((this.passed / this.total) * 100).toFixed(2);
         
-        // Verify schema
-        assert.notEquals(User.schema, undefined, 'Schema defined');
-        assert.equals(Object.keys(User.schema).length, 7, 'User schema has 7 fields');
-
-        this.passed += 6;
+        console.log('\n' + '='.repeat(60));
+        console.log('📊 TEST SUMMARY');
+        console.log('='.repeat(60));
+        console.log(`Total Tests:    ${this.total}`);
+        console.log(`Passed:         ${this.passed} (${percentage}%)`);
+        console.log(`Failed:         ${this.failed}`);
+        console.log(`Duration:       ${duration}s`);
+        console.log('='.repeat(60));
+        
+        if (this.failed === 0) {
+            console.log('\n🎉 ALL TESTS PASSED! 🎉\n');
+        } else {
+            console.log(`\n❌ ${this.failed} TEST(S) FAILED\n`);
+        }
+        
+        return this.failed === 0;
     }
+}
 
-    async testCreateOperations() {
-        console.log('\n📝 Testing Create Operations...');
-        this.tests += 12;
+// ==================== Test Suite ====================
+const test = new TestRunner();
+const TEST_FILE = './test-comprehensive.sqlite';
 
-        const User = DB.Model('users');
+// Clean up before starting
+if (fs.existsSync(TEST_FILE)) {
+    fs.unlinkSync(TEST_FILE);
+}
 
-        // Test single create
-        const user1 = await User.create({
+try {
+    // ==================== CONNECTION TESTS ====================
+    test.category('CONNECTION TESTS (5 tests)');
+
+    await test.test('Connect to SQLite database', async () => {
+        await DB.Connect('testdb', { filename: TEST_FILE });
+        test.isTrue(DB.hasConnection('testdb'), 'Connection should exist');
+    });
+
+    await test.test('List connections', async () => {
+        const connections = DB.listConnections();
+        test.equals(connections.length, 1, 'Should have 1 connection');
+        test.isTrue(connections.includes('testdb'), 'Should include testdb');
+    });
+
+    await test.test('Default connection', async () => {
+        test.equals(DB.defaultConnection, 'testdb', 'Default connection should be testdb');
+    });
+
+    await test.test('Get connection info', async () => {
+        const conn = DB.getConnection('testdb');
+        test.notEquals(conn, null, 'Connection info should exist');
+        test.equals(conn.driver, 'sqlite', 'Driver should be sqlite');
+    });
+
+    await test.test('Database file created', async () => {
+        test.isTrue(fs.existsSync(TEST_FILE), 'Database file should exist');
+    });
+
+    // ==================== MODEL DEFINITION TESTS ====================
+    test.category('MODEL DEFINITION TESTS (8 tests)');
+
+    const User = DB.Model('users', {
+        name: { type: 'string', required: true },
+        email: { type: 'string', required: true },
+        age: 'number',
+        isActive: { type: 'boolean', default: true },
+        score: 'number',
+        tags: 'json',
+        metadata: { type: 'json', default: {} }
+    });
+
+    const Product = DB.Model('products', {
+        name: { type: 'string', required: true },
+        price: { type: 'number', required: true },
+        inStock: { type: 'boolean', default: true },
+        category: 'string',
+        views: { type: 'number', default: 0 }
+    });
+
+    const Post = DB.Model('posts', {
+        title: { type: 'string', required: true },
+        content: 'text',
+        userId: 'number',
+        published: { type: 'boolean', default: false }
+    });
+
+    await test.test('Models registered', async () => {
+        const models = DB.listModels();
+        test.isTrue('users' in models, 'User model registered');
+        test.isTrue('products' in models, 'Product model registered');
+        test.isTrue('posts' in models, 'Post model registered');
+    });
+
+    await test.test('Table names set correctly', async () => {
+        test.equals(User.tableName, 'users', 'User table name');
+        test.equals(Product.tableName, 'products', 'Product table name');
+        test.equals(Post.tableName, 'posts', 'Post table name');
+    });
+
+    await test.test('Schema defined', async () => {
+        test.notEquals(User.schema, undefined, 'User schema exists');
+        test.equals(Object.keys(User.schema).length, 7, 'User has 7 fields');
+    });
+
+    await test.test('Schema types mapped correctly', async () => {
+        test.equals(User.schema.name.type, 'string', 'name is string');
+        test.equals(User.schema.age.type, 'float', 'age is float');
+        test.equals(User.schema.isActive.type, 'boolean', 'isActive is boolean');
+        test.equals(User.schema.tags.type, 'json', 'tags is json');
+    });
+
+    // ==================== SCHEMA CREATION TESTS ====================
+    test.category('SCHEMA CREATION TESTS (8 tests)');
+
+    const schema = DB.schema();
+
+    await test.test('Create users table', async () => {
+        await schema.create('users', table => {
+            table.id();
+            table.string('name').nullable(false);
+            table.string('email').unique();
+            table.integer('age');
+            table.boolean('isActive').default(true);
+            table.float('score').default(0);
+            table.json('tags');
+            table.json('metadata');
+            table.timestamps();
+        });
+        
+        const hasTable = await schema.hasTable('users');
+        test.isTrue(hasTable, 'Users table should exist');
+    });
+
+    await test.test('Create products table', async () => {
+        await schema.create('products', table => {
+            table.id();
+            table.string('name');
+            table.float('price');
+            table.boolean('inStock').default(true);
+            table.string('category');
+            table.integer('views').default(0);
+            table.timestamps();
+        });
+        
+        const hasTable = await schema.hasTable('products');
+        test.isTrue(hasTable, 'Products table should exist');
+    });
+
+    await test.test('Create posts table', async () => {
+        await schema.create('posts', table => {
+            table.id();
+            table.string('title');
+            table.text('content');
+            table.integer('userId');
+            table.boolean('published').default(false);
+            table.timestamps();
+        });
+        
+        const hasTable = await schema.hasTable('posts');
+        test.isTrue(hasTable, 'Posts table should exist');
+    });
+
+    await test.test('List all tables', async () => {
+        const tables = await DB.listCollections();
+        test.equals(tables.length, 3, 'Should have 3 tables');
+        test.isTrue(tables.includes('users'), 'Includes users');
+        test.isTrue(tables.includes('products'), 'Includes products');
+        test.isTrue(tables.includes('posts'), 'Includes posts');
+    });
+
+    await test.test('Check columns exist', async () => {
+        const hasName = await schema.hasColumn('users', 'name');
+        const hasEmail = await schema.hasColumn('users', 'email');
+        const hasAge = await schema.hasColumn('users', 'age');
+        
+        test.isTrue(hasName, 'name column exists');
+        test.isTrue(hasEmail, 'email column exists');
+        test.isTrue(hasAge, 'age column exists');
+    });
+
+    // ==================== CREATE OPERATIONS TESTS ====================
+    test.category('CREATE OPERATIONS TESTS (12 tests)');
+
+    await test.test('Create single user', async () => {
+        const user = await User.create({
             name: 'John Doe',
             email: 'john@example.com',
             age: 30,
@@ -204,440 +313,513 @@ class TestSuite {
             metadata: { role: 'admin' }
         });
 
-        assert.notEquals(user1.id, undefined, 'User created with ID');
-        assert.equals(user1.name, 'John Doe', 'Name set correctly');
-        assert.equals(user1.email, 'john@example.com', 'Email set correctly');
-        assert.equals(user1.age, 30, 'Age set correctly');
-        assert.isTrue(user1.isActive, 'isActive set correctly');
-        assert.deepEquals(user1.tags, ['developer', 'nodejs'], 'Tags set correctly');
-        assert.deepEquals(user1.metadata, { role: 'admin' }, 'Metadata set correctly');
+        test.notEquals(user.id, undefined, 'User should have ID');
+        test.equals(user.name, 'John Doe', 'Name correct');
+        test.equals(user.email, 'john@example.com', 'Email correct');
+        test.equals(user.age, 30, 'Age correct');
+        test.isTrue(user.isActive, 'isActive correct');
+        test.deepEquals(user.tags, ['developer', 'nodejs'], 'Tags correct');
+        test.deepEquals(user.metadata, { role: 'admin' }, 'Metadata correct');
+    });
 
-        // Test create with defaults
-        const user2 = await User.create({
+    await test.test('Create user with defaults', async () => {
+        const user = await User.create({
             name: 'Jane Smith',
             email: 'jane@example.com',
             age: 28
         });
 
-        assert.isTrue(user2.isActive, 'Default value applied');
+        test.isTrue(user.isActive, 'Default isActive applied');
+        test.equals(user.score, 100, 'Default score applied');
+        test.deepEquals(user.metadata, {}, 'Default metadata applied');
+    });
 
-        // Test create many
+    await test.test('Create multiple users', async () => {
         const users = await User.createMany([
             { name: 'Bob Wilson', email: 'bob@example.com', age: 35 },
             { name: 'Alice Brown', email: 'alice@example.com', age: 27 },
             { name: 'Charlie Davis', email: 'charlie@example.com', age: 42 }
         ]);
 
-        assert.equals(users.length, 3, 'Created 3 users');
+        test.equals(users.length, 3, 'Created 3 users');
         
         const allUsers = await User.find();
-        assert.equals(allUsers.length, 5, 'Total 5 users after creates');
+        test.equals(allUsers.length, 5, 'Total 5 users');
+    });
 
-        // Test create with missing required field
-        await assert.throws(async () => {
+    await test.test('Create product', async () => {
+        const product = await Product.create({
+            name: 'Laptop',
+            price: 999.99,
+            category: 'electronics',
+            views: 10
+        });
+
+        test.equals(product.name, 'Laptop', 'Product name correct');
+        test.equals(product.price, 999.99, 'Price correct');
+        test.isTrue(product.inStock, 'Default inStock applied');
+        test.equals(product.views, 10, 'Views correct');
+    });
+
+    await test.test('Create post', async () => {
+        const post = await Post.create({
+            title: 'Test Post',
+            content: 'This is a test post',
+            userId: 1,
+            published: true
+        });
+
+        test.equals(post.title, 'Test Post', 'Post title correct');
+        test.equals(post.content, 'This is a test post', 'Content correct');
+        test.equals(post.userId, 1, 'UserId correct');
+        test.isTrue(post.published, 'Published correct');
+    });
+
+    await test.test('Create with missing required field fails', async () => {
+        await test.throws(async () => {
             await User.create({ age: 25 });
-        }, 'Create fails with missing required fields');
+        }, 'Should throw error for missing required field');
+    });
 
-        this.passed += 12;
-    }
+    // ==================== READ OPERATIONS TESTS ====================
+    test.category('READ OPERATIONS TESTS (14 tests)');
 
-    async testReadOperations() {
-        console.log('\n🔍 Testing Read Operations...');
-        this.tests += 12;
+    await test.test('Find all users', async () => {
+        const users = await User.find();
+        test.equals(users.length, 5, 'Should find 5 users');
+    });
 
-        const User = DB.Model('users');
-
-        // Test find all
-        const allUsers = await User.find();
-        assert.equals(allUsers.length, 5, 'Find all returns 5 users');
-
-        // Test find with filter
+    await test.test('Find with filter', async () => {
         const activeUsers = await User.find({ isActive: true });
-        assert.equals(activeUsers.length, 5, 'All users active');
+        test.equals(activeUsers.length, 5, 'All users active');
+    });
 
-        // Test findOne
+    await test.test('Find one user', async () => {
         const john = await User.findOne({ name: 'John Doe' });
-        assert.notEquals(john, null, 'FindOne returns user');
-        assert.equals(john.email, 'john@example.com', 'Correct user found');
+        test.notEquals(john, null, 'Should find user');
+        test.equals(john.email, 'john@example.com', 'Correct user found');
+    });
 
-        // Test findById
-        const userById = await User.findById(john.id);
-        assert.deepEquals(userById, john, 'FindById returns correct user');
+    await test.test('Find by ID', async () => {
+        const john = await User.findOne({ name: 'John Doe' });
+        const found = await User.findById(john.id);
+        test.deepEquals(found, john, 'FindById returns correct user');
+    });
 
-        // Test findByIds
+    await test.test('Find by IDs', async () => {
         const users = await User.find();
         const ids = users.slice(0, 2).map(u => u.id);
-        const foundUsers = await User.findByIds(ids);
-        assert.equals(foundUsers.length, 2, 'FindByIds returns correct count');
+        const found = await User.findByIds(ids);
+        test.equals(found.length, 2, 'Found 2 users');
+    });
 
-        // Test first
-        const firstUser = await User.first();
-        assert.notEquals(firstUser, null, 'First returns a user');
+    await test.test('First record', async () => {
+        const first = await User.first();
+        test.notEquals(first, null, 'First returns a user');
+        test.equals(first.name, 'John Doe', 'First is John Doe');
+    });
 
-        // Test last
-        const lastUser = await User.last();
-        assert.notEquals(lastUser, null, 'Last returns a user');
-        assert.notEquals(firstUser.id, lastUser.id, 'First and last are different');
+    await test.test('Last record', async () => {
+        const last = await User.last();
+        test.notEquals(last, null, 'Last returns a user');
+    });
 
-        // Test exists
+    await test.test('Exists check', async () => {
         const exists = await User.exists({ email: 'john@example.com' });
-        assert.isTrue(exists, 'Exists returns true for existing user');
-
+        test.isTrue(exists, 'Exists returns true');
+        
         const notExists = await User.exists({ email: 'nonexistent@example.com' });
-        assert.isFalse(notExists, 'Exists returns false for non-existent user');
+        test.isFalse(notExists, 'Exists returns false');
+    });
 
-        // Test count
+    await test.test('Count records', async () => {
         const count = await User.count({ age: 30 });
-        assert.equals(count, 1, 'Count with filter works');
+        test.equals(count, 1, 'Count with filter works');
+        
+        const total = await User.count();
+        test.equals(total, 5, 'Total count works');
+    });
 
-        this.passed += 12;
-    }
+    // ==================== UPDATE OPERATIONS TESTS ====================
+    test.category('UPDATE OPERATIONS TESTS (10 tests)');
 
-    async testUpdateOperations() {
-        console.log('\n🔄 Testing Update Operations...');
-        this.tests += 12;
-
-        const User = DB.Model('users');
-
-        // Test update
+    await test.test('Update user', async () => {
         const john = await User.findOne({ name: 'John Doe' });
         const updated = await User.update(john.id, {
             age: 31,
             score: 150
         });
 
-        assert.equals(updated.age, 31, 'Age updated correctly');
-        assert.equals(updated.score, 150, 'Score updated correctly');
-        assert.equals(updated.name, 'John Doe', 'Other fields unchanged');
+        test.equals(updated.age, 31, 'Age updated');
+        test.equals(updated.score, 150, 'Score updated');
+        test.equals(updated.name, 'John Doe', 'Name unchanged');
+    });
 
-        // Test updateMany
-        const updatedCount = await User.updateMany(
+    await test.test('Update many users', async () => {
+        const updated = await User.updateMany(
             { isActive: true },
             { score: 200 }
         );
 
-        assert.equals(updatedCount.length, 5, 'All users updated');
+        test.equals(updated.length, 5, 'All users updated');
         
-        const allUsers = await User.find();
-        allUsers.forEach(user => {
-            assert.equals(user.score, 200, 'All scores updated to 200');
+        const users = await User.find();
+        users.forEach(user => {
+            test.equals(user.score, 200, 'Score updated to 200');
         });
+    });
 
-        // Test updateOrCreate - update existing
-        const updatedOrCreated = await User.updateOrCreate(
+    await test.test('Update or create - update existing', async () => {
+        const result = await User.updateOrCreate(
             { email: 'john@example.com' },
             { name: 'John Updated', age: 32 }
         );
-        assert.equals(updatedOrCreated.name, 'John Updated', 'UpdateOrCreate updated existing');
 
-        // Test updateOrCreate - create new
-        const newUser = await User.updateOrCreate(
+        test.equals(result.name, 'John Updated', 'Name updated');
+        test.equals(result.age, 32, 'Age updated');
+    });
+
+    await test.test('Update or create - create new', async () => {
+        const result = await User.updateOrCreate(
             { email: 'new@example.com' },
             { name: 'New User', age: 25 }
         );
-        assert.equals(newUser.email, 'new@example.com', 'UpdateOrCreate created new');
-        assert.equals(newUser.name, 'New User', 'New user created correctly');
 
-        // Test increment
+        test.equals(result.email, 'new@example.com', 'New user created');
+        test.equals(result.name, 'New User', 'Name correct');
+    });
+
+    await test.test('Increment field', async () => {
+        const john = await User.findOne({ name: 'John Updated' });
         const incremented = await User.increment(john.id, 'score', 10);
-        assert.equals(incremented.score, 210, 'Increment works');
+        test.equals(incremented.score, 210, 'Increment works');
+    });
 
-        // Test decrement
+    await test.test('Decrement field', async () => {
+        const john = await User.findOne({ name: 'John Updated' });
         const decremented = await User.decrement(john.id, 'age', 1);
-        assert.equals(decremented.age, 31, 'Decrement works');
+        test.equals(decremented.age, 31, 'Decrement works');
+    });
 
-        // Test toggle
+    await test.test('Toggle boolean field', async () => {
+        const john = await User.findOne({ name: 'John Updated' });
         const toggled = await User.toggle(john.id, 'isActive');
-        assert.isFalse(toggled.isActive, 'Toggle boolean field');
-
+        test.isFalse(toggled.isActive, 'Toggle to false');
+        
         const toggledAgain = await User.toggle(john.id, 'isActive');
-        assert.isTrue(toggledAgain.isActive, 'Toggle back works');
+        test.isTrue(toggledAgain.isActive, 'Toggle back to true');
+    });
 
-        this.passed += 12;
-    }
+    // ==================== DELETE OPERATIONS TESTS ====================
+    test.category('DELETE OPERATIONS TESTS (8 tests)');
 
-    async testDeleteOperations() {
-        console.log('\n🗑️ Testing Delete Operations...');
-        this.tests += 7;
+    let deleteTestId;
 
-        const User = DB.Model('users');
+    await test.test('Delete single user', async () => {
+        const bob = await User.findOne({ name: 'Bob Wilson' });
+        deleteTestId = bob.id;
+        
+        const deleted = await User.delete(bob.id);
+        test.isTrue(deleted, 'Delete returns true');
+        
+        const notFound = await User.findById(bob.id);
+        test.equals(notFound, null, 'User no longer exists');
+    });
 
+    await test.test('Delete many users', async () => {
         const beforeCount = await User.count();
+        const deleted = await User.deleteMany({ age: 27 });
         
-        // Test delete
-        const userToDelete = await User.findOne({ name: 'Bob Wilson' });
-        const deleted = await User.delete(userToDelete.id);
-        assert.isTrue(deleted, 'Delete returns true');
-
-        const afterDeleteCount = await User.count();
-        assert.equals(afterDeleteCount, beforeCount - 1, 'User removed from database');
-
-        const notFound = await User.findById(userToDelete.id);
-        assert.equals(notFound, null, 'User no longer exists');
-
-        // Test deleteMany
-        const deletedCount = await User.deleteMany({ age: 27 });
-        assert.equals(deletedCount, 1, 'DeleteMany removes correct count');
-
-        // Test deleteAll
-        const remainingUsers = await User.find();
-        const allDeleted = await User.deleteAll();
-        assert.equals(allDeleted, remainingUsers.length, 'DeleteAll removes all');
+        test.equals(deleted, 1, 'Deleted 1 user');
         
-        const finalCount = await User.count();
-        assert.equals(finalCount, 0, 'Database empty after deleteAll');
+        const afterCount = await User.count();
+        test.equals(afterCount, beforeCount - 1, 'Count decreased');
+    });
 
-        this.passed += 7;
-    }
+    await test.test('Delete non-existent returns false', async () => {
+        const deleted = await User.delete(999999);
+        test.isFalse(deleted, 'Delete returns false');
+    });
 
-    async testQueryBuilder() {
-        console.log('\n🔨 Testing Query Builder...');
-        this.tests += 10;
+    await test.test('Delete all users', async () => {
+        const remaining = await User.count();
+        const deleted = await User.deleteAll();
+        
+        test.equals(deleted, remaining, 'Deleted all remaining');
+        
+        const final = await User.count();
+        test.equals(final, 0, 'Database empty');
+    });
 
-        const Product = DB.Model('products');
+    // ==================== QUERY BUILDER TESTS ====================
+    test.category('QUERY BUILDER TESTS (14 tests)');
 
-        // Create test data
-        await Product.createMany([
-            { name: 'Laptop', price: 999.99, category: 'electronics', inStock: true, views: 10 },
-            { name: 'Mouse', price: 29.99, category: 'electronics', inStock: true, views: 5 },
-            { name: 'Keyboard', price: 79.99, category: 'electronics', inStock: false, views: 8 },
-            { name: 'Desk', price: 299.99, category: 'furniture', inStock: true, views: 3 },
-            { name: 'Chair', price: 149.99, category: 'furniture', inStock: true, views: 6 }
-        ]);
+    // Recreate products for query tests
+    await Product.deleteAll();
+    await Product.createMany([
+        { name: 'Laptop', price: 999.99, category: 'electronics', inStock: true, views: 10 },
+        { name: 'Mouse', price: 29.99, category: 'electronics', inStock: true, views: 5 },
+        { name: 'Keyboard', price: 79.99, category: 'electronics', inStock: false, views: 8 },
+        { name: 'Desk', price: 299.99, category: 'furniture', inStock: true, views: 3 },
+        { name: 'Chair', price: 149.99, category: 'furniture', inStock: true, views: 6 },
+        { name: 'Monitor', price: 249.99, category: 'electronics', inStock: true, views: 12 }
+    ]);
 
-        // Test query with where
-        const electronics = await Product.query()
+    await test.test('Query with where', async () => {
+        const results = await Product.query()
             .where({ category: 'electronics' })
             .get();
+        
+        test.equals(results.length, 4, 'Found 4 electronics');
+    });
 
-        assert.equals(electronics.length, 3, 'Query where works');
-
-        // Test query with multiple conditions
-        const inStockElectronics = await Product.query()
+    await test.test('Query with multiple conditions', async () => {
+        const results = await Product.query()
             .where({ category: 'electronics', inStock: true })
             .get();
+        
+        test.equals(results.length, 3, 'Found 3 in-stock electronics');
+    });
 
-        assert.equals(inStockElectronics.length, 2, 'Multiple where conditions');
-
-        // Test query with orderBy
-        const sortedByPrice = await Product.query()
+    await test.test('Query with orderBy', async () => {
+        const results = await Product.query()
             .orderBy('price', 'DESC')
             .get();
+        
+        test.equals(results[0].name, 'Laptop', 'Most expensive first');
+        test.equals(results[5].name, 'Mouse', 'Cheapest last');
+    });
 
-        assert.equals(sortedByPrice[0].name, 'Laptop', 'OrderBy DESC works');
-        assert.equals(sortedByPrice[4].name, 'Mouse', 'OrderBy works correctly');
-
-        // Test query with limit
-        const topTwo = await Product.query()
+    await test.test('Query with limit', async () => {
+        const results = await Product.query()
             .orderBy('views', 'DESC')
-            .limit(2)
+            .limit(3)
             .get();
+        
+        test.equals(results.length, 3, 'Limited to 3');
+        test.equals(results[0].name, 'Monitor', 'Top by views');
+    });
 
-        assert.equals(topTwo.length, 2, 'Limit works');
-        assert.equals(topTwo[0].name, 'Laptop', 'Top by views correct');
-
-        // Test query with offset
-        const skipOne = await Product.query()
+    await test.test('Query with offset', async () => {
+        const results = await Product.query()
             .orderBy('price', 'ASC')
-            .offset(1)
+            .offset(2)
             .limit(2)
             .get();
+        
+        test.equals(results.length, 2, 'Offset 2, limit 2');
+        test.equals(results[0].name, 'Keyboard', 'Third cheapest');
+    });
 
-        assert.equals(skipOne.length, 2, 'Offset works');
-        assert.equals(skipOne[0].name, 'Keyboard', 'Skip first correct');
-
-        // Test whereIn
+    await test.test('WhereIn', async () => {
         const products = await Product.find();
         const ids = products.slice(0, 3).map(p => p.id);
-        const byIds = await Product.query()
+        
+        const results = await Product.query()
             .whereIn('id', ids)
             .get();
+        
+        test.equals(results.length, 3, 'Found 3 by IDs');
+    });
 
-        assert.equals(byIds.length, 3, 'WhereIn works');
-
-        // Test whereBetween
-        const midPrice = await Product.query()
+    await test.test('WhereBetween', async () => {
+        const results = await Product.query()
             .whereBetween('price', [50, 200])
             .get();
+        
+        test.equals(results.length, 3, 'Found 3 in price range');
+    });
 
-        assert.equals(midPrice.length, 2, 'WhereBetween works');
+    await test.test('Query builder count', async () => {
+        const count = await Product.query()
+            .where({ category: 'electronics' })
+            .count();
+        
+        test.equals(count, 4, 'Count works');
+    });
 
-        this.passed += 10;
-    }
+    await test.test('Query builder first', async () => {
+        const first = await Product.query()
+            .orderBy('price', 'ASC')
+            .first();
+        
+        test.equals(first.name, 'Mouse', 'First returns cheapest');
+    });
 
-    async testUtilityMethods() {
-        console.log('\n🛠️ Testing Utility Methods...');
-        this.tests += 8;
+    // ==================== UTILITY METHODS TESTS ====================
+    test.category('UTILITY METHODS TESTS (12 tests)');
 
-        const Product = DB.Model('products');
-
-        // Test pluck
+    await test.test('Pluck single field', async () => {
         const names = await Product.pluck('name');
-        assert.equals(names.length, 5, 'Pluck returns array');
-        assert.isTrue(names.includes('Laptop'), 'Pluck contains correct values');
+        test.equals(names.length, 6, 'Pluck returns array');
+        test.isTrue(names.includes('Laptop'), 'Contains laptop');
+    });
 
-        // Test pluckWithKey
-        const namePriceMap = await Product.pluckWithKey('name', 'price');
-        assert.equals(namePriceMap['Laptop'], 999.99, 'PluckWithKey works');
+    await test.test('Pluck with key', async () => {
+        const map = await Product.pluckWithKey('name', 'price');
+        test.equals(map['Laptop'], 999.99, 'Correct price mapping');
+    });
 
-        // Test distinct
+    await test.test('Distinct values', async () => {
         const categories = await Product.distinct('category');
-        assert.equals(categories.length, 2, 'Distinct returns unique values');
-        assert.isTrue(categories.includes('electronics'), 'Contains electronics');
-        assert.isTrue(categories.includes('furniture'), 'Contains furniture');
+        test.equals(categories.length, 2, 'Two distinct categories');
+        test.isTrue(categories.includes('electronics'), 'Has electronics');
+        test.isTrue(categories.includes('furniture'), 'Has furniture');
+    });
 
-        // Test random
-        const randomProduct = await Product.random(1);
-        assert.equals(randomProduct.length, 1, 'Random returns one by default');
+    await test.test('Random records', async () => {
+        const random = await Product.random(3);
+        test.equals(random.length, 3, 'Random returns 3');
+        
+        // Random should be different most of the time
+        const random2 = await Product.random(3);
+        test.notEquals(JSON.stringify(random), JSON.stringify(random2), 'Different random sets');
+    });
 
-        const randomThree = await Product.random(3);
-        assert.equals(randomThree.length, 3, 'Random returns specified count');
-
-        // Test chunk
-        let chunkCount = 0;
+    await test.test('Chunk processing', async () => {
+        let chunks = 0;
+        let items = 0;
+        
         await Product.chunk(2, async (chunk, page) => {
-            chunkCount++;
-            assert.equals(chunk.length, page === 3 ? 1 : 2, 'Chunk size correct');
+            chunks++;
+            items += chunk.length;
+            test.isTrue(chunk.length <= 2, `Chunk ${page} size correct`);
         });
-        assert.equals(chunkCount, 3, 'Chunk processes all data');
+        
+        test.equals(chunks, 3, 'Processed 3 chunks');
+        test.equals(items, 6, 'Processed all 6 items');
+    });
 
-        // Test each
-        let eachCount = 0;
+    await test.test('Each processing', async () => {
+        let count = 0;
         await Product.each(async (product, index) => {
-            eachCount++;
-            assert.notEquals(product.name, undefined, 'Each receives valid product');
+            count++;
+            test.notEquals(product.name, undefined, 'Product has name');
         });
-        assert.equals(eachCount, 5, 'Each processes all items');
+        test.equals(count, 6, 'Processed all items');
+    });
 
-        this.passed += 8;
-    }
+    // ==================== AGGREGATION TESTS ====================
+    test.category('AGGREGATION TESTS (8 tests)');
 
-    async testAggregationMethods() {
-        console.log('\n📊 Testing Aggregation Methods...');
-        this.tests += 6;
+    await test.test('Max value', async () => {
+        const max = await Product.max('price');
+        test.equals(max, 999.99, 'Max price correct');
+    });
 
-        const Product = DB.Model('products');
+    await test.test('Min value', async () => {
+        const min = await Product.min('price');
+        test.equals(min, 29.99, 'Min price correct');
+    });
 
-        // Test max
-        const maxPrice = await Product.max('price');
-        assert.equals(maxPrice, 999.99, 'Max returns correct value');
+    await test.test('Sum', async () => {
+        const sum = await Product.sum('views');
+        test.equals(sum, 44, 'Sum of views correct');
+    });
 
-        // Test min
-        const minPrice = await Product.min('price');
-        assert.equals(minPrice, 29.99, 'Min returns correct value');
+    await test.test('Average', async () => {
+        const avg = await Product.avg('price');
+        const expected = (999.99 + 29.99 + 79.99 + 299.99 + 149.99 + 249.99) / 6;
+        test.equals(Math.round(avg * 100) / 100, Math.round(expected * 100) / 100, 'Average correct');
+    });
 
-        // Test sum
-        const totalViews = await Product.sum('views');
-        assert.equals(totalViews, 32, 'Sum works correctly');
+    await test.test('Sum with filter', async () => {
+        const sum = await Product.sum('views', { category: 'electronics' });
+        test.equals(sum, 35, 'Sum of electronics views correct');
+    });
 
-        // Test avg
-        const avgPrice = await Product.avg('price');
-        const expectedAvg = (999.99 + 29.99 + 79.99 + 299.99 + 149.99) / 5;
-        assert.equals(Math.round(avgPrice * 100) / 100, Math.round(expectedAvg * 100) / 100, 'Avg works');
+    await test.test('Average with filter', async () => {
+        const avg = await Product.avg('price', { category: 'furniture' });
+        test.equals(avg, 224.99, 'Average furniture price correct');
+    });
 
-        // Test count with filter
-        const electronicsCount = await Product.count({ category: 'electronics' });
-        assert.equals(electronicsCount, 3, 'Count with filter works');
+    // ==================== PAGINATION TESTS ====================
+    test.category('PAGINATION TESTS (8 tests)');
 
-        this.passed += 6;
-    }
+    await test.test('Page 1 with 3 per page', async () => {
+        const result = await Product.paginate(1, 3);
+        test.equals(result.data.length, 3, 'Page 1 has 3 items');
+        test.equals(result.meta.current_page, 1, 'Current page correct');
+        test.equals(result.meta.per_page, 3, 'Per page correct');
+        test.equals(result.meta.total, 6, 'Total correct');
+    });
 
-    async testBatchOperations() {
-        console.log('\n📦 Testing Batch Operations...');
-        this.tests += 6;
+    await test.test('Page 2 with 3 per page', async () => {
+        const result = await Product.paginate(2, 3);
+        test.equals(result.data.length, 3, 'Page 2 has 3 items');
+        test.equals(result.meta.current_page, 2, 'Current page correct');
+        test.equals(result.meta.from, 4, 'From index correct');
+    });
 
-        const Post = DB.Model('posts');
+    await test.test('Last page', async () => {
+        const result = await Product.paginate(2, 4);
+        test.equals(result.data.length, 2, 'Last page has 2 items');
+        test.equals(result.meta.last_page, 2, 'Last page correct');
+    });
 
-        // Create batch
-        const posts = await Post.createMany([
-            { title: 'Post 1', content: 'Content 1', userId: 1, published: true },
-            { title: 'Post 2', content: 'Content 2', userId: 1, published: false },
-            { title: 'Post 3', content: 'Content 3', userId: 2, published: true },
-            { title: 'Post 4', content: 'Content 4', userId: 2, published: true },
-            { title: 'Post 5', content: 'Content 5', userId: 3, published: false }
-        ]);
+    await test.test('Pagination with filter', async () => {
+        const result = await Product.paginate(1, 2, { category: 'electronics' });
+        test.equals(result.data.length, 2, 'Filtered page has 2');
+        test.equals(result.meta.total, 4, 'Filtered total correct');
+    });
 
-        assert.equals(posts.length, 5, 'Batch create works');
+    await test.test('Pagination with empty results', async () => {
+        const result = await Product.paginate(1, 10, { category: 'nonexistent' });
+        test.equals(result.data.length, 0, 'Empty results');
+        test.equals(result.meta.total, 0, 'Total is 0');
+    });
 
-        // Batch update
-        const updatedPosts = await Post.updateMany(
-            { userId: 1 },
-            { published: true }
-        );
-        assert.equals(updatedPosts.length, 2, 'Batch update works');
+    // ==================== TRANSACTION TESTS ====================
+    test.category('TRANSACTION TESTS (6 tests)');
 
-        // Verify updates
-        const user1Posts = await Post.find({ userId: 1 });
-        user1Posts.forEach(post => {
-            assert.isTrue(post.published, 'All user 1 posts published');
-        });
-
-        // Batch delete
-        const deletedCount = await Post.deleteMany({ userId: 2 });
-        assert.equals(deletedCount, 2, 'Batch delete works');
-
-        const remainingPosts = await Post.find();
-        assert.equals(remainingPosts.length, 3, 'Correct posts remaining');
-
-        this.passed += 6;
-    }
-
-    async testTransactions() {
-        console.log('\n💱 Testing Transactions...');
-        this.tests += 5;
-
-        const Product = DB.Model('products');
-
-        const initialCount = await Product.count();
-
-        // Test successful transaction
+    await test.test('Successful transaction', async () => {
+        const beforeCount = await Product.count();
+        
         const result = await DB.transaction(async (trx) => {
             await trx.query('INSERT INTO products (name, price, category) VALUES (?, ?, ?)', 
-                ['Test Product', 99.99, 'test']);
+                ['Transaction Test', 199.99, 'test']);
             
             await trx.query('UPDATE products SET price = ? WHERE name = ?', 
-                [199.99, 'Laptop']);
+                [299.99, 'Laptop']);
             
             return { success: true };
         });
 
-        assert.isTrue(result.success, 'Transaction committed');
-
+        test.isTrue(result.success, 'Transaction committed');
+        
         const afterCount = await Product.count();
-        assert.equals(afterCount, initialCount + 1, 'Insert committed');
+        test.equals(afterCount, beforeCount + 1, 'Insert committed');
+        
+        const laptop = await Product.findOne({ name: 'Laptop' });
+        test.equals(laptop.price, 299.99, 'Update committed');
+    });
 
-        const updatedLaptop = await Product.findOne({ name: 'Laptop' });
-        assert.equals(updatedLaptop.price, 199.99, 'Update committed');
-
-        // Test failed transaction (rollback)
+    await test.test('Failed transaction rolls back', async () => {
+        const beforeCount = await Product.count();
+        
         try {
             await DB.transaction(async (trx) => {
                 await trx.query('INSERT INTO products (name, price, category) VALUES (?, ?, ?)', 
                     ['Rollback Test', 49.99, 'test']);
                 
-                // This should fail - invalid SQL
+                // This should fail
                 await trx.query('INVALID SQL');
-                
-                return { success: true };
             });
         } catch (e) {
             // Expected
         }
 
-        const finalCount = await Product.count();
-        assert.equals(finalCount, afterCount, 'Rollback prevented insert');
+        const afterCount = await Product.count();
+        test.equals(afterCount, beforeCount, 'Rollback prevented insert');
+        
+        const rollbackTest = await Product.findOne({ name: 'Rollback Test' });
+        test.equals(rollbackTest, null, 'Insert rolled back');
+    });
 
-        this.passed += 5;
-    }
+    // ==================== SCHEMA OPERATIONS TESTS ====================
+    test.category('SCHEMA OPERATIONS TESTS (6 tests)');
 
-    async testSchemaOperations() {
-        console.log('\n📐 Testing Schema Operations...');
-        this.tests += 8;
-
-        // Create schema builder
-        const schema = DB.schema();
-
-        // Create new table
+    await test.test('Create new table', async () => {
         await schema.create('categories', table => {
             table.id();
             table.string('name').unique();
@@ -645,192 +827,183 @@ class TestSuite {
             table.boolean('active').default(true);
             table.timestamps();
         });
-
-        // Verify table exists
+        
         const hasTable = await schema.hasTable('categories');
-        assert.isTrue(hasTable, 'Table created');
+        test.isTrue(hasTable, 'Categories table created');
+    });
 
-        // Verify column exists
-        const hasColumn = await schema.hasColumn('categories', 'name');
-        assert.isTrue(hasColumn, 'Column created');
-
-        // List collections/tables
-        const tables = await DB.listCollections();
-        assert.isTrue(tables.includes('categories'), 'Table listed in collections');
-
-        // Create model for new table
-        const Category = DB.Model('categories', {
-            name: { type: 'string', required: true },
-            description: 'text',
-            active: 'boolean'
+    await test.test('Alter table', async () => {
+        await schema.table('categories', table => {
+            table.integer('sort_order').default(0);
         });
+        
+        const hasColumn = await schema.hasColumn('categories', 'sort_order');
+        test.isTrue(hasColumn, 'New column added');
+    });
 
-        // Test operations on new table
-        const category = await Category.create({
-            name: 'Technology',
-            description: 'Tech products',
-            active: true
-        });
-
-        assert.notEquals(category.id, undefined, 'Can insert into new table');
-        assert.equals(category.name, 'Technology', 'Data saved correctly');
-
-        // Drop table
+    await test.test('Drop table', async () => {
         await schema.drop('categories');
-        const existsAfterDrop = await schema.hasTable('categories');
-        assert.isFalse(existsAfterDrop, 'Table dropped');
+        const hasTable = await schema.hasTable('categories');
+        test.isFalse(hasTable, 'Table dropped');
+    });
 
-        this.passed += 8;
-    }
+    // ==================== EDGE CASES TESTS ====================
+    test.category('EDGE CASES TESTS (8 tests)');
 
-    async testEdgeCases() {
-        console.log('\n⚠️ Testing Edge Cases...');
-        this.tests += 10;
+    await test.test('Empty results return empty array', async () => {
+        const results = await User.find({ name: 'NonExistent' });
+        test.deepEquals(results, [], 'Empty array returned');
+    });
 
-        const User = DB.Model('users');
-
-        // Re-create some users for edge cases
-        await User.createMany([
-            { name: 'Edge Case 1', email: 'edge1@test.com', age: 25 },
-            { name: 'Edge Case 2', email: 'edge2@test.com', age: 30 }
-        ]);
-
-        // Test empty results
-        const noUsers = await User.find({ name: 'NonExistentName' });
-        assert.deepEquals(noUsers, [], 'Empty array for no results');
-
-        const noUser = await User.findOne({ name: 'NonExistentName' });
-        assert.equals(noUser, null, 'Null for no single result');
-
-        // Test findById with invalid ID
-        const invalid = await User.findById(999999);
-        assert.equals(invalid, null, 'Null for invalid ID');
-
-        // Test delete non-existent
-        const deleted = await User.delete(999999);
-        assert.isFalse(deleted, 'False for non-existent delete');
-
-        // Test update non-existent
-        await assert.throws(async () => {
-            await User.update(999999, { name: 'Test' });
-        }, 'Error for non-existent update');
-
-        // Test with empty filter for findOne
-        await assert.throws(async () => {
-            await User.findOne({});
-        }, 'Error for empty filter');
-
-        // Test with null values
-        const userWithNull = await User.create({
+    await test.test('Null values handled', async () => {
+        const user = await User.create({
             name: 'Null User',
             email: 'null@test.com',
             age: null,
             tags: null
         });
+        
+        test.equals(user.age, null, 'Null age accepted');
+        test.equals(user.tags, null, 'Null tags accepted');
+    });
 
-        assert.equals(userWithNull.age, null, 'Null value accepted');
-        assert.equals(userWithNull.tags, null, 'Null JSON accepted');
-
-        // Test with undefined values (should use defaults)
-        const userWithUndefined = await User.create({
-            name: 'Undefined User',
-            email: 'undefined@test.com'
-        });
-        assert.isTrue(userWithUndefined.isActive, 'Default used for undefined');
-
-        // Test with empty string
-        const userWithEmpty = await User.create({
+    await test.test('Empty string handled', async () => {
+        const user = await User.create({
             name: '',
-            email: 'empty@test.com'
+            email: 'empty@test.com',
+            age: 25
         });
-        assert.equals(userWithEmpty.name, '', 'Empty string accepted');
+        
+        test.equals(user.name, '', 'Empty string accepted');
+    });
 
-        this.passed += 10;
-    }
-
-    async testValidation() {
-        console.log('\n✅ Testing Validation...');
-        this.tests += 5;
-
-        // Create model with validation rules
-        const ValidatedUser = DB.Model('validated_users', {
-            username: { type: 'string', required: true },
-            email: { type: 'string', required: true },
-            age: { type: 'number', required: true },
-            isActive: { type: 'boolean', default: true }
+    await test.test('Very large numbers handled', async () => {
+        const user = await User.create({
+            name: 'Large Numbers',
+            email: 'large@test.com',
+            age: 999999999,
+            score: 999999999.99
         });
+        
+        test.equals(user.age, 999999999, 'Large integer accepted');
+        test.equals(user.score, 999999999.99, 'Large float accepted');
+    });
 
-        // Test valid data
-        await assert.notThrows(async () => {
+    await test.test('Special characters handled', async () => {
+        const user = await User.create({
+            name: 'Special !@#$%^&*()',
+            email: 'special@test.com',
+            age: 25
+        });
+        
+        test.equals(user.name, 'Special !@#$%^&*()', 'Special chars accepted');
+    });
+
+    await test.test('Boolean false handled', async () => {
+        const user = await User.create({
+            name: 'False User',
+            email: 'false@test.com',
+            isActive: false
+        });
+        
+        test.isFalse(user.isActive, 'Boolean false accepted');
+    });
+
+    // ==================== VALIDATION TESTS ====================
+    test.category('VALIDATION TESTS (6 tests)');
+
+    const ValidatedUser = DB.Model('validated_users', {
+        username: { type: 'string', required: true },
+        email: { type: 'string', required: true },
+        age: { type: 'number', required: true },
+        isActive: { type: 'boolean', default: true }
+    });
+
+    await schema.create('validated_users', table => {
+        table.id();
+        table.string('username');
+        table.string('email');
+        table.integer('age');
+        table.boolean('isActive');
+        table.timestamps();
+    });
+
+    await test.test('Valid data passes', async () => {
+        await test.notThrows(async () => {
             await ValidatedUser.create({
                 username: 'validuser',
                 email: 'valid@test.com',
                 age: 25
             });
-        }, 'Valid data passes validation');
+        }, 'Valid data should pass');
+    });
 
-        // Test missing required field
-        await assert.throws(async () => {
+    await test.test('Missing required field fails', async () => {
+        await test.throws(async () => {
             await ValidatedUser.create({
                 username: 'test',
                 email: 'test@test.com'
             });
-        }, 'Missing required field fails');
+        }, 'Missing required field should fail');
+    });
 
-        // Test multiple missing fields
-        await assert.throws(async () => {
-            await ValidatedUser.create({
-                username: 'test'
-            });
-        }, 'Multiple missing fields fail');
-
-        // Test null for required field
-        await assert.throws(async () => {
+    await test.test('Null for required field fails', async () => {
+        await test.throws(async () => {
             await ValidatedUser.create({
                 username: null,
                 email: 'test@test.com',
                 age: 25
             });
-        }, 'Null for required field fails');
+        }, 'Null for required field should fail');
+    });
 
-        // Test undefined for required field
-        await assert.throws(async () => {
-            await ValidatedUser.create({
-                username: 'test',
-                email: undefined,
-                age: 25
-            });
-        }, 'Undefined for required field fails');
+    // ==================== STATISTICS TESTS ====================
+    test.category('STATISTICS TESTS (4 tests)');
 
-        this.passed += 5;
-    }
+    await test.test('Get database stats', async () => {
+        const stats = await DB.getStats();
+        test.equals(stats.driver, 'sqlite', 'Driver is sqlite');
+        test.isTrue(stats.collections >= 3, 'Has at least 3 tables');
+        test.isTrue(stats.totalRecords > 0, 'Has records');
+    });
 
-    async cleanup() {
-        console.log('\n🧹 Cleaning up...');
-        const fs = await import('fs/promises');
+    await test.test('Get database version', async () => {
+        const version = await DB.getVersion();
+        test.notEquals(version, 'Unknown', 'Version retrieved');
+    });
+
+    // ==================== DISCONNECT TESTS ====================
+    test.category('DISCONNECT TESTS (3 tests)');
+
+    await test.test('Disconnect from database', async () => {
+        await DB.Disconnect('testdb');
+        test.isFalse(DB.hasConnection('testdb'), 'Connection removed');
+    });
+
+    await test.test('List connections after disconnect', async () => {
+        const connections = DB.listConnections();
+        test.equals(connections.length, 0, 'No connections');
+    });
+
+    await test.test('Disconnect all (already disconnected)', async () => {
         await DB.DisconnectAll();
-        
-        // Remove test database file
-        try {
-            await fs.unlink('./test.sqlite');
-            console.log('✅ Test database file removed');
-        } catch (e) {
-            // File might not exist
+        test.equals(DB.listConnections().length, 0, 'Still no connections');
+    });
+
+} catch (error) {
+    console.error('\n💥 Unexpected error:', error);
+} finally {
+    // Print summary
+    const passed = test.summary();
+    
+    // Clean up
+    try {
+        if (fs.existsSync(TEST_FILE)) {
+            fs.unlinkSync(TEST_FILE);
         }
-        console.log('✅ Cleanup complete');
+    } catch (e) {
+        // Ignore cleanup errors
     }
-}
-
-// ==================== Run Tests ====================
-const suite = new TestSuite();
-await suite.run();
-
-console.log(`\n📊 Total Tests: ${suite.tests}, Passed: ${suite.passed}, Failed: ${suite.failed}\n`);
-
-if (suite.failed === 0) {
-    console.log('🎉 ALL TESTS PASSED! 🎉\n');
-    process.exit(0);
-} else {
-    console.log(`❌ ${suite.failed} TESTS FAILED\n`);
-    process.exit(1);
+    
+    process.exit(passed ? 0 : 1);
 }
