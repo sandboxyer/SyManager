@@ -87,13 +87,13 @@ class SQLiteFile {
         this.modified = false;
         this.transactionStack = [];
         this.savepointCounter = 0;
-        this.pageSize = 4096; // Default SQLite page size
+        this.pageSize = 4096;
         this.dirtyPages = new Set();
-        this.tables = new Map(); // Store table data
+        this.tables = new Map();
         this.inTransaction = false;
+        this.savepointData = new Map(); // Store data for savepoints
     }
 
-    // SQLite file header format (first 100 bytes)
     static HEADER_FORMAT = {
         magic: Buffer.from('SQLite format 3\0'),
         pageSize: { offset: 16, size: 2 },
@@ -127,8 +127,6 @@ class SQLiteFile {
                 if (fileBuffer.length > 0) {
                     this.parseHeader(fileBuffer);
                     this.parsePages(fileBuffer);
-                    
-                    // Load schema from sqlite_master table
                     await this.loadSchema();
                 } else {
                     this.createEmptyDatabase();
@@ -205,7 +203,6 @@ class SQLiteFile {
     }
 
     createEmptyDatabase() {
-        // Create SQLite 3 header
         this.header = {
             magic: 'SQLite format 3\0',
             pageSize: 4096,
@@ -216,22 +213,21 @@ class SQLiteFile {
             minPayloadFrac: 32,
             leafPayloadFrac: 32,
             fileChangeCounter: 1,
-            databaseSize: 2, // Header page + root page
+            databaseSize: 2,
             firstFreelistTrunk: 0,
             totalFreelistPages: 0,
             schemaCookie: 1,
             schemaFormat: 4,
             defaultPageCache: 0,
             largestRootBtree: 1,
-            textEncoding: 1, // UTF-8
+            textEncoding: 1,
             userVersion: 0,
             incrementalVacuum: 0,
             applicationId: 0,
             versionValidFor: 1,
-            sqliteVersion: 3035004 // 3.35.4
+            sqliteVersion: 3035004
         };
         
-        // Create root page (table interior for sqlite_master)
         this.pages = [{
             number: 1,
             type: 'table interior',
@@ -239,36 +235,25 @@ class SQLiteFile {
             modified: true
         }];
         
-        // Initialize sqlite_master table
         this.tables.set('sqlite_master', []);
-        
         this.modified = true;
         this.dirtyPages.add(1);
     }
 
     createRootPage() {
         const buffer = Buffer.alloc(this.pageSize);
-        // Page type: table interior (0x05)
         buffer[0] = 0x05;
-        // First freeblock offset (2 bytes)
         buffer.writeUInt16BE(0, 1);
-        // Number of cells (2 bytes)
         buffer.writeUInt16BE(0, 3);
-        // Start of content area (2 bytes)
         buffer.writeUInt16BE(this.pageSize - 100, 5);
-        // Fragmented free bytes (1 byte)
         buffer[7] = 0;
-        // Right most pointer (4 bytes)
         buffer.writeUInt32BE(0, 8);
         return buffer;
     }
 
     async loadSchema() {
-        // Parse sqlite_master from page 1
         const masterPage = this.pages[0];
         if (masterPage) {
-            // In a real implementation, we'd parse the b-tree structure
-            // For simplicity, we'll maintain our own schema map
             const records = this.parseTableRecords(masterPage.buffer);
             records.forEach(record => {
                 if (record.type === 'table') {
@@ -279,14 +264,11 @@ class SQLiteFile {
     }
 
     parseTableRecords(pageBuffer) {
-        // Simplified record parsing
         const records = [];
         const cellCount = pageBuffer.readUInt16BE(3);
         
         for (let i = 0; i < cellCount; i++) {
             const cellOffset = pageBuffer.readUInt16BE(12 + i * 2);
-            // Parse cell content (simplified)
-            // In production, this would fully parse SQLite's record format
         }
         
         return records;
@@ -296,17 +278,13 @@ class SQLiteFile {
         if (!this.modified) return;
         
         const fileBuffer = Buffer.alloc(100 + this.pages.length * this.pageSize);
-        
-        // Write header
         this.writeHeader(fileBuffer);
         
-        // Write pages
         for (let i = 0; i < this.pages.length; i++) {
             const page = this.pages[i];
             const pageOffset = i === 0 ? 100 : 100 + (i - 1) * this.pageSize;
             
             if (page.buffer.length < this.pageSize) {
-                // Pad to full page size
                 const fullPage = Buffer.alloc(this.pageSize);
                 page.buffer.copy(fullPage);
                 fullPage.copy(fileBuffer, pageOffset);
@@ -315,7 +293,6 @@ class SQLiteFile {
             }
         }
         
-        // Atomic write to temp file first
         const tempFile = `${this.filename}.tmp`;
         fs.writeFileSync(tempFile, fileBuffer);
         fs.renameSync(tempFile, this.filename);
@@ -325,9 +302,7 @@ class SQLiteFile {
     }
 
     writeHeader(buffer) {
-        // Magic
         buffer.write('SQLite format 3\0', 0);
-        // Page size
         buffer.writeUInt16BE(this.header.pageSize, 16);
         buffer.writeUInt8(this.header.writeVersion, 18);
         buffer.writeUInt8(this.header.readVersion, 19);
@@ -347,7 +322,6 @@ class SQLiteFile {
         buffer.writeUInt32BE(this.header.userVersion, 60);
         buffer.writeUInt32BE(this.header.incrementalVacuum, 64);
         buffer.writeUInt32BE(this.header.applicationId, 68);
-        // Reserved (20 bytes)
         buffer.writeUInt32BE(this.header.versionValidFor, 92);
         buffer.writeUInt32BE(this.header.sqliteVersion, 96);
     }
@@ -372,25 +346,33 @@ class SQLiteFile {
         } else if (normalizedSql.startsWith('BEGIN')) {
             this.inTransaction = true;
             this.transactionStack.push({ type: 'BEGIN', depth: this.transactionStack.length });
+            // Save current state for potential rollback
+            this.savepointData.set('begin', this.cloneTables());
             return [];
         } else if (normalizedSql.startsWith('COMMIT')) {
             this.transactionStack.pop();
             if (this.transactionStack.length === 0) {
                 this.inTransaction = false;
+                this.savepointData.clear();
                 await this.save();
             }
             return [];
         } else if (normalizedSql.startsWith('ROLLBACK')) {
             this.transactionStack.pop();
             this.inTransaction = this.transactionStack.length > 0;
-            // Reload from disk to undo changes
-            await this.load();
+            // Restore from saved state
+            if (this.savepointData.has('begin')) {
+                this.tables = this.savepointData.get('begin');
+                this.savepointData.delete('begin');
+            }
             return [];
         } else if (normalizedSql.startsWith('SAVEPOINT')) {
             const spMatch = sql.match(/SAVEPOINT\s+(\w+)/i);
             if (spMatch) {
                 const savepoint = spMatch[1];
                 this.transactionStack.push({ type: 'SAVEPOINT', name: savepoint });
+                // Save current state
+                this.savepointData.set(savepoint, this.cloneTables());
             }
             return [];
         } else if (normalizedSql.startsWith('RELEASE')) {
@@ -399,7 +381,24 @@ class SQLiteFile {
                 const savepoint = relMatch[1];
                 while (this.transactionStack.length > 0) {
                     const last = this.transactionStack.pop();
+                    this.savepointData.delete(savepoint);
                     if (last.type === 'SAVEPOINT' && last.name === savepoint) {
+                        break;
+                    }
+                }
+            }
+            return [];
+        } else if (normalizedSql.startsWith('ROLLBACK TO')) {
+            const rbMatch = sql.match(/ROLLBACK\s+TO\s+(\w+)/i);
+            if (rbMatch) {
+                const savepoint = rbMatch[1];
+                if (this.savepointData.has(savepoint)) {
+                    this.tables = this.savepointData.get(savepoint);
+                }
+                while (this.transactionStack.length > 0) {
+                    const last = this.transactionStack.pop();
+                    if (last.type === 'SAVEPOINT' && last.name === savepoint) {
+                        this.transactionStack.push(last);
                         break;
                     }
                 }
@@ -410,6 +409,14 @@ class SQLiteFile {
         return [];
     }
 
+    cloneTables() {
+        const cloned = new Map();
+        for (const [key, value] of this.tables) {
+            cloned.set(key, value.map(row => ({ ...row })));
+        }
+        return cloned;
+    }
+
     executeCreateTable(sql) {
         const tableMatch = sql.match(/CREATE\s+TABLE\s+(\w+)\s*\(([\s\S]+)\)/i);
         if (!tableMatch) return [];
@@ -417,13 +424,9 @@ class SQLiteFile {
         const tableName = tableMatch[1];
         const columnsDef = tableMatch[2];
         
-        // Parse columns
         const columns = this.parseColumns(columnsDef);
         
-        // Store table data
         this.tables.set(tableName, []);
-        
-        // Store schema info
         this.schema.set(tableName, {
             type: 'table',
             name: tableName,
@@ -432,9 +435,7 @@ class SQLiteFile {
             columns: columns
         });
         
-        // Initialize sequence
         this.sequences.set(tableName, 1);
-        
         this.modified = true;
         return [];
     }
@@ -459,7 +460,6 @@ class SQLiteFile {
                 autoIncrement: line.toUpperCase().includes('AUTOINCREMENT')
             };
             
-            // Parse DEFAULT
             const defaultMatch = line.match(/DEFAULT\s+('.*?'|\d+|NULL|TRUE|FALSE)/i);
             if (defaultMatch) {
                 let defaultValue = defaultMatch[1];
@@ -496,14 +496,12 @@ class SQLiteFile {
         const tableData = this.tables.get(tableName) || [];
         const fields = selectMatch[1].split(',').map(f => f.trim());
 
-        // Handle COUNT(*)
         if (fields.length === 1 && fields[0].toUpperCase() === 'COUNT(*)') {
             return [{ 'COUNT(*)': tableData.length }];
         }
 
         let filteredData = [...tableData];
 
-        // Apply WHERE
         if (whereMatch) {
             const condition = whereMatch[1];
             filteredData = filteredData.filter(row => {
@@ -511,15 +509,16 @@ class SQLiteFile {
             });
         }
 
-        // Apply ORDER BY
         if (orderMatch) {
             const orderClause = orderMatch[1];
             const orders = orderClause.split(',').map(o => o.trim());
             
             filteredData.sort((a, b) => {
                 for (const order of orders) {
-                    const [field, direction] = order.split(/\s+/);
-                    const desc = direction && direction.toUpperCase() === 'DESC';
+                    const parts = order.split(/\s+/);
+                    const field = parts[0];
+                    const direction = parts[1]?.toUpperCase() || 'ASC';
+                    const desc = direction === 'DESC';
                     
                     const aVal = a[field] !== undefined ? a[field] : null;
                     const bVal = b[field] !== undefined ? b[field] : null;
@@ -530,19 +529,18 @@ class SQLiteFile {
                     
                     if (aVal < bVal) return desc ? 1 : -1;
                     if (aVal > bVal) return desc ? -1 : 1;
+                    if (aVal === bVal) continue;
                 }
                 return 0;
             });
         }
 
-        // Apply LIMIT/OFFSET
         if (limitMatch) {
             const limit = parseInt(limitMatch[1], 10);
             const offset = limitMatch[2] ? parseInt(limitMatch[2], 10) : 0;
             filteredData = filteredData.slice(offset, offset + limit);
         }
 
-        // Format results
         filteredData.forEach(row => {
             if (fields[0] === '*') {
                 results.push({ ...row });
@@ -577,8 +575,6 @@ class SQLiteFile {
         }
 
         const tableData = this.tables.get(tableName);
-
-        // Parse columns if provided
         const columnsMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
         let columns = [];
 
@@ -586,7 +582,6 @@ class SQLiteFile {
             columns = columnsMatch[1].split(',').map(c => c.trim());
         }
 
-        // Parse values
         const valuesStr = valuesMatch[1];
         const valueMatches = this.parseValueList(valuesStr);
 
@@ -609,14 +604,11 @@ class SQLiteFile {
             return v;
         });
 
-        // Get next sequence value
         const sequence = this.sequences.get(tableName) || 1;
         this.sequences.set(tableName, sequence + 1);
         
-        // Create new row with auto-incrementing id
         const newRow = { id: sequence };
         
-        // Map values to columns
         if (columns.length > 0) {
             columns.forEach((col, index) => {
                 if (index < values.length) {
@@ -667,7 +659,6 @@ class SQLiteFile {
             assignments.push({ field, value: parsedValue });
         });
 
-        // Update rows
         for (let i = 0; i < tableData.length; i++) {
             let shouldUpdate = true;
 
@@ -714,7 +705,6 @@ class SQLiteFile {
 
     executeDropTable(sql) {
         const tableMatch = sql.match(/DROP\s+TABLE\s+(\w+)/i);
-
         if (!tableMatch) return [];
 
         const tableName = tableMatch[1];
@@ -729,7 +719,6 @@ class SQLiteFile {
 
     executePragma(sql) {
         const pragmaMatch = sql.match(/PRAGMA\s+(\w+)/i);
-
         if (!pragmaMatch) return [];
 
         const pragma = pragmaMatch[1];
@@ -791,13 +780,11 @@ class SQLiteFile {
     }
 
     evaluateCondition(row, condition, params) {
-        // Handle AND
         if (condition.toUpperCase().includes(' AND ')) {
             const parts = condition.split(/\s+AND\s+/i);
             return parts.every(part => this.evaluateSingleCondition(row, part, params));
         }
 
-        // Handle OR
         if (condition.toUpperCase().includes(' OR ')) {
             const parts = condition.split(/\s+OR\s+/i);
             return parts.some(part => this.evaluateSingleCondition(row, part, params));
@@ -807,13 +794,32 @@ class SQLiteFile {
     }
 
     evaluateSingleCondition(row, condition, params) {
-        const operators = ['>=', '<=', '!=', '<>', '=', '<', '>', ' LIKE ', ' IN '];
+        const operators = ['>=', '<=', '!=', '<>', '=', '<', '>', ' LIKE ', ' IN ', ' BETWEEN '];
 
         for (const op of operators) {
             const opIndex = condition.indexOf(op.trim());
             if (opIndex > 0) {
                 const field = condition.substring(0, opIndex).trim();
                 let value = condition.substring(opIndex + op.length).trim();
+
+                if (op.trim() === 'BETWEEN') {
+                    const betweenMatch = value.match(/(.+?) AND (.+)/i);
+                    if (betweenMatch) {
+                        let start = betweenMatch[1].trim();
+                        let end = betweenMatch[2].trim();
+                        
+                        if (start === '?') start = params.shift();
+                        else if (start.startsWith("'")) start = start.substring(1, start.length - 1);
+                        else if (!isNaN(start)) start = Number(start);
+                        
+                        if (end === '?') end = params.shift();
+                        else if (end.startsWith("'")) end = end.substring(1, end.length - 1);
+                        else if (!isNaN(end)) end = Number(end);
+                        
+                        const rowValue = row[field];
+                        return rowValue >= start && rowValue <= end;
+                    }
+                }
 
                 if (op.trim() === 'IN') {
                     const inList = value.substring(1, value.length - 1).split(',').map(v => {
@@ -875,6 +881,17 @@ class SQLiteFile {
                     case '>=': return rowValue >= value;
                 }
             }
+        }
+
+        // Handle IS NULL / IS NOT NULL
+        if (condition.toUpperCase().includes(' IS NULL')) {
+            const field = condition.replace(/\s+IS NULL/i, '').trim();
+            return row[field] === null || row[field] === undefined;
+        }
+        
+        if (condition.toUpperCase().includes(' IS NOT NULL')) {
+            const field = condition.replace(/\s+IS NOT NULL/i, '').trim();
+            return row[field] !== null && row[field] !== undefined;
         }
 
         return true;
@@ -996,28 +1013,23 @@ class QueryBuilder {
     build() {
         let sql = `SELECT ${this._select.join(', ')} FROM ${this.model.tableName}`;
 
-        // Build WHERE clause
         const whereParts = [];
         
-        // Add simple where conditions
         this._where.forEach(({ field }) => {
             whereParts.push(`${field} = ?`);
         });
         
-        // Add raw where conditions
         whereParts.push(...this._whereRaw);
 
         if (whereParts.length > 0) {
             sql += ` WHERE ${whereParts.join(' AND ')}`;
         }
 
-        // Add ORDER BY
         if (this._orderBy.length > 0) {
             const orderParts = this._orderBy.map(o => `${o.field} ${o.direction}`);
             sql += ` ORDER BY ${orderParts.join(', ')}`;
         }
 
-        // Add LIMIT and OFFSET
         if (this._limit !== null) {
             sql += ` LIMIT ${this._limit}`;
         }
@@ -1060,7 +1072,6 @@ class Model extends EventEmitter {
         this._exists = false;
         this._dirty = new Set();
 
-        // Define getters/setters for schema fields
         if (this.constructor.schema) {
             Object.keys(this.constructor.schema).forEach(key => {
                 Object.defineProperty(this, key, {
@@ -1166,22 +1177,17 @@ class Model extends EventEmitter {
             const now = new Date().toISOString();
             if (!this._exists && !data.created_at) {
                 data.created_at = now;
-            }
-            data.updated_at = now;
-            // Update the attributes with timestamps
-            if (!this._exists && !this._attributes.created_at) {
                 this._attributes.created_at = now;
             }
+            data.updated_at = now;
             this._attributes.updated_at = now;
         }
 
         if (!this._exists) {
-            // Remove id from data for insert (it will be auto-generated)
             const keys = Object.keys(data).filter(k => data[k] !== undefined && k !== 'id');
             const values = keys.map(k => data[k]);
             
             if (keys.length === 0) {
-                // Insert with only defaults
                 const sql = `INSERT INTO ${this.constructor.tableName} DEFAULT VALUES`;
                 const result = await this.constructor.adapter.execute(sql, []);
                 if (result[0]?.insertId) {
@@ -1201,7 +1207,6 @@ class Model extends EventEmitter {
         } else {
             const id = this._attributes[this.constructor.primaryKey];
             
-            // Only update dirty fields
             const dirtyKeys = Array.from(this._dirty).filter(k => k !== this.constructor.primaryKey && data[k] !== undefined);
             
             if (dirtyKeys.length > 0) {
@@ -1247,12 +1252,10 @@ class Model extends EventEmitter {
 
     // ==================== CRUD Methods ====================
     static async create(data) {
-        // Don't validate id field as it's auto-generated
         const validationData = { ...data };
         delete validationData.id;
         this._validate(validationData);
         
-        // Apply defaults from validation schema
         const fullData = { ...data };
         for (const [field, config] of Object.entries(this._validationSchema || {})) {
             if (fullData[field] === undefined && config.default !== undefined) {
@@ -1534,10 +1537,8 @@ class Model extends EventEmitter {
         
         const offset = (page - 1) * perPage;
         
-        // Get total count first
         const total = await this.count(filter);
         
-        // Get paginated data
         const query = this.query();
         if (Object.keys(filter).length > 0) {
             query.where(filter);
@@ -1592,24 +1593,16 @@ class DB {
     static #config = {
         debug: false,
         autoSave: true,
-        saveInterval: 5000 // ms
+        saveInterval: 5000
     };
 
     static configure(options) {
         this.#config = { ...this.#config, ...options };
     }
 
-    /**
-     * Connect to SQLite database
-     * @param {string} databaseName - Name of the database/connection
-     * @param {Object} options - Connection options
-     * @param {string} options.filename - SQLite filename (default: ./{databaseName}.sqlite)
-     * @returns {Promise<boolean>} True if connected successfully
-     */
     static async Connect(databaseName, options = {}) {
         const filename = options.filename || `./${databaseName}.sqlite`;
         
-        // Ensure directory exists
         const dir = path.dirname(filename);
         if (dir !== '.') {
             await fs.promises.mkdir(dir, { recursive: true }).catch(() => {});
@@ -1629,7 +1622,6 @@ class DB {
             this.#defaultConnection = databaseName;
             this.#adapter = sqliteFile;
             
-            // Re-initialize all models with new adapter
             for (const [name, modelClass] of this.#modelRegistry) {
                 modelClass.init(sqliteFile);
             }
@@ -1639,13 +1631,6 @@ class DB {
         return true;
     }
 
-    /**
-     * Create or retrieve a model
-     * @template {Object} T
-     * @param {string} modelName - Name of the model/table
-     * @param {Object} schemaDefinition - Schema definition
-     * @returns {ModelClass<T>} Model class with full CRUD methods
-     */
     static Model(modelName, schemaDefinition = null) {
         if (this.#modelRegistry.has(modelName)) {
             return this.#modelRegistry.get(modelName);
@@ -1662,15 +1647,11 @@ class DB {
         return ModelClass;
     }
 
-    /**
-     * @param {string} databaseName
-     */
     static set defaultConnection(databaseName) {
         if (this.#connections.has(databaseName)) {
             this.#defaultConnection = databaseName;
             this.#adapter = this.#connections.get(databaseName).adapter;
             
-            // Re-initialize all models with new connection
             for (const [name, modelClass] of this.#modelRegistry) {
                 modelClass.init(this.#adapter);
             }
@@ -1680,34 +1661,18 @@ class DB {
         }
     }
 
-    /**
-     * @returns {string|null}
-     */
     static get defaultConnection() {
         return this.#defaultConnection;
     }
 
-    /**
-     * Get connection information
-     * @param {string} databaseName
-     * @returns {Object|null}
-     */
     static getConnection(databaseName) {
         return this.#connections.get(databaseName) || null;
     }
 
-    /**
-     * List all active connections
-     * @returns {string[]}
-     */
     static listConnections() {
         return Array.from(this.#connections.keys());
     }
 
-    /**
-     * Get all registered models
-     * @returns {Object.<string, ModelClass>}
-     */
     static listModels() {
         const result = {};
         for (const [name, model] of this.#modelRegistry) {
@@ -1716,42 +1681,22 @@ class DB {
         return result;
     }
 
-    /**
-     * Get table names
-     * @returns {Promise<string[]>}
-     */
     static async listCollections() {
         if (!this.#adapter) throw new Error('No database connection');
         
         return Array.from(this.#adapter.tables.keys()).filter(name => name !== 'sqlite_master');
     }
 
-    /**
-     * Execute a raw query
-     * @param {string} sql - SQL query string
-     * @param {Array} [params] - Query parameters
-     * @returns {Promise<any>}
-     */
     static async query(sql, params = []) {
         if (!this.#adapter) throw new Error('No database connection');
         return this.#adapter.execute(sql, params);
     }
 
-    /**
-     * Execute a transaction
-     * @param {function(Object): Promise<any>} callback
-     * @returns {Promise<any>}
-     */
     static async transaction(callback) {
         if (!this.#adapter) throw new Error('No database connection');
         return this.#adapter.transaction(callback);
     }
 
-    /**
-     * Disconnect from a specific database
-     * @param {string} databaseName
-     * @returns {Promise<boolean>}
-     */
     static async Disconnect(databaseName) {
         if (!this.#connections.has(databaseName)) return false;
         
@@ -1770,10 +1715,6 @@ class DB {
         return true;
     }
 
-    /**
-     * Disconnect from all databases
-     * @returns {Promise<void>}
-     */
     static async DisconnectAll() {
         for (const dbName of this.#connections.keys()) {
             const conn = this.#connections.get(dbName);
@@ -1785,19 +1726,10 @@ class DB {
         Logger.info('Disconnected from all databases');
     }
 
-    /**
-     * Check if a connection exists
-     * @param {string} databaseName
-     * @returns {boolean}
-     */
     static hasConnection(databaseName) {
         return this.#connections.has(databaseName);
     }
 
-    /**
-     * Get database statistics
-     * @returns {Promise<Object>}
-     */
     static async getStats() {
         if (!this.#adapter) throw new Error('No database connection');
         
@@ -1823,24 +1755,15 @@ class DB {
         return stats;
     }
 
-    /**
-     * Get database version
-     * @returns {Promise<string>}
-     */
     static async getVersion() {
         return 'SQLite 3.45.1 (Native File Format)';
     }
 
-    /**
-     * Create schema builder
-     * @returns {SchemaBuilder}
-     */
     static schema() {
         if (!this.#adapter) throw new Error('No database connection');
         return new SchemaBuilder(this.#adapter);
     }
 
-    // ==================== Private Methods ====================
     static #createModelClass(modelName, schemaDefinition) {
         const parsedSchema = this.#parseSchema(schemaDefinition);
         
@@ -1850,7 +1773,6 @@ class DB {
             static _validationSchema = parsedSchema.validationSchema;
         }
 
-        // Add default id field if not present
         if (!DynamicModel.schema.id) {
             DynamicModel.schema.id = { type: 'integer' };
         }
@@ -1881,7 +1803,6 @@ class DB {
                 type: mappedType
             };
             
-            // Don't mark id as required since it's auto-generated
             if (fieldName !== 'id') {
                 validationSchema[fieldName] = {
                     type: mappedType,
@@ -1935,7 +1856,6 @@ class SchemaBuilder {
         const blueprint = new Blueprint(table, true);
         await callback(blueprint);
         
-        // Add each column separately (SQLite ALTER TABLE limited support)
         for (const column of blueprint.columns) {
             const hasColumn = await this.hasColumn(table, column.name);
             if (!hasColumn) {
@@ -2148,5 +2068,4 @@ class Blueprint {
     }
 }
 
-// Export
 export default DB;
