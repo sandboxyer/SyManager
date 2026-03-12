@@ -90,6 +90,7 @@ class SQLiteFile {
         this.pageSize = 4096; // Default SQLite page size
         this.dirtyPages = new Set();
         this.tables = new Map(); // Store table data
+        this.inTransaction = false;
     }
 
     // SQLite file header format (first 100 bytes)
@@ -369,16 +370,19 @@ class SQLiteFile {
         } else if (normalizedSql.startsWith('PRAGMA')) {
             return this.executePragma(sql);
         } else if (normalizedSql.startsWith('BEGIN')) {
+            this.inTransaction = true;
             this.transactionStack.push({ type: 'BEGIN', depth: this.transactionStack.length });
             return [];
         } else if (normalizedSql.startsWith('COMMIT')) {
             this.transactionStack.pop();
             if (this.transactionStack.length === 0) {
+                this.inTransaction = false;
                 await this.save();
             }
             return [];
         } else if (normalizedSql.startsWith('ROLLBACK')) {
             this.transactionStack.pop();
+            this.inTransaction = this.transactionStack.length > 0;
             // Reload from disk to undo changes
             await this.load();
             return [];
@@ -878,9 +882,14 @@ class SQLiteFile {
 
     async transaction(callback) {
         const savepoint = `sp_${Date.now()}_${this.savepointCounter++}`;
+        const wasInTransaction = this.inTransaction;
 
         try {
-            await this.execute(`SAVEPOINT ${savepoint}`);
+            if (!wasInTransaction) {
+                await this.execute('BEGIN');
+            } else {
+                await this.execute(`SAVEPOINT ${savepoint}`);
+            }
 
             const result = await callback({
                 query: (sql, params) => this.execute(sql, params),
@@ -888,15 +897,27 @@ class SQLiteFile {
                 connection: this
             });
 
-            await this.execute(`RELEASE ${savepoint}`);
+            if (!wasInTransaction) {
+                await this.execute('COMMIT');
+            } else {
+                await this.execute(`RELEASE ${savepoint}`);
+            }
+            
             return result;
         } catch (error) {
-            await this.execute(`ROLLBACK TO ${savepoint}`);
+            if (!wasInTransaction) {
+                await this.execute('ROLLBACK');
+            } else {
+                await this.execute(`ROLLBACK TO ${savepoint}`);
+            }
             throw error;
         }
     }
 
     async disconnect() {
+        if (this.inTransaction) {
+            await this.execute('ROLLBACK');
+        }
         await this.save();
     }
 }
@@ -1147,6 +1168,11 @@ class Model extends EventEmitter {
                 data.created_at = now;
             }
             data.updated_at = now;
+            // Update the attributes with timestamps
+            if (!this._exists && !this._attributes.created_at) {
+                this._attributes.created_at = now;
+            }
+            this._attributes.updated_at = now;
         }
 
         if (!this._exists) {
