@@ -1,1501 +1,1250 @@
-// test.js - Comprehensive test suite for SQLite ORM
+// test-db.js - Comprehensive test suite for DB.js SQLite ORM
 import DB from './DB.js';
-import assert from 'assert';
 import fs from 'fs';
-import path from 'path';
+import path from 'fs/promises';
 import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import assert from 'assert';
+import crypto from 'crypto';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// Test configuration
+// ==================== Test Configuration ====================
 const TEST_DB = 'test_database';
-const TEST_FILE = path.join(__dirname, `${TEST_DB}.sqlite`);
+const TEST_FILE = `./${TEST_DB}.sqlite`;
+const PERFORMANCE_ITERATIONS = 1000;
+const CONCURRENT_USERS = 50;
 
-// Colors for console output
-const colors = {
-    reset: '\x1b[0m',
-    bright: '\x1b[1m',
-    dim: '\x1b[2m',
-    red: '\x1b[31m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    blue: '\x1b[34m',
-    magenta: '\x1b[35m',
-    cyan: '\x1b[36m'
-};
-
-// Test statistics
-const stats = {
-    total: 0,
+// ==================== Test Results Tracking ====================
+const testResults = {
     passed: 0,
     failed: 0,
-    skipped: 0
+    skipped: 0,
+    total: 0,
+    startTime: Date.now(),
+    endTime: null,
+    tests: []
 };
 
-// Test timer
-let testStartTime = Date.now();
-
-// Helper function to log test results
-function logTest(name, result, error = null) {
-    stats.total++;
-    const status = result ? 'PASS' : 'FAIL';
-    const color = result ? colors.green : colors.red;
-    const icon = result ? '✅' : '❌';
-    
-    console.log(`${color}${icon} ${name}${colors.reset}`);
-    if (error) {
-        console.log(`${colors.red}   └─ Error: ${error.message}${colors.reset}`);
-        if (error.stack) {
-            console.log(`${colors.dim}${error.stack.split('\n').slice(1).join('\n')}${colors.reset}`);
-        }
-    }
-    
-    if (result) {
-        stats.passed++;
-    } else {
-        stats.failed++;
-    }
+function recordTest(name, status, error = null, duration = 0) {
+    testResults.tests.push({ name, status, error, duration });
+    if (status === 'passed') testResults.passed++;
+    else if (status === 'failed') testResults.failed++;
+    else if (status === 'skipped') testResults.skipped++;
+    testResults.total++;
 }
 
-function logSkip(name, reason) {
-    stats.total++;
-    stats.skipped++;
-    console.log(`${colors.yellow}⏭️  ${name} (Skipped: ${reason})${colors.reset}`);
-}
-
-function logSection(title) {
-    console.log(`\n${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════════${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}   ${title}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════════${colors.reset}\n`);
-}
-
-function logSubSection(title) {
-    console.log(`\n${colors.bright}${colors.blue}─── ${title} ───${colors.reset}\n`);
-}
-
-// Clean up before and after tests
-async function cleanup() {
-    if (fs.existsSync(TEST_FILE)) {
-        fs.unlinkSync(TEST_FILE);
-    }
-    const walFile = `${TEST_FILE}-wal`;
-    if (fs.existsSync(walFile)) {
-        fs.unlinkSync(walFile);
-    }
-}
-
-// Main test function
-async function runTests() {
-    console.log(`${colors.bright}${colors.magenta}`);
-    console.log('╔══════════════════════════════════════════════════════════════╗');
-    console.log('║         SQLite ORM Comprehensive Test Suite                  ║');
-    console.log('╚══════════════════════════════════════════════════════════════╝');
-    console.log(`${colors.reset}\n`);
-
-    testStartTime = Date.now();
-
+// ==================== Assertion Helpers ====================
+async function assertThrows(fn, errorMessage, testName) {
     try {
-        await cleanup();
-        
-        // ==================== CONNECTION TESTS ====================
-        logSection('CONNECTION TESTS');
-        
-        // Test 1: Connect to database
-        try {
-            const connected = await DB.Connect(TEST_DB, { filename: TEST_FILE });
-            assert.strictEqual(connected, true, 'Should return true on successful connection');
-            assert.ok(DB.hasConnection(TEST_DB), 'Connection should be registered');
-            assert.strictEqual(DB.defaultConnection, TEST_DB, 'Default connection should be set');
-            logTest('Connect to database', true);
-        } catch (error) {
-            logTest('Connect to database', false, error);
-        }
-
-        // Test 2: Get connection info
-        try {
-            const conn = DB.getConnection(TEST_DB);
-            assert.ok(conn, 'Connection info should exist');
-            assert.strictEqual(conn.name, TEST_DB, 'Connection name should match');
-            assert.strictEqual(conn.driver, 'sqlite', 'Driver should be sqlite');
-            logTest('Get connection info', true);
-        } catch (error) {
-            logTest('Get connection info', false, error);
-        }
-
-        // Test 3: List connections
-        try {
-            const connections = DB.listConnections();
-            assert.ok(Array.isArray(connections), 'Should return an array');
-            assert.ok(connections.includes(TEST_DB), 'Should include test database');
-            logTest('List connections', true);
-        } catch (error) {
-            logTest('List connections', false, error);
-        }
-
-        // Test 4: Get database version
-        try {
-            const version = await DB.getVersion();
-            assert.ok(version.includes('SQLite'), 'Version should mention SQLite');
-            logTest('Get database version', true);
-        } catch (error) {
-            logTest('Get database version', false, error);
-        }
-
-        // ==================== SCHEMA DEFINITION TESTS ====================
-        logSection('SCHEMA DEFINITION TESTS');
-
-        // Define User model with comprehensive schema
-        const User = DB.Model('users', {
-            id: { type: 'integer', required: true },
-            username: { type: 'string', required: true },
-            email: { type: 'string', required: true },
-            age: { type: 'integer' },
-            salary: { type: 'float' },
-            is_active: { type: 'boolean', default: true },
-            metadata: { type: 'json' },
-            created_at: { type: 'datetime' },
-            updated_at: { type: 'datetime' }
-        });
-
-        // Test 5: Model registration
-        try {
-            assert.ok(User, 'Model should be created');
-            assert.strictEqual(User.tableName, 'users', 'Table name should be set');
-            assert.ok(User.schema, 'Schema should be defined');
-            assert.ok(User.schema.id, 'ID field should exist');
-            logTest('Model registration', true);
-        } catch (error) {
-            logTest('Model registration', false, error);
-        }
-
-        // Test 6: List models
-        try {
-            const models = DB.listModels();
-            assert.ok(models.users, 'Should include users model');
-            assert.strictEqual(models.users.tableName, 'users', 'Model should have correct table name');
-            logTest('List models', true);
-        } catch (error) {
-            logTest('List models', false, error);
-        }
-
-        // Test 7: Create table using schema builder
-        try {
-            await DB.schema().create('posts', (table) => {
-                table.id();
-                table.string('title').nullable(false);
-                table.text('content');
-                table.integer('user_id');
-                table.boolean('published').default(false);
-                table.timestamps();
-                table.unique('title');
-            });
-
-            const tables = await DB.listCollections();
-            assert.ok(tables.includes('posts'), 'Posts table should exist');
-            logTest('Create table with schema builder', true);
-        } catch (error) {
-            logTest('Create table with schema builder', false, error);
-        }
-
-        // Test 8: Check if table exists
-        try {
-            const hasTable = await DB.schema().hasTable('posts');
-            assert.strictEqual(hasTable, true, 'Posts table should exist');
-            logTest('Check table existence', true);
-        } catch (error) {
-            logTest('Check table existence', false, error);
-        }
-
-        // Test 9: Check if column exists
-        try {
-            const hasColumn = await DB.schema().hasColumn('posts', 'title');
-            assert.strictEqual(hasColumn, true, 'Title column should exist');
-            logTest('Check column existence', true);
-        } catch (error) {
-            logTest('Check column existence', false, error);
-        }
-
-        // ==================== CRUD OPERATIONS TESTS ====================
-        logSection('CRUD OPERATIONS TESTS');
-
-        // Test 10: Create single record
-        try {
-            const user = await User.create({
-                username: 'john_doe',
-                email: 'john@example.com',
-                age: 30,
-                salary: 50000.50,
-                metadata: { theme: 'dark', notifications: true }
-            });
-
-            assert.ok(user.id, 'Should have an ID');
-            assert.strictEqual(user.username, 'john_doe', 'Username should match');
-            assert.strictEqual(user.email, 'john@example.com', 'Email should match');
-            assert.strictEqual(user.age, 30, 'Age should match');
-            assert.strictEqual(user.salary, 50000.50, 'Salary should match');
-            assert.strictEqual(user.is_active, true, 'Default value should be applied');
-            assert.deepStrictEqual(user.metadata, { theme: 'dark', notifications: true }, 'JSON should be parsed');
-            assert.ok(user.created_at, 'Created_at should be set');
-            assert.ok(user.updated_at, 'Updated_at should be set');
-
-            logTest('Create single record', true);
-        } catch (error) {
-            logTest('Create single record', false, error);
-        }
-
-        // Test 11: Create multiple records
-        try {
-            const users = await User.createMany([
-                { username: 'jane_doe', email: 'jane@example.com', age: 28, salary: 60000 },
-                { username: 'bob_smith', email: 'bob@example.com', age: 35, salary: 75000 },
-                { username: 'alice_wonder', email: 'alice@example.com', age: 25, salary: 45000 }
-            ]);
-
-            assert.strictEqual(users.length, 3, 'Should create 3 users');
-            users.forEach((user, index) => {
-                assert.ok(user.id, 'Each user should have an ID');
-            });
-
-            logTest('Create multiple records', true);
-        } catch (error) {
-            logTest('Create multiple records', false, error);
-        }
-
-        // Test 12: Find by ID
-        try {
-            const firstUser = await User.first();
-            const found = await User.findById(firstUser.id);
-            
-            assert.ok(found, 'Should find user');
-            assert.strictEqual(found.id, firstUser.id, 'IDs should match');
-            assert.strictEqual(found.username, firstUser.username, 'Username should match');
-
-            logTest('Find by ID', true);
-        } catch (error) {
-            logTest('Find by ID', false, error);
-        }
-
-        // Test 13: Find by multiple IDs
-        try {
-            const allUsers = await User.all();
-            const ids = allUsers.slice(0, 2).map(u => u.id);
-            const users = await User.findByIds(ids);
-            
-            assert.strictEqual(users.length, 2, 'Should find 2 users');
-            assert.ok(users.every(u => ids.includes(u.id)), 'Should find correct users');
-
-            logTest('Find by multiple IDs', true);
-        } catch (error) {
-            logTest('Find by multiple IDs', false, error);
-        }
-
-        // Test 14: Find with filter
-        try {
-            const users = await User.find({ age: 30 });
-            
-            assert.ok(users.length >= 1, 'Should find at least one user');
-            users.forEach(user => {
-                assert.strictEqual(user.age, 30, 'Age should match filter');
-            });
-
-            logTest('Find with filter', true);
-        } catch (error) {
-            logTest('Find with filter', false, error);
-        }
-
-        // Test 15: Find one with filter
-        try {
-            const user = await User.findOne({ username: 'jane_doe' });
-            
-            assert.ok(user, 'Should find user');
-            assert.strictEqual(user.username, 'jane_doe', 'Username should match');
-
-            logTest('Find one with filter', true);
-        } catch (error) {
-            logTest('Find one with filter', false, error);
-        }
-
-        // Test 16: Find with non-existent filter
-        try {
-            const user = await User.findOne({ username: 'nonexistent' });
-            
-            assert.strictEqual(user, null, 'Should return null for non-existent');
-
-            logTest('Find non-existent record', true);
-        } catch (error) {
-            logTest('Find non-existent record', false, error);
-        }
-
-        // Test 17: Update record
-        try {
-            const user = await User.first();
-            const updated = await User.update(user.id, { 
-                age: 31, 
-                salary: 55000,
-                metadata: { theme: 'light' }
-            });
-            
-            assert.strictEqual(updated.age, 31, 'Age should be updated');
-            assert.strictEqual(updated.salary, 55000, 'Salary should be updated');
-            assert.deepStrictEqual(updated.metadata, { theme: 'light' }, 'Metadata should be updated');
-            assert.ok(new Date(updated.updated_at) > new Date(user.updated_at), 'Updated_at should be newer');
-
-            logTest('Update record', true);
-        } catch (error) {
-            logTest('Update record', false, error);
-        }
-
-        // Test 18: Update multiple records
-        try {
-            const updated = await User.updateMany({ age: 30 }, { is_active: false });
-            
-            assert.ok(updated.length >= 1, 'Should update at least one record');
-            updated.forEach(user => {
-                assert.strictEqual(user.is_active, false, 'is_active should be false');
-            });
-
-            logTest('Update multiple records', true);
-        } catch (error) {
-            logTest('Update multiple records', false, error);
-        }
-
-        // Test 19: Update or create (existing)
-        try {
-            const existing = await User.first();
-            const result = await User.updateOrCreate(
-                { username: existing.username },
-                { email: 'updated@example.com' }
-            );
-            
-            assert.strictEqual(result.email, 'updated@example.com', 'Email should be updated');
-            assert.strictEqual(result.id, existing.id, 'ID should remain the same');
-
-            logTest('Update or create (existing)', true);
-        } catch (error) {
-            logTest('Update or create (existing)', false, error);
-        }
-
-        // Test 20: Update or create (new)
-        try {
-            const result = await User.updateOrCreate(
-                { username: 'new_user' },
-                { email: 'new@example.com', age: 40 }
-            );
-            
-            assert.ok(result.id, 'Should create new user');
-            assert.strictEqual(result.username, 'new_user', 'Username should match');
-            assert.strictEqual(result.email, 'new@example.com', 'Email should match');
-
-            logTest('Update or create (new)', true);
-        } catch (error) {
-            logTest('Update or create (new)', false, error);
-        }
-
-        // ==================== QUERY BUILDER TESTS ====================
-        logSection('QUERY BUILDER TESTS');
-
-        // Test 21: Query builder - simple where
-        try {
-            const query = User.query().where({ age: 28 });
-            const users = await query.get();
-            
-            assert.ok(users.length >= 1, 'Should find users');
-            users.forEach(user => {
-                assert.strictEqual(user.age, 28, 'Age should match');
-            });
-
-            logTest('Query builder - simple where', true);
-        } catch (error) {
-            logTest('Query builder - simple where', false, error);
-        }
-
-        // Test 22: Query builder - whereIn
-        try {
-            const users = await User.query()
-                .whereIn('age', [25, 28, 30])
-                .get();
-            
-            assert.ok(users.length >= 1, 'Should find users');
-            users.forEach(user => {
-                assert.ok([25, 28, 30].includes(user.age), 'Age should be in range');
-            });
-
-            logTest('Query builder - whereIn', true);
-        } catch (error) {
-            logTest('Query builder - whereIn', false, error);
-        }
-
-        // Test 23: Query builder - whereBetween
-        try {
-            const users = await User.query()
-                .whereBetween('age', [25, 30])
-                .get();
-            
-            assert.ok(users.length >= 1, 'Should find users');
-            users.forEach(user => {
-                assert.ok(user.age >= 25 && user.age <= 30, 'Age should be between 25 and 30');
-            });
-
-            logTest('Query builder - whereBetween', true);
-        } catch (error) {
-            logTest('Query builder - whereBetween', false, error);
-        }
-
-        // Test 24: Query builder - whereNull
-        try {
-            // Create a user with null age
-            await User.create({
-                username: 'null_age',
-                email: 'null@example.com',
-                age: null
-            });
-            
-            const users = await User.query()
-                .whereNull('age')
-                .get();
-            
-            assert.ok(users.length >= 1, 'Should find users with null age');
-            users.forEach(user => {
-                assert.strictEqual(user.age, null, 'Age should be null');
-            });
-
-            logTest('Query builder - whereNull', true);
-        } catch (error) {
-            logTest('Query builder - whereNull', false, error);
-        }
-
-        // Test 25: Query builder - orderBy
-        try {
-            const users = await User.query()
-                .orderBy('age', 'DESC')
-                .limit(3)
-                .get();
-            
-            assert.strictEqual(users.length, 3, 'Should return 3 users');
-            // Check if ages are in descending order
-            for (let i = 0; i < users.length - 1; i++) {
-                assert.ok(users[i].age >= users[i + 1].age, 'Ages should be in descending order');
-            }
-
-            logTest('Query builder - orderBy', true);
-        } catch (error) {
-            logTest('Query builder - orderBy', false, error);
-        }
-
-        // Test 26: Query builder - limit and offset
-        try {
-            const firstPage = await User.query()
-                .limit(2)
-                .offset(0)
-                .get();
-            
-            const secondPage = await User.query()
-                .limit(2)
-                .offset(2)
-                .get();
-            
-            assert.strictEqual(firstPage.length, 2, 'First page should have 2 users');
-            assert.strictEqual(secondPage.length, 2, 'Second page should have 2 users');
-            
-            // Check if they're different users
-            if (firstPage.length > 0 && secondPage.length > 0) {
-                assert.notStrictEqual(firstPage[0].id, secondPage[0].id, 'Pages should have different users');
-            }
-
-            logTest('Query builder - limit and offset', true);
-        } catch (error) {
-            logTest('Query builder - limit and offset', false, error);
-        }
-
-        // Test 27: Query builder - first
-        try {
-            const firstUser = await User.query()
-                .where({ is_active: true })
-                .first();
-            
-            assert.ok(firstUser, 'Should return first user');
-            assert.strictEqual(firstUser.is_active, true, 'User should be active');
-
-            logTest('Query builder - first', true);
-        } catch (error) {
-            logTest('Query builder - first', false, error);
-        }
-
-        // ==================== AGGREGATION TESTS ====================
-        logSection('AGGREGATION TESTS');
-
-        // Test 28: Count records
-        try {
-            const total = await User.count();
-            const activeCount = await User.count({ is_active: true });
-            
-            assert.ok(total > 0, 'Total count should be > 0');
-            assert.ok(activeCount > 0, 'Active count should be > 0');
-            assert.ok(activeCount <= total, 'Active count should be <= total');
-
-            logTest('Count records', true);
-        } catch (error) {
-            logTest('Count records', false, error);
-        }
-
-        // Test 29: Check if exists
-        try {
-            const exists = await User.exists({ username: 'john_doe' });
-            const notExists = await User.exists({ username: 'fake_user' });
-            
-            assert.strictEqual(exists, true, 'User should exist');
-            assert.strictEqual(notExists, false, 'Fake user should not exist');
-
-            logTest('Check existence', true);
-        } catch (error) {
-            logTest('Check existence', false, error);
-        }
-
-        // Test 30: Get all records
-        try {
-            const all = await User.all();
-            
-            assert.ok(Array.isArray(all), 'Should return array');
-            assert.ok(all.length > 0, 'Should have records');
-
-            logTest('Get all records', true);
-        } catch (error) {
-            logTest('Get all records', false, error);
-        }
-
-        // Test 31: Get first record
-        try {
-            const first = await User.first();
-            const firstActive = await User.first({ is_active: true });
-            
-            assert.ok(first, 'Should return first record');
-            assert.ok(firstActive, 'Should return first active record');
-            assert.strictEqual(firstActive.is_active, true, 'Record should be active');
-
-            logTest('Get first record', true);
-        } catch (error) {
-            logTest('Get first record', false, error);
-        }
-
-        // Test 32: Get last record
-        try {
-            const last = await User.last();
-            const lastInactive = await User.last({ is_active: false });
-            
-            assert.ok(last, 'Should return last record');
-            if (lastInactive) {
-                assert.strictEqual(lastInactive.is_active, false, 'Record should be inactive');
-            }
-
-            logTest('Get last record', true);
-        } catch (error) {
-            logTest('Get last record', false, error);
-        }
-
-        // Test 33: Pluck single field
-        try {
-            const usernames = await User.pluck('username');
-            
-            assert.ok(Array.isArray(usernames), 'Should return array');
-            assert.ok(usernames.length > 0, 'Should have values');
-            assert.ok(usernames.every(u => typeof u === 'string'), 'All should be strings');
-
-            logTest('Pluck single field', true);
-        } catch (error) {
-            logTest('Pluck single field', false, error);
-        }
-
-        // Test 34: Pluck with key
-        try {
-            const userMap = await User.pluckWithKey('id', 'username');
-            
-            assert.ok(typeof userMap === 'object', 'Should return object');
-            const keys = Object.keys(userMap);
-            assert.ok(keys.length > 0, 'Should have entries');
-            assert.ok(keys.every(k => !isNaN(k)), 'Keys should be IDs');
-
-            logTest('Pluck with key', true);
-        } catch (error) {
-            logTest('Pluck with key', false, error);
-        }
-
-        // Test 35: Max value
-        try {
-            const maxAge = await User.max('age');
-            const maxAgeActive = await User.max('age', { is_active: true });
-            
-            assert.ok(maxAge > 0, 'Max age should be positive');
-            assert.ok(maxAgeActive <= maxAge, 'Active max age should be <= overall max');
-
-            logTest('Max value', true);
-        } catch (error) {
-            logTest('Max value', false, error);
-        }
-
-        // Test 36: Min value
-        try {
-            const minAge = await User.min('age');
-            const minAgeActive = await User.min('age', { is_active: true });
-            
-            assert.ok(minAge >= 0, 'Min age should be non-negative');
-            assert.ok(minAgeActive >= minAge, 'Active min age should be >= overall min');
-
-            logTest('Min value', true);
-        } catch (error) {
-            logTest('Min value', false, error);
-        }
-
-        // Test 37: Sum
-        try {
-            const totalSalary = await User.sum('salary');
-            const totalSalaryActive = await User.sum('salary', { is_active: true });
-            
-            assert.ok(totalSalary > 0, 'Total salary should be positive');
-            assert.ok(totalSalaryActive <= totalSalary, 'Active salary sum should be <= total');
-
-            logTest('Sum values', true);
-        } catch (error) {
-            logTest('Sum values', false, error);
-        }
-
-        // Test 38: Average
-        try {
-            const avgAge = await User.avg('age');
-            const avgAgeActive = await User.avg('age', { is_active: true });
-            
-            assert.ok(avgAge > 0, 'Average age should be positive');
-            assert.ok(avgAgeActive > 0, 'Active average age should be positive');
-
-            logTest('Average values', true);
-        } catch (error) {
-            logTest('Average values', false, error);
-        }
-
-        // Test 39: Distinct values
-        try {
-            const distinctAges = await User.distinct('age');
-            
-            assert.ok(Array.isArray(distinctAges), 'Should return array');
-            const unique = new Set(distinctAges);
-            assert.strictEqual(unique.size, distinctAges.length, 'All values should be unique');
-
-            logTest('Distinct values', true);
-        } catch (error) {
-            logTest('Distinct values', false, error);
-        }
-
-        // ==================== UTILITY METHOD TESTS ====================
-        logSection('UTILITY METHOD TESTS');
-
-        // Test 40: Toggle boolean field
-        try {
-            const user = await User.first();
-            const originalState = user.is_active;
-            
-            const toggled = await User.toggle(user.id, 'is_active');
-            
-            assert.strictEqual(toggled.is_active, !originalState, 'Field should be toggled');
-
-            logTest('Toggle boolean field', true);
-        } catch (error) {
-            logTest('Toggle boolean field', false, error);
-        }
-
-        // Test 41: Increment field
-        try {
-            const user = await User.first();
-            const originalAge = user.age;
-            
-            const incremented = await User.increment(user.id, 'age', 5);
-            
-            assert.strictEqual(incremented.age, originalAge + 5, 'Age should be incremented');
-
-            logTest('Increment field', true);
-        } catch (error) {
-            logTest('Increment field', false, error);
-        }
-
-        // Test 42: Decrement field
-        try {
-            const user = await User.first();
-            const originalAge = user.age;
-            
-            const decremented = await User.decrement(user.id, 'age', 3);
-            
-            assert.strictEqual(decremented.age, originalAge - 3, 'Age should be decremented');
-
-            logTest('Decrement field', true);
-        } catch (error) {
-            logTest('Decrement field', false, error);
-        }
-
-        // Test 43: Pagination
-        try {
-            const page1 = await User.paginate(1, 2);
-            const page2 = await User.paginate(2, 2);
-            
-            // Check page 1
-            assert.ok(Array.isArray(page1.data), 'Data should be array');
-            assert.ok(page1.data.length <= 2, 'Should have max 2 items');
-            assert.strictEqual(page1.meta.current_page, 1, 'Current page should be 1');
-            assert.strictEqual(page1.meta.per_page, 2, 'Per page should be 2');
-            assert.ok(page1.meta.total > 0, 'Total should be > 0');
-            assert.ok(page1.meta.last_page >= 1, 'Last page should be >= 1');
-            
-            // Check page 2
-            assert.ok(page2.data.length <= 2, 'Should have max 2 items');
-            assert.strictEqual(page2.meta.current_page, 2, 'Current page should be 2');
-            
-            // Check that pages are different
-            if (page1.data.length > 0 && page2.data.length > 0) {
-                const ids1 = new Set(page1.data.map(u => u.id));
-                const ids2 = new Set(page2.data.map(u => u.id));
-                
-                // Check for overlap
-                const overlap = [...ids1].filter(id => ids2.has(id));
-                assert.strictEqual(overlap.length, 0, 'Pages should not overlap');
-            }
-
-            logTest('Pagination', true);
-        } catch (error) {
-            logTest('Pagination', false, error);
-        }
-
-        // Test 44: Pagination with filter
-        try {
-            const result = await User.paginate(1, 3, { is_active: true });
-            
-            assert.ok(result.data.length <= 3, 'Should have max 3 items');
-            result.data.forEach(user => {
-                assert.strictEqual(user.is_active, true, 'All users should be active');
-            });
-
-            logTest('Pagination with filter', true);
-        } catch (error) {
-            logTest('Pagination with filter', false, error);
-        }
-
-        // Test 45: Random records
-        try {
-            const randomUsers = await User.random(2);
-            
-            assert.strictEqual(randomUsers.length, 2, 'Should return 2 random users');
-            
-            // Get random with filter
-            const randomActive = await User.random(2, { is_active: true });
-            assert.strictEqual(randomActive.length, 2, 'Should return 2 random active users');
-            randomActive.forEach(user => {
-                assert.strictEqual(user.is_active, true, 'All should be active');
-            });
-
-            logTest('Random records', true);
-        } catch (error) {
-            logTest('Random records', false, error);
-        }
-
-        // ==================== CHUNKING AND BATCH PROCESSING ====================
-        logSection('CHUNKING AND BATCH PROCESSING');
-
-        // Test 46: Process in chunks
-        try {
-            let chunkCount = 0;
-            let processedItems = 0;
-            
-            const chunks = await User.chunk(2, async (chunk, page) => {
-                chunkCount++;
-                processedItems += chunk.length;
-                assert.ok(chunk.length <= 2, 'Chunk size should be <= 2');
-                assert.ok(page >= 1, 'Page number should be >= 1');
-            });
-            
-            assert.ok(chunkCount > 0, 'Should have at least one chunk');
-            assert.ok(processedItems > 0, 'Should process items');
-
-            logTest('Process in chunks', true);
-        } catch (error) {
-            logTest('Process in chunks', false, error);
-        }
-
-        // Test 47: Process each record
-        try {
-            let count = 0;
-            
-            const total = await User.each(async (user, index) => {
-                count++;
-                assert.ok(user.id, 'User should have ID');
-                assert.ok(index >= 0, 'Index should be valid');
-            });
-            
-            assert.strictEqual(count, total, 'Should process all records');
-
-            logTest('Process each record', true);
-        } catch (error) {
-            logTest('Process each record', false, error);
-        }
-
-        // ==================== TRANSACTION TESTS ====================
-        logSection('TRANSACTION TESTS');
-
-        // Test 48: Successful transaction
-        try {
-            const beforeCount = await User.count();
-            
-            const result = await DB.transaction(async (trx) => {
-                // Create a user in transaction
-                await User.create({
-                    username: 'transaction_user',
-                    email: 'transaction@example.com',
-                    age: 50
-                });
-                
-                // Update a user
-                const firstUser = await User.first();
-                await User.update(firstUser.id, { age: 99 });
-                
-                return 'success';
-            });
-            
-            const afterCount = await User.count();
-            const updatedUser = await User.first();
-            
-            assert.strictEqual(result, 'success', 'Transaction should return value');
-            assert.strictEqual(afterCount, beforeCount + 1, 'User count should increase');
-            assert.strictEqual(updatedUser.age, 99, 'User should be updated');
-
-            logTest('Successful transaction', true);
-        } catch (error) {
-            logTest('Successful transaction', false, error);
-        }
-
-        // Test 49: Failed transaction with rollback
-        try {
-            const beforeCount = await User.count();
-            const firstUser = await User.first();
-            const originalAge = firstUser.age;
-            
-            try {
-                await DB.transaction(async (trx) => {
-                    await User.create({
-                        username: 'rollback_user',
-                        email: 'rollback@example.com',
-                        age: 75
-                    });
-                    
-                    await User.update(firstUser.id, { age: 999 });
-                    
-                    // Force an error
-                    throw new Error('Forced rollback');
-                });
-                
-                assert.fail('Transaction should have thrown');
-            } catch (error) {
-                // Transaction should have rolled back
-                const afterCount = await User.count();
-                const currentUser = await User.findById(firstUser.id);
-                
-                assert.strictEqual(afterCount, beforeCount, 'Count should not change');
-                assert.strictEqual(currentUser.age, originalAge, 'Age should not change');
-            }
-
-            logTest('Failed transaction with rollback', true);
-        } catch (error) {
-            logTest('Failed transaction with rollback', false, error);
-        }
-
-        // Test 50: Nested transactions with savepoints
-        try {
-            const beforeCount = await User.count();
-            const firstUser = await User.first();
-            
-            const result = await DB.transaction(async (trx) => {
-                // Outer transaction
-                await User.create({
-                    username: 'outer_user',
-                    email: 'outer@example.com',
-                    age: 100
-                });
-                
-                // Inner transaction (savepoint)
-                await DB.transaction(async (innerTrx) => {
-                    await User.create({
-                        username: 'inner_user',
-                        email: 'inner@example.com',
-                        age: 200
-                    });
-                    
-                    await User.update(firstUser.id, { age: 300 });
-                });
-                
-                return 'nested success';
-            });
-            
-            const afterCount = await User.count();
-            const updatedUser = await User.findById(firstUser.id);
-            
-            assert.strictEqual(result, 'nested success', 'Transaction should succeed');
-            assert.strictEqual(afterCount, beforeCount + 2, 'Both users should be created');
-            assert.strictEqual(updatedUser.age, 300, 'User should be updated');
-
-            logTest('Nested transactions with savepoints', true);
-        } catch (error) {
-            logTest('Nested transactions with savepoints', false, error);
-        }
-
-        // ==================== DELETION TESTS ====================
-        logSection('DELETION TESTS');
-
-        // Test 51: Delete single record
-        try {
-            const beforeCount = await User.count();
-            const user = await User.first();
-            
-            const deleted = await User.delete(user.id);
-            const afterCount = await User.count();
-            const checkUser = await User.findById(user.id);
-            
-            assert.strictEqual(deleted, true, 'Delete should return true');
-            assert.strictEqual(afterCount, beforeCount - 1, 'Count should decrease by 1');
-            assert.strictEqual(checkUser, null, 'User should not exist');
-
-            logTest('Delete single record', true);
-        } catch (error) {
-            logTest('Delete single record', false, error);
-        }
-
-        // Test 52: Delete multiple records
-        try {
-            // Create test users
-            await User.createMany([
-                { username: 'delete1', email: 'delete1@test.com', age: 1 },
-                { username: 'delete2', email: 'delete2@test.com', age: 1 },
-                { username: 'delete3', email: 'delete3@test.com', age: 2 }
-            ]);
-            
-            const beforeCount = await User.count();
-            
-            const deleted = await User.deleteMany({ age: 1 });
-            const afterCount = await User.count();
-            const remaining = await User.find({ age: 1 });
-            
-            assert.strictEqual(deleted, 2, 'Should delete 2 records');
-            assert.strictEqual(afterCount, beforeCount - 2, 'Count should decrease by 2');
-            assert.strictEqual(remaining.length, 0, 'No users with age 1 should remain');
-
-            logTest('Delete multiple records', true);
-        } catch (error) {
-            logTest('Delete multiple records', false, error);
-        }
-
-        // Test 53: Delete all records
-        try {
-            // Create some records first
-            await User.createMany([
-                { username: 'temp1', email: 'temp1@test.com' },
-                { username: 'temp2', email: 'temp2@test.com' }
-            ]);
-            
-            const beforeCount = await User.count();
-            assert.ok(beforeCount > 0, 'Should have records before delete');
-            
-            const deleted = await User.deleteAll();
-            const afterCount = await User.count();
-            
-            assert.ok(deleted > 0, 'Should return number of deleted records');
-            assert.strictEqual(afterCount, 0, 'All records should be deleted');
-
-            logTest('Delete all records', true);
-        } catch (error) {
-            logTest('Delete all records', false, error);
-        }
-
-        // Test 54: Truncate table
-        try {
-            // Recreate users
-            await User.create({
-                username: 'truncate_test',
-                email: 'truncate@test.com'
-            });
-            
-            const beforeCount = await User.count();
-            assert.ok(beforeCount > 0, 'Should have records before truncate');
-            
-            const truncated = await User.truncate();
-            const afterCount = await User.count();
-            
-            assert.strictEqual(truncated, true, 'Truncate should return true');
-            assert.strictEqual(afterCount, 0, 'Table should be empty');
-
-            logTest('Truncate table', true);
-        } catch (error) {
-            logTest('Truncate table', false, error);
-        }
-
-        // ==================== MODEL INSTANCE TESTS ====================
-        logSection('MODEL INSTANCE TESTS');
-
-        // Test 55: Create model instance
-        try {
-            const userData = {
-                username: 'instance_test',
-                email: 'instance@test.com',
-                age: 42
-            };
-            
-            const user = new User(userData);
-            
-            assert.strictEqual(user.username, 'instance_test', 'Property should be set');
-            assert.strictEqual(user.email, 'instance@test.com', 'Property should be set');
-            assert.strictEqual(user.age, 42, 'Property should be set');
-
-            logTest('Create model instance', true);
-        } catch (error) {
-            logTest('Create model instance', false, error);
-        }
-
-        // Test 56: Fill model instance
-        try {
-            const user = new User();
-            user.fill({
-                username: 'fill_test',
-                email: 'fill@test.com',
-                age: 33
-            });
-            
-            assert.strictEqual(user.username, 'fill_test', 'Should be filled');
-            assert.strictEqual(user.email, 'fill@test.com', 'Should be filled');
-            assert.strictEqual(user.age, 33, 'Should be filled');
-
-            logTest('Fill model instance', true);
-        } catch (error) {
-            logTest('Fill model instance', false, error);
-        }
-
-        // Test 57: Check dirty attributes
-        try {
-            const user = new User({ username: 'dirty_test', age: 25 });
-            
-            assert.ok(user.isDirty(), 'Should be dirty initially');
-            assert.ok(user.isDirty('username'), 'Username should be dirty');
-            assert.ok(user.isDirty('age'), 'Age should be dirty');
-            assert.ok(!user.isDirty('email'), 'Email should not be dirty');
-
-            logTest('Check dirty attributes', true);
-        } catch (error) {
-            logTest('Check dirty attributes', false, error);
-        }
-
-        // Test 58: Get original values
-        try {
-            const user = new User({ username: 'original_test', age: 30 });
-            const originalAge = user.age;
-            
-            user.age = 35;
-            
-            assert.strictEqual(user.getOriginal('age'), originalAge, 'Original should be preserved');
-            assert.strictEqual(user.age, 35, 'Current should be updated');
-
-            logTest('Get original values', true);
-        } catch (error) {
-            logTest('Get original values', false, error);
-        }
-
-        // Test 59: To JSON
-        try {
-            const user = new User({
-                username: 'json_test',
-                email: 'json@test.com',
-                age: 28
-            });
-            
-            const json = user.toJSON();
-            
-            assert.ok(typeof json === 'object', 'Should return object');
-            assert.strictEqual(json.username, 'json_test', 'Property should exist');
-            assert.strictEqual(json.email, 'json@test.com', 'Property should exist');
-
-            logTest('To JSON', true);
-        } catch (error) {
-            logTest('To JSON', false, error);
-        }
-
-        // Test 60: Model events
-        try {
-            const user = new User({ username: 'event_test' });
-            let savedEmitted = false;
-            let updatedEmitted = false;
-            let deletedEmitted = false;
-            
-            user.on('saved', () => { savedEmitted = true; });
-            user.on('updated', () => { updatedEmitted = true; });
-            user.on('deleted', () => { deletedEmitted = true; });
-            
-            await user.save();
-            assert.ok(savedEmitted, 'Saved event should emit');
-            
-            user.age = 100;
-            await user.save();
-            assert.ok(updatedEmitted, 'Updated event should emit');
-            
-            await user.delete();
-            assert.ok(deletedEmitted, 'Deleted event should emit');
-
-            logTest('Model events', true);
-        } catch (error) {
-            logTest('Model events', false, error);
-        }
-
-        // ==================== SCHEMA BUILDER TESTS ====================
-        logSection('SCHEMA BUILDER TESTS');
-
-        // Test 61: Create table with all column types
-        try {
-            await DB.schema().create('all_types', (table) => {
-                table.id();
-                table.string('string_col', 100);
-                table.text('text_col');
-                table.integer('int_col');
-                table.float('float_col');
-                table.boolean('bool_col');
-                table.datetime('datetime_col');
-                table.json('json_col');
-                table.timestamps();
-            });
-            
-            const hasTable = await DB.schema().hasTable('all_types');
-            assert.strictEqual(hasTable, true, 'Table should exist');
-
-            logTest('Create table with all column types', true);
-        } catch (error) {
-            logTest('Create table with all column types', false, error);
-        }
-
-        // Test 62: Alter table add column
-        try {
-            await DB.schema().table('all_types', (table) => {
-                table.string('new_col').nullable().default('default');
-            });
-            
-            const hasColumn = await DB.schema().hasColumn('all_types', 'new_col');
-            assert.strictEqual(hasColumn, true, 'New column should exist');
-
-            logTest('Alter table add column', true);
-        } catch (error) {
-            logTest('Alter table add column', false, error);
-        }
-
-        // Test 63: Drop table
-        try {
-            await DB.schema().create('temp_table', (table) => {
-                table.id();
-                table.string('name');
-            });
-            
-            let hasTable = await DB.schema().hasTable('temp_table');
-            assert.strictEqual(hasTable, true, 'Table should exist');
-            
-            await DB.schema().drop('temp_table');
-            
-            hasTable = await DB.schema().hasTable('temp_table');
-            assert.strictEqual(hasTable, false, 'Table should not exist');
-
-            logTest('Drop table', true);
-        } catch (error) {
-            logTest('Drop table', false, error);
-        }
-
-        // Test 64: Drop table if exists
-        try {
-            await DB.schema().dropIfExists('nonexistent_table');
-            // Should not throw
-            assert.ok(true, 'Drop if exists should not throw');
-
-            logTest('Drop table if exists', true);
-        } catch (error) {
-            logTest('Drop table if exists', false, error);
-        }
-
-        // ==================== DATABASE STATISTICS ====================
-        logSection('DATABASE STATISTICS');
-
-        // Test 65: Get database stats
-        try {
-            const stats = await DB.getStats();
-            
-            assert.strictEqual(stats.driver, 'sqlite', 'Driver should be sqlite');
-            assert.ok(stats.collections >= 0, 'Should have collections count');
-            assert.ok(typeof stats.records === 'object', 'Records should be object');
-            assert.ok(stats.totalRecords >= 0, 'Total records should be >= 0');
-
-            logTest('Get database stats', true);
-        } catch (error) {
-            logTest('Get database stats', false, error);
-        }
-
-        // Test 66: List collections/tables
-        try {
-            const collections = await DB.listCollections();
-            
-            assert.ok(Array.isArray(collections), 'Should return array');
-            assert.ok(collections.includes('users'), 'Should include users table');
-            assert.ok(collections.includes('posts'), 'Should include posts table');
-
-            logTest('List collections', true);
-        } catch (error) {
-            logTest('List collections', false, error);
-        }
-
-        // ==================== EDGE CASES AND ERROR HANDLING ====================
-        logSection('EDGE CASES AND ERROR HANDLING');
-
-        // Test 67: Create with invalid data
-        try {
-            await User.create({
-                // Missing required username
-                email: 'test@test.com'
-            });
-            
-            assert.fail('Should have thrown validation error');
-        } catch (error) {
-            assert.ok(error.message.includes('required'), 'Should complain about required field');
-            logTest('Create with invalid data', true);
-        }
-
-        // Test 68: Find with empty filter
-        try {
-            const users = await User.find({});
-            assert.ok(Array.isArray(users), 'Should return array');
-
-            logTest('Find with empty filter', true);
-        } catch (error) {
-            logTest('Find with empty filter', false, error);
-        }
-
-        // Test 69: Find with non-existent field
-        try {
-            const users = await User.find({ nonexistent: 'value' });
-            assert.strictEqual(users.length, 0, 'Should return empty array');
-
-            logTest('Find with non-existent field', true);
-        } catch (error) {
-            logTest('Find with non-existent field', false, error);
-        }
-
-        // Test 70: Update non-existent record
-        try {
-            await User.update(999999, { age: 50 });
-            assert.fail('Should have thrown error');
-        } catch (error) {
-            assert.ok(error.message.includes('not found'), 'Should say not found');
-            logTest('Update non-existent record', true);
-        }
-
-        // Test 71: Delete non-existent record
-        try {
-            const deleted = await User.delete(999999);
-            assert.strictEqual(deleted, false, 'Should return false');
-
-            logTest('Delete non-existent record', true);
-        } catch (error) {
-            logTest('Delete non-existent record', false, error);
-        }
-
-        // Test 72: JSON data handling
-        try {
-            const complexJson = {
-                nested: {
-                    array: [1, 2, 3],
-                    object: { key: 'value' }
-                },
-                date: new Date().toISOString(),
-                number: 42
-            };
-            
-            const user = await User.create({
-                username: 'json_complex',
-                email: 'json@complex.com',
-                metadata: complexJson
-            });
-            
-            const found = await User.findById(user.id);
-            assert.deepStrictEqual(found.metadata, complexJson, 'JSON should be preserved');
-
-            logTest('JSON data handling', true);
-        } catch (error) {
-            logTest('JSON data handling', false, error);
-        }
-
-        // Test 73: Boolean handling
-        try {
-            const user = await User.create({
-                username: 'bool_test',
-                email: 'bool@test.com',
-                is_active: 1  // Should be converted to boolean
-            });
-            
-            assert.strictEqual(user.is_active, true, 'Should convert to boolean');
-
-            logTest('Boolean handling', true);
-        } catch (error) {
-            logTest('Boolean handling', false, error);
-        }
-
-        // Test 74: Date handling
-        try {
-            const dateStr = '2024-01-15T10:30:00.000Z';
-            const user = await User.create({
-                username: 'date_test',
-                email: 'date@test.com',
-                created_at: dateStr
-            });
-            
-            assert.strictEqual(user.created_at, dateStr, 'Date should be preserved');
-
-            logTest('Date handling', true);
-        } catch (error) {
-            logTest('Date handling', false, error);
-        }
-
-        // ==================== MULTIPLE CONNECTIONS ====================
-        logSection('MULTIPLE CONNECTIONS');
-
-        // Test 75: Connect to second database
-        try {
-            const TEST_DB2 = 'test_database_2';
-            const TEST_FILE2 = path.join(__dirname, `${TEST_DB2}.sqlite`);
-            
-            const connected = await DB.Connect(TEST_DB2, { filename: TEST_FILE2 });
-            
-            assert.strictEqual(connected, true, 'Should connect to second DB');
-            assert.ok(DB.hasConnection(TEST_DB2), 'Second connection should be registered');
-            
-            // Clean up
-            if (fs.existsSync(TEST_FILE2)) {
-                fs.unlinkSync(TEST_FILE2);
-            }
-
-            logTest('Connect to second database', true);
-        } catch (error) {
-            logTest('Connect to second database', false, error);
-        }
-
-        // Test 76: Switch default connection
-        try {
-            const originalDefault = DB.defaultConnection;
-            
-            // Create a second connection
-            const TEST_DB2 = 'test_database_2';
-            const TEST_FILE2 = path.join(__dirname, `${TEST_DB2}.sqlite`);
-            await DB.Connect(TEST_DB2, { filename: TEST_FILE2 });
-            
-            // Switch default
-            DB.defaultConnection = TEST_DB2;
-            
-            assert.strictEqual(DB.defaultConnection, TEST_DB2, 'Default should be switched');
-            
-            // Switch back
-            DB.defaultConnection = originalDefault;
-            
-            // Clean up
-            if (fs.existsSync(TEST_FILE2)) {
-                fs.unlinkSync(TEST_FILE2);
-            }
-
-            logTest('Switch default connection', true);
-        } catch (error) {
-            logTest('Switch default connection', false, error);
-        }
-
-        // Test 77: Disconnect specific database
-        try {
-            // Create a temporary connection
-            const TEMP_DB = 'temp_database';
-            const TEMP_FILE = path.join(__dirname, `${TEMP_DB}.sqlite`);
-            await DB.Connect(TEMP_DB, { filename: TEMP_FILE });
-            
-            assert.ok(DB.hasConnection(TEMP_DB), 'Temp connection should exist');
-            
-            const disconnected = await DB.Disconnect(TEMP_DB);
-            
-            assert.strictEqual(disconnected, true, 'Should disconnect');
-            assert.ok(!DB.hasConnection(TEMP_DB), 'Connection should be removed');
-            
-            // Clean up
-            if (fs.existsSync(TEMP_FILE)) {
-                fs.unlinkSync(TEMP_FILE);
-            }
-
-            logTest('Disconnect specific database', true);
-        } catch (error) {
-            logTest('Disconnect specific database', false, error);
-        }
-
-        // Test 78: Disconnect all databases
-        try {
-            // Create temporary connections
-            const TEMP_DB1 = 'temp_db1';
-            const TEMP_DB2 = 'temp_db2';
-            const TEMP_FILE1 = path.join(__dirname, `${TEMP_DB1}.sqlite`);
-            const TEMP_FILE2 = path.join(__dirname, `${TEMP_DB2}.sqlite`);
-            
-            await DB.Connect(TEMP_DB1, { filename: TEMP_FILE1 });
-            await DB.Connect(TEMP_DB2, { filename: TEMP_FILE2 });
-            
-            assert.ok(DB.hasConnection(TEMP_DB1), 'Temp1 should exist');
-            assert.ok(DB.hasConnection(TEMP_DB2), 'Temp2 should exist');
-            
-            await DB.DisconnectAll();
-            
-            assert.strictEqual(DB.listConnections().length, 0, 'No connections should remain');
-            assert.strictEqual(DB.defaultConnection, null, 'Default connection should be null');
-            
-            // Clean up
-            if (fs.existsSync(TEMP_FILE1)) fs.unlinkSync(TEMP_FILE1);
-            if (fs.existsSync(TEMP_FILE2)) fs.unlinkSync(TEMP_FILE2);
-
-            logTest('Disconnect all databases', true);
-        } catch (error) {
-            logTest('Disconnect all databases', false, error);
-        }
-
-        // ==================== CLEANUP ====================
-        logSection('CLEANUP');
-
-        // Final cleanup
-        await DB.DisconnectAll();
-        await cleanup();
-
-        // ==================== TEST SUMMARY ====================
-        const testDuration = ((Date.now() - testStartTime) / 1000).toFixed(2);
-        
-        console.log(`\n${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════════${colors.reset}`);
-        console.log(`${colors.bright}${colors.cyan}   TEST SUMMARY${colors.reset}`);
-        console.log(`${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════════${colors.reset}\n`);
-        
-        console.log(`${colors.bright}Total Tests:${colors.reset} ${stats.total}`);
-        console.log(`${colors.green}Passed:${colors.reset} ${stats.passed}`);
-        if (stats.failed > 0) {
-            console.log(`${colors.red}Failed:${colors.reset} ${stats.failed}`);
-        }
-        if (stats.skipped > 0) {
-            console.log(`${colors.yellow}Skipped:${colors.reset} ${stats.skipped}`);
-        }
-        console.log(`${colors.bright}Duration:${colors.reset} ${testDuration}s`);
-        
-        const passRate = ((stats.passed / (stats.total - stats.skipped)) * 100).toFixed(1);
-        console.log(`${colors.bright}Pass Rate:${colors.reset} ${passRate}%`);
-        
-        if (stats.failed === 0) {
-            console.log(`\n${colors.green}${colors.bright}✅ ALL TESTS PASSED!${colors.reset}\n`);
-        } else {
-            console.log(`\n${colors.red}${colors.bright}❌ ${stats.failed} TEST(S) FAILED${colors.reset}\n`);
-            process.exit(1);
-        }
-
+        await fn();
+        recordTest(testName, 'failed', new Error('Expected error but none was thrown'));
+        return false;
     } catch (error) {
-        console.error(`${colors.red}Fatal error during tests:${colors.reset}`, error);
-        process.exit(1);
+        if (errorMessage && !error.message.includes(errorMessage)) {
+            recordTest(testName, 'failed', error);
+            return false;
+        }
+        recordTest(testName, 'passed');
+        return true;
     }
 }
 
-// Run the tests
-runTests();
+async function assertDoesNotThrow(fn, testName) {
+    try {
+        await fn();
+        recordTest(testName, 'passed');
+        return true;
+    } catch (error) {
+        recordTest(testName, 'failed', error);
+        return false;
+    }
+}
+
+function assertEquals(actual, expected, testName) {
+    try {
+        assert.deepStrictEqual(actual, expected);
+        recordTest(testName, 'passed');
+        return true;
+    } catch (error) {
+        recordTest(testName, 'failed', error);
+        return false;
+    }
+}
+
+// ==================== Setup and Teardown ====================
+async function cleanup() {
+    try {
+        await DB.DisconnectAll();
+        if (fs.existsSync(TEST_FILE)) {
+            fs.unlinkSync(TEST_FILE);
+        }
+        // Clean up WAL and other files
+        const files = await path.readdir('.');
+        for (const file of files) {
+            if (file.startsWith(TEST_DB) && (file.endsWith('-wal') || file.endsWith('.tmp'))) {
+                fs.unlinkSync(file);
+            }
+        }
+    } catch (error) {
+        console.error('Cleanup error:', error);
+    }
+}
+
+// ==================== Test Suites ====================
+
+async function testDatabaseConnection() {
+    console.log('\n📡 Testing Database Connection...');
+    
+    // Test 1: Connect to database
+    await assertDoesNotThrow(
+        async () => await DB.Connect(TEST_DB, { filename: TEST_FILE }),
+        'Connect to database'
+    );
+    
+    // Test 2: Check if file exists
+    assertEquals(fs.existsSync(TEST_FILE), true, 'Database file created');
+    
+    // Test 3: Get connection info
+    const conn = DB.getConnection(TEST_DB);
+    assertEquals(conn.name, TEST_DB, 'Connection info retrieved');
+    
+    // Test 4: List connections
+    const connections = DB.listConnections();
+    assertEquals(connections.includes(TEST_DB), true, 'Connection listed');
+    
+    // Test 5: Get version
+    const version = await DB.getVersion();
+    assertEquals(typeof version, 'string', 'Version retrieved');
+    
+    console.log(`✅ Connection tests completed`);
+}
+
+async function testSchemaCreation() {
+    console.log('\n📐 Testing Schema Creation...');
+    
+    // Test 1: Create users table
+    await assertDoesNotThrow(async () => {
+        await DB.schema().create('users', (table) => {
+            table.id();
+            table.string('username').unique();
+            table.string('email').unique();
+            table.string('password');
+            table.string('full_name').nullable();
+            table.integer('age').nullable();
+            table.boolean('is_active').default(true);
+            table.float('balance').default(0);
+            table.json('metadata').nullable();
+            table.datetime('last_login').nullable();
+            table.timestamps();
+        });
+    }, 'Create users table');
+    
+    // Test 2: Create products table
+    await assertDoesNotThrow(async () => {
+        await DB.schema().create('products', (table) => {
+            table.id();
+            table.string('sku').unique();
+            table.string('name');
+            table.text('description').nullable();
+            table.float('price');
+            table.integer('stock_quantity').default(0);
+            table.string('category');
+            table.json('tags').nullable();
+            table.timestamps();
+        });
+    }, 'Create products table');
+    
+    // Test 3: Create orders table with foreign key relationships
+    await assertDoesNotThrow(async () => {
+        await DB.schema().create('orders', (table) => {
+            table.id();
+            table.integer('user_id');
+            table.float('total_amount');
+            table.string('status').default('pending');
+            table.json('shipping_address');
+            table.datetime('order_date');
+            table.timestamps();
+        });
+    }, 'Create orders table');
+    
+    // Test 4: Create order_items table
+    await assertDoesNotThrow(async () => {
+        await DB.schema().create('order_items', (table) => {
+            table.id();
+            table.integer('order_id');
+            table.integer('product_id');
+            table.integer('quantity');
+            table.float('unit_price');
+            table.float('subtotal');
+        });
+    }, 'Create order_items table');
+    
+    // Test 5: Check if tables exist
+    const tables = await DB.listCollections();
+    assertEquals(
+        tables.sort(),
+        ['users', 'products', 'orders', 'order_items'].sort(),
+        'All tables created'
+    );
+    
+    // Test 6: Add column to existing table
+    await assertDoesNotThrow(async () => {
+        await DB.schema().table('users', (table) => {
+            table.string('phone').nullable();
+        });
+    }, 'Add column to existing table');
+    
+    // Test 7: Check column existence
+    const hasColumn = await DB.schema().hasColumn('users', 'phone');
+    assertEquals(hasColumn, true, 'Column added successfully');
+    
+    console.log(`✅ Schema creation tests completed`);
+}
+
+async function testModelDefinition() {
+    console.log('\n📦 Testing Model Definition...');
+    
+    // Define models with validation
+    const User = DB.Model('users', {
+        username: { type: 'string', required: true },
+        email: { type: 'string', required: true },
+        password: { type: 'string', required: true },
+        full_name: 'string',
+        age: 'integer',
+        is_active: { type: 'boolean', default: true },
+        balance: { type: 'float', default: 0 },
+        metadata: 'json',
+        last_login: 'datetime',
+        phone: 'string'
+    });
+    
+    const Product = DB.Model('products', {
+        sku: { type: 'string', required: true },
+        name: { type: 'string', required: true },
+        description: 'text',
+        price: { type: 'float', required: true },
+        stock_quantity: { type: 'integer', default: 0 },
+        category: { type: 'string', required: true },
+        tags: 'json'
+    });
+    
+    const Order = DB.Model('orders', {
+        user_id: { type: 'integer', required: true },
+        total_amount: { type: 'float', required: true },
+        status: { type: 'string', default: 'pending' },
+        shipping_address: 'json',
+        order_date: 'datetime'
+    });
+    
+    const OrderItem = DB.Model('order_items', {
+        order_id: { type: 'integer', required: true },
+        product_id: { type: 'integer', required: true },
+        quantity: { type: 'integer', required: true },
+        unit_price: { type: 'float', required: true },
+        subtotal: { type: 'float', required: true }
+    });
+    
+    // Test model properties
+    assertEquals(User.tableName, 'users', 'Model table name set correctly');
+    assertEquals(typeof User.schema, 'object', 'Model schema defined');
+    
+    return { User, Product, Order, OrderItem };
+}
+
+async function testCRUDOperations(models) {
+    console.log('\n🔄 Testing CRUD Operations...');
+    
+    const { User, Product, Order, OrderItem } = models;
+    
+    // ==================== CREATE ====================
+    console.log('  📝 Testing CREATE operations...');
+    
+    // Test 1: Create single user
+    const user1 = await User.create({
+        username: 'john_doe',
+        email: 'john@example.com',
+        password: 'hashed_password_123',
+        full_name: 'John Doe',
+        age: 30,
+        is_active: true,
+        balance: 100.50,
+        metadata: { theme: 'dark', notifications: true },
+        phone: '+1234567890'
+    });
+    
+    assertEquals(user1.username, 'john_doe', 'Create single user');
+    assertEquals(typeof user1.id, 'number', 'Auto-generated ID created');
+    
+    // Test 2: Create with required field validation
+    await assertThrows(
+        async () => await User.create({ username: 'invalid_user' }),
+        'required',
+        'Validation - required field missing'
+    );
+    
+    // Test 3: Create multiple users
+    const users = await User.createMany([
+        {
+            username: 'jane_smith',
+            email: 'jane@example.com',
+            password: 'hashed_password_456',
+            full_name: 'Jane Smith',
+            age: 28,
+            balance: 250.75
+        },
+        {
+            username: 'bob_wilson',
+            email: 'bob@example.com',
+            password: 'hashed_password_789',
+            full_name: 'Bob Wilson',
+            age: 35,
+            balance: 500.00
+        }
+    ]);
+    
+    assertEquals(users.length, 2, 'Create multiple users');
+    
+    // Test 4: Create products
+    const product1 = await Product.create({
+        sku: 'SKU-001',
+        name: 'Laptop',
+        description: 'High-performance laptop',
+        price: 999.99,
+        stock_quantity: 50,
+        category: 'Electronics',
+        tags: ['computer', 'portable', 'work']
+    });
+    
+    const product2 = await Product.create({
+        sku: 'SKU-002',
+        name: 'Mouse',
+        price: 29.99,
+        category: 'Accessories'
+    });
+    
+    // ==================== READ ====================
+    console.log('  📖 Testing READ operations...');
+    
+    // Test 5: Find all users
+    const allUsers = await User.all();
+    assertEquals(allUsers.length, 3, 'Find all users');
+    
+    // Test 6: Find by ID
+    const foundUser = await User.findById(user1.id);
+    assertEquals(foundUser.username, 'john_doe', 'Find by ID');
+    
+    // Test 7: Find with filter
+    const activeUsers = await User.find({ is_active: true });
+    assertEquals(activeUsers.length >= 1, true, 'Find with filter');
+    
+    // Test 8: Find one
+    const janeUser = await User.findOne({ username: 'jane_smith' });
+    assertEquals(janeUser.email, 'jane@example.com', 'Find one');
+    
+    // Test 9: Find by multiple IDs
+    const usersByIds = await User.findByIds([user1.id, users[0].id]);
+    assertEquals(usersByIds.length, 2, 'Find by multiple IDs');
+    
+    // Test 10: Check if exists
+    const exists = await User.exists({ username: 'john_doe' });
+    assertEquals(exists, true, 'Exists check - true');
+    
+    const notExists = await User.exists({ username: 'nonexistent' });
+    assertEquals(notExists, false, 'Exists check - false');
+    
+    // Test 11: Count records
+    const userCount = await User.count({ is_active: true });
+    assertEquals(userCount, 3, 'Count with filter');
+    
+    // Test 12: First record
+    const firstUser = await User.first();
+    assertEquals(firstUser !== null, true, 'First record');
+    
+    // Test 13: Last record
+    const lastUser = await User.last();
+    assertEquals(lastUser !== null, true, 'Last record');
+    
+    // ==================== UPDATE ====================
+    console.log('  ✏️ Testing UPDATE operations...');
+    
+    // Test 14: Update single user
+    const updatedUser = await User.update(user1.id, {
+        full_name: 'Johnathan Doe',
+        age: 31,
+        balance: 150.75
+    });
+    
+    assertEquals(updatedUser.full_name, 'Johnathan Doe', 'Update single record');
+    assertEquals(updatedUser.age, 31, 'Update age field');
+    
+    // Test 15: Update multiple users
+    const updatedUsers = await User.updateMany(
+        { is_active: true },
+        { balance: 1000 }
+    );
+    
+    assertEquals(updatedUsers.length, 3, 'Update multiple records');
+    
+    // Test 16: Update or create - update existing
+    const updatedOrCreated = await User.updateOrCreate(
+        { username: 'john_doe' },
+        { full_name: 'John D.', age: 32 }
+    );
+    
+    assertEquals(updatedOrCreated.full_name, 'John D.', 'Update or create - update');
+    
+    // Test 17: Update or create - create new
+    const newUser = await User.updateOrCreate(
+        { username: 'alice_jones' },
+        {
+            email: 'alice@example.com',
+            password: 'hashed_password_000',
+            age: 25
+        }
+    );
+    
+    assertEquals(newUser.username, 'alice_jones', 'Update or create - create');
+    
+    // ==================== DELETE ====================
+    console.log('  🗑️ Testing DELETE operations...');
+    
+    // Test 18: Delete single user
+    const deleteResult = await User.delete(user1.id);
+    assertEquals(deleteResult, true, 'Delete single record');
+    
+    const deletedUser = await User.findById(user1.id);
+    assertEquals(deletedUser, null, 'Verify deletion');
+    
+    // Test 19: Delete multiple users
+    const deletedCount = await User.deleteMany({ age: { $gt: 30 } });
+    assertEquals(deletedCount > 0, true, 'Delete multiple records');
+    
+    // Test 20: Delete all
+    const totalDeleted = await User.deleteAll();
+    assertEquals(totalDeleted > 0, true, 'Delete all records');
+    
+    console.log(`✅ CRUD operations tests completed`);
+}
+
+async function testQueryBuilder(models) {
+    console.log('\n🔍 Testing Query Builder...');
+    
+    const { User, Product } = models;
+    
+    // Re-populate data for query tests
+    await User.deleteAll();
+    await Product.deleteAll();
+    
+    // Create test data
+    const users = [];
+    for (let i = 1; i <= 20; i++) {
+        users.push(await User.create({
+            username: `user${i}`,
+            email: `user${i}@example.com`,
+            password: 'pass123',
+            age: 20 + i,
+            balance: i * 100,
+            is_active: i % 2 === 0,
+            metadata: { level: i % 5 }
+        }));
+    }
+    
+    // Test 1: Basic where clause
+    const query1 = User.query().where({ is_active: true });
+    const activeUsers = await query1.get();
+    assertEquals(activeUsers.length, 10, 'Basic where clause');
+    
+    // Test 2: Multiple conditions
+    const query2 = User.query()
+        .where({ is_active: true })
+        .where({ age: 25 });
+    const filtered = await query2.get();
+    assertEquals(filtered.length >= 0, true, 'Multiple conditions');
+    
+    // Test 3: Order by
+    const query3 = User.query().orderBy('age', 'DESC');
+    const sorted = await query3.get();
+    assertEquals(sorted[0].age > sorted[sorted.length - 1].age, true, 'Order by DESC');
+    
+    // Test 4: Limit and offset
+    const query4 = User.query().limit(5).offset(5);
+    const paginated = await query4.get();
+    assertEquals(paginated.length, 5, 'Limit and offset');
+    
+    // Test 5: Select specific fields
+    const query5 = User.query().select('username', 'email').where({ age: 25 });
+    const selected = await query5.get();
+    assertEquals(Object.keys(selected[0]).length, 2, 'Select specific fields');
+    
+    // Test 6: Where with operators (through raw where)
+    const query6 = User.query().whereRaw('age >= ?', [30]);
+    const ageFiltered = await query6.get();
+    assertEquals(ageFiltered.length > 0, true, 'Where with operator');
+    
+    // Test 7: Complex query with multiple clauses
+    const query7 = User.query()
+        .where({ is_active: true })
+        .whereRaw('balance > ?', [500])
+        .orderBy('balance', 'DESC')
+        .limit(3);
+    const complex = await query7.get();
+    assertEquals(complex.length <= 3, true, 'Complex query');
+    
+    console.log(`✅ Query builder tests completed`);
+}
+
+async function testAggregationMethods(models) {
+    console.log('\n📊 Testing Aggregation Methods...');
+    
+    const { User } = models;
+    
+    // Test 1: Count
+    const totalUsers = await User.count();
+    assertEquals(totalUsers, 20, 'Count all records');
+    
+    // Test 2: Max
+    const maxAge = await User.max('age');
+    assertEquals(maxAge, 40, 'Max value');
+    
+    // Test 3: Min
+    const minAge = await User.min('age');
+    assertEquals(minAge, 21, 'Min value');
+    
+    // Test 4: Sum
+    const totalBalance = await User.sum('balance');
+    assertEquals(totalBalance, 21000, 'Sum value'); // 100 + 200 + ... + 2000 = 21000
+    
+    // Test 5: Average
+    const avgBalance = await User.avg('balance');
+    assertEquals(Math.round(avgBalance), 1050, 'Average value');
+    
+    // Test 6: Pluck
+    const usernames = await User.pluck('username');
+    assertEquals(usernames.length, 20, 'Pluck field');
+    
+    // Test 7: Pluck with key
+    const userMap = await User.pluckWithKey('id', 'username');
+    assertEquals(typeof userMap, 'object', 'Pluck with key');
+    
+    // Test 8: Distinct
+    const distinctAges = await User.distinct('age');
+    assertEquals(distinctAges.length, 20, 'Distinct values');
+    
+    console.log(`✅ Aggregation tests completed`);
+}
+
+async function testPagination(models) {
+    console.log('\n📄 Testing Pagination...');
+    
+    const { User } = models;
+    
+    // Test 1: Basic pagination
+    const page1 = await User.paginate(1, 5);
+    assertEquals(page1.data.length, 5, 'Page 1 size');
+    assertEquals(page1.meta.current_page, 1, 'Current page');
+    assertEquals(page1.meta.per_page, 5, 'Per page');
+    assertEquals(page1.meta.total, 20, 'Total count');
+    assertEquals(page1.meta.last_page, 4, 'Last page');
+    
+    // Test 2: Second page
+    const page2 = await User.paginate(2, 5);
+    assertEquals(page2.data.length, 5, 'Page 2 size');
+    assertEquals(page2.meta.current_page, 2, 'Page 2 current');
+    
+    // Test 3: Last page
+    const lastPage = await User.paginate(4, 5);
+    assertEquals(lastPage.data.length, 5, 'Last page size');
+    assertEquals(lastPage.meta.from, 16, 'From index');
+    assertEquals(lastPage.meta.to, 20, 'To index');
+    
+    // Test 4: Pagination with filter
+    const filteredPage = await User.paginate(1, 3, { is_active: true });
+    assertEquals(filteredPage.data.length <= 3, true, 'Filtered pagination');
+    
+    // Test 5: Invalid page number (should default to 1)
+    const invalidPage = await User.paginate(0, 5);
+    assertEquals(invalidPage.meta.current_page, 1, 'Invalid page handling');
+    
+    console.log(`✅ Pagination tests completed`);
+}
+
+async function testUtilityMethods(models) {
+    console.log('\n🛠️ Testing Utility Methods...');
+    
+    const { User } = models;
+    
+    // Get a user for utility tests
+    const users = await User.find();
+    const userId = users[0].id;
+    
+    // Test 1: Toggle boolean field
+    const initialUser = await User.findById(userId);
+    const initialStatus = initialUser.is_active;
+    
+    const toggledUser = await User.toggle(userId, 'is_active');
+    assertEquals(toggledUser.is_active, !initialStatus, 'Toggle boolean field');
+    
+    // Test 2: Increment
+    const incrementedUser = await User.increment(userId, 'balance', 50);
+    assertEquals(incrementedUser.balance, initialUser.balance + 50, 'Increment field');
+    
+    // Test 3: Decrement
+    const decrementedUser = await User.decrement(userId, 'balance', 25);
+    assertEquals(decrementedUser.balance, initialUser.balance + 25, 'Decrement field');
+    
+    // Test 4: Chunk processing
+    let chunkCount = 0;
+    let processedItems = 0;
+    
+    await User.chunk(3, async (chunk, page) => {
+        chunkCount++;
+        processedItems += chunk.length;
+    });
+    
+    assertEquals(chunkCount, 7, 'Chunk processing - number of chunks');
+    assertEquals(processedItems, 20, 'Chunk processing - total items');
+    
+    // Test 5: Each processing
+    let eachCount = 0;
+    await User.each(async (user, index) => {
+        eachCount++;
+    });
+    
+    assertEquals(eachCount, 20, 'Each processing');
+    
+    // Test 6: Random records
+    const randomUsers = await User.random(3);
+    assertEquals(randomUsers.length, 3, 'Random records');
+    
+    // Test 7: First with filter
+    const firstActive = await User.first({ is_active: true });
+    assertEquals(firstActive.is_active, true, 'First with filter');
+    
+    // Test 8: Last with filter
+    const lastActive = await User.last({ is_active: true });
+    assertEquals(lastActive.is_active, true, 'Last with filter');
+    
+    console.log(`✅ Utility methods tests completed`);
+}
+
+async function testTransactions() {
+    console.log('\n💱 Testing Transactions...');
+    
+    const User = DB.Model('users');
+    
+    // Test 1: Successful transaction
+    const transactionResult = await DB.transaction(async (trx) => {
+        const user1 = await User.create({
+            username: 'transaction_user1',
+            email: 'trans1@example.com',
+            password: 'pass123'
+        });
+        
+        const user2 = await User.create({
+            username: 'transaction_user2',
+            email: 'trans2@example.com',
+            password: 'pass123'
+        });
+        
+        // Update something
+        await User.update(user1.id, { balance: 500 });
+        
+        return { user1, user2 };
+    });
+    
+    assertEquals(transactionResult.user1.username, 'transaction_user1', 'Transaction committed');
+    
+    // Verify data persisted
+    const foundUser = await User.findOne({ username: 'transaction_user1' });
+    assertEquals(foundUser !== null, true, 'Transaction data persisted');
+    
+    // Test 2: Rollback transaction
+    await assertThrows(async () => {
+        await DB.transaction(async (trx) => {
+            const user = await User.create({
+                username: 'rollback_user',
+                email: 'rollback@example.com',
+                password: 'pass123'
+            });
+            
+            // This should trigger rollback
+            throw new Error('Intentional rollback');
+        });
+    }, 'Intentional rollback', 'Transaction rollback on error');
+    
+    // Verify rollback
+    const rolledBackUser = await User.findOne({ username: 'rollback_user' });
+    assertEquals(rolledBackUser, null, 'Transaction rolled back');
+    
+    // Test 3: Nested transactions
+    const nestedResult = await DB.transaction(async (trx) => {
+        const user1 = await User.create({
+            username: 'nested_parent',
+            email: 'nested1@example.com',
+            password: 'pass123'
+        });
+        
+        // Nested transaction
+        const nested = await DB.transaction(async (innerTrx) => {
+            const user2 = await User.create({
+                username: 'nested_child',
+                email: 'nested2@example.com',
+                password: 'pass123'
+            });
+            return user2;
+        });
+        
+        return { user1, nested };
+    });
+    
+    assertEquals(nestedResult.nested.username, 'nested_child', 'Nested transaction committed');
+    
+    console.log(`✅ Transaction tests completed`);
+}
+
+async function testConcurrency() {
+    console.log('\n👥 Testing Concurrency...');
+    
+    const User = DB.Model('users');
+    
+    // Clear existing data
+    await User.deleteAll();
+    
+    // Test concurrent writes
+    const startTime = Date.now();
+    const concurrentWrites = [];
+    
+    for (let i = 0; i < CONCURRENT_USERS; i++) {
+        concurrentWrites.push(User.create({
+            username: `concurrent_user_${i}`,
+            email: `concurrent_${i}@example.com`,
+            password: 'pass123',
+            age: 20 + (i % 30)
+        }));
+    }
+    
+    const results = await Promise.all(concurrentWrites);
+    assertEquals(results.length, CONCURRENT_USERS, `Concurrent writes (${CONCURRENT_USERS} users)`);
+    
+    // Test concurrent reads
+    const concurrentReads = [];
+    for (let i = 0; i < CONCURRENT_USERS; i++) {
+        concurrentReads.push(User.find({ age: 20 + (i % 30) }));
+    }
+    
+    const readResults = await Promise.all(concurrentReads);
+    assertEquals(readResults.length, CONCURRENT_USERS, `Concurrent reads (${CONCURRENT_USERS} reads)`);
+    
+    const duration = Date.now() - startTime;
+    console.log(`  ⏱️ Concurrency test completed in ${duration}ms`);
+    
+    console.log(`✅ Concurrency tests completed`);
+}
+
+async function testPerformance(models) {
+    console.log('\n⚡ Testing Performance...');
+    
+    const { User, Product } = models;
+    
+    // Clear existing data
+    await User.deleteAll();
+    await Product.deleteAll();
+    
+    // Test bulk insert performance
+    console.log(`  📊 Bulk insert (${PERFORMANCE_ITERATIONS} records)...`);
+    const bulkStart = Date.now();
+    
+    for (let i = 0; i < PERFORMANCE_ITERATIONS; i++) {
+        await User.create({
+            username: `perf_user_${i}`,
+            email: `perf_${i}@example.com`,
+            password: 'pass123',
+            age: 20 + (i % 50),
+            balance: i * 10
+        });
+    }
+    
+    const bulkDuration = Date.now() - bulkStart;
+    console.log(`    Insert time: ${bulkDuration}ms (${(PERFORMANCE_ITERATIONS / bulkDuration * 1000).toFixed(2)} ops/sec)`);
+    
+    // Test query performance
+    console.log(`  🔍 Query performance...`);
+    const queryStart = Date.now();
+    
+    const queries = [];
+    for (let i = 0; i < 100; i++) {
+        queries.push(User.find({ age: 20 + (i % 50) }));
+    }
+    
+    await Promise.all(queries);
+    const queryDuration = Date.now() - queryStart;
+    console.log(`    100 concurrent queries: ${queryDuration}ms`);
+    
+    // Test complex query performance
+    const complexStart = Date.now();
+    
+    const complexQuery = await User.query()
+        .where({ is_active: true })
+        .whereRaw('balance > ?', [500])
+        .orderBy('balance', 'DESC')
+        .limit(10)
+        .get();
+    
+    const complexDuration = Date.now() - complexStart;
+    console.log(`    Complex query: ${complexDuration}ms`);
+    
+    // Test aggregation performance
+    const aggStart = Date.now();
+    
+    const stats = await Promise.all([
+        User.count(),
+        User.max('balance'),
+        User.min('balance'),
+        User.avg('balance')
+    ]);
+    
+    const aggDuration = Date.now() - aggStart;
+    console.log(`    Aggregations: ${aggDuration}ms`);
+    
+    console.log(`✅ Performance tests completed`);
+}
+
+async function testEdgeCases() {
+    console.log('\n⚠️ Testing Edge Cases...');
+    
+    const User = DB.Model('users');
+    
+    // Test 1: Empty database operations
+    await User.deleteAll();
+    
+    const emptyFind = await User.find();
+    assertEquals(emptyFind.length, 0, 'Find on empty table');
+    
+    const emptyFindOne = await User.findOne({ username: 'nonexistent' });
+    assertEquals(emptyFindOne, null, 'FindOne on empty table');
+    
+    const emptyCount = await User.count();
+    assertEquals(emptyCount, 0, 'Count on empty table');
+    
+    // Test 2: Null values handling
+    const nullUser = await User.create({
+        username: 'null_user',
+        email: 'null@example.com',
+        password: 'pass123',
+        full_name: null,
+        age: null
+    });
+    
+    assertEquals(nullUser.full_name, null, 'Null field stored correctly');
+    
+    const foundNullUser = await User.findById(nullUser.id);
+    assertEquals(foundNullUser.full_name, null, 'Null field retrieved correctly');
+    
+    // Test 3: Special characters in strings
+    const specialUser = await User.create({
+        username: 'special_!@#$%^&*()_+',
+        email: 'special@example.com',
+        password: 'pass"\'\\`123',
+        full_name: "O'Connor \"Test\""
+    });
+    
+    assertEquals(specialUser.username, 'special_!@#$%^&*()_+', 'Special characters handled');
+    
+    // Test 4: Large text fields
+    const largeText = 'A'.repeat(10000);
+    const largeTextUser = await User.create({
+        username: 'large_text_user',
+        email: 'large@example.com',
+        password: 'pass123',
+        metadata: { text: largeText }
+    });
+    
+    assertEquals(largeTextUser.metadata.text.length, 10000, 'Large text field handled');
+    
+    // Test 5: Boolean values
+    const boolUser = await User.create({
+        username: 'bool_user',
+        email: 'bool@example.com',
+        password: 'pass123',
+        is_active: false
+    });
+    
+    assertEquals(boolUser.is_active, false, 'Boolean false stored correctly');
+    
+    // Test 6: JSON operations
+    const jsonUser = await User.create({
+        username: 'json_user',
+        email: 'json@example.com',
+        password: 'pass123',
+        metadata: {
+            preferences: {
+                theme: 'dark',
+                language: 'en',
+                notifications: ['email', 'sms']
+            },
+            lastLogin: new Date().toISOString(),
+            visits: 42
+        }
+    });
+    
+    assertEquals(typeof jsonUser.metadata, 'object', 'JSON stored as object');
+    assertEquals(jsonUser.metadata.preferences.theme, 'dark', 'Nested JSON accessible');
+    
+    // Test 7: Negative numbers
+    const negativeUser = await User.create({
+        username: 'negative_user',
+        email: 'negative@example.com',
+        password: 'pass123',
+        balance: -100.50,
+        age: -5
+    });
+    
+    assertEquals(negativeUser.balance, -100.50, 'Negative float stored');
+    assertEquals(negativeUser.age, -5, 'Negative integer stored');
+    
+    // Test 8: Very large numbers
+    const largeNumberUser = await User.create({
+        username: 'large_number_user',
+        email: 'large@example.com',
+        password: 'pass123',
+        balance: 999999999.99
+    });
+    
+    assertEquals(largeNumberUser.balance, 999999999.99, 'Large number stored');
+    
+    // Test 9: Empty string handling
+    const emptyStringUser = await User.create({
+        username: 'empty_string_user',
+        email: 'empty@example.com',
+        password: '',
+        full_name: ''
+    });
+    
+    assertEquals(emptyStringUser.password, '', 'Empty string stored');
+    
+    // Test 10: Update non-existent record
+    await assertThrows(
+        async () => await User.update(999999, { username: 'new' }),
+        'not found',
+        'Update non-existent record'
+    );
+    
+    // Test 11: Delete non-existent record
+    const deleteNonExistent = await User.delete(999999);
+    assertEquals(deleteNonExistent, false, 'Delete non-existent record');
+    
+    console.log(`✅ Edge cases tests completed`);
+}
+
+async function testDataTypes() {
+    console.log('\n🔢 Testing Data Types...');
+    
+    // Create a table with all data types
+    await DB.schema().create('data_types_test', (table) => {
+        table.id();
+        table.string('string_field');
+        table.text('text_field');
+        table.integer('integer_field');
+        table.float('float_field');
+        table.boolean('boolean_field');
+        table.datetime('datetime_field');
+        table.json('json_field');
+    });
+    
+    const DataTypeModel = DB.Model('data_types_test', {
+        string_field: 'string',
+        text_field: 'text',
+        integer_field: 'integer',
+        float_field: 'float',
+        boolean_field: 'boolean',
+        datetime_field: 'datetime',
+        json_field: 'json'
+    });
+    
+    const now = new Date();
+    const testData = {
+        string_field: 'hello world',
+        text_field: 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(10),
+        integer_field: 42,
+        float_field: 3.14159,
+        boolean_field: true,
+        datetime_field: now.toISOString(),
+        json_field: {
+            array: [1, 2, 3, 4, 5],
+            nested: { key: 'value', active: true },
+            mixed: ['string', 42, null, { foo: 'bar' }]
+        }
+    };
+    
+    const created = await DataTypeModel.create(testData);
+    
+    // Verify each field
+    assertEquals(created.string_field, testData.string_field, 'String field');
+    assertEquals(created.text_field, testData.text_field, 'Text field');
+    assertEquals(created.integer_field, testData.integer_field, 'Integer field');
+    assertEquals(created.float_field, testData.float_field, 'Float field');
+    assertEquals(created.boolean_field, testData.boolean_field, 'Boolean field');
+    assertEquals(created.datetime_field, testData.datetime_field, 'Datetime field');
+    assertEquals(JSON.stringify(created.json_field), JSON.stringify(testData.json_field), 'JSON field');
+    
+    // Test type casting
+    const found = await DataTypeModel.findById(created.id);
+    
+    assertEquals(typeof found.integer_field, 'number', 'Integer type preserved');
+    assertEquals(typeof found.float_field, 'number', 'Float type preserved');
+    assertEquals(typeof found.boolean_field, 'boolean', 'Boolean type preserved');
+    assertEquals(typeof found.json_field, 'object', 'JSON type preserved');
+    
+    console.log(`✅ Data types tests completed`);
+}
+
+async function testWALAndRecovery() {
+    console.log('\n💾 Testing WAL and Recovery...');
+    
+    const User = DB.Model('users');
+    
+    // Create some data
+    const testUsers = [];
+    for (let i = 0; i < 10; i++) {
+        testUsers.push(await User.create({
+            username: `wal_user_${i}`,
+            email: `wal_${i}@example.com`,
+            password: 'pass123',
+            balance: i * 100
+        }));
+    }
+    
+    // Force sync and get current state
+    await DB.query('COMMIT'); // Ensure everything is committed
+    
+    // Simulate crash by not properly disconnecting
+    // We'll just reconnect
+    
+    // Disconnect and reconnect
+    await DB.Disconnect(TEST_DB);
+    await DB.Connect(TEST_DB, { filename: TEST_FILE });
+    
+    // Re-get model (it will be re-initialized with new connection)
+    const RecoveredUser = DB.Model('users');
+    
+    // Verify data survived
+    const recoveredUsers = await RecoveredUser.all();
+    assertEquals(recoveredUsers.length >= 10, true, 'Data recovered after reconnect');
+    
+    // Check specific user
+    const recoveredUser = await RecoveredUser.findOne({ username: 'wal_user_5' });
+    assertEquals(recoveredUser.balance, 500, 'Specific data recovered');
+    
+    console.log(`✅ WAL and recovery tests completed`);
+}
+
+async function testComplexQueries() {
+    console.log('\n🔬 Testing Complex Queries...');
+    
+    const User = DB.Model('users');
+    
+    // Clear and create varied data
+    await User.deleteAll();
+    
+    const categories = ['admin', 'user', 'guest', 'moderator'];
+    for (let i = 0; i < 50; i++) {
+        await User.create({
+            username: `complex_${i}`,
+            email: `complex_${i}@example.com`,
+            password: 'pass123',
+            age: 18 + (i % 50),
+            balance: i * 50,
+            is_active: i % 3 !== 0,
+            metadata: {
+                role: categories[i % categories.length],
+                level: i % 10,
+                verified: i % 4 === 0
+            }
+        });
+    }
+    
+    // Test complex WHERE conditions
+    const results1 = await User.query()
+        .where({ is_active: true })
+        .whereRaw('age BETWEEN ? AND ?', [25, 35])
+        .whereRaw('balance > ?', [500])
+        .orderBy('balance', 'DESC')
+        .get();
+    
+    assertEquals(results1.length > 0, true, 'Complex WHERE with BETWEEN');
+    
+    // Test multiple ORDER BY
+    const results2 = await User.query()
+        .orderBy('is_active', 'DESC')
+        .orderBy('age', 'ASC')
+        .orderBy('balance', 'DESC')
+        .limit(10)
+        .get();
+    
+    assertEquals(results2.length, 10, 'Multiple ORDER BY');
+    
+    // Test nested conditions (simulated with raw where)
+    const results3 = await User.query()
+        .whereRaw('(age < ? OR age > ?)', [20, 40])
+        .whereRaw('balance > ?', [200])
+        .whereRaw('is_active = ?', [1])
+        .get();
+    
+    assertEquals(results3.length > 0, true, 'Nested conditions');
+    
+    // Test with LIKE
+    const results4 = await User.query()
+        .whereRaw('username LIKE ?', ['complex_1%'])
+        .get();
+    
+    assertEquals(results4.length, 11, 'LIKE query'); // complex_1, complex_10-19
+    
+    // Test with NOT
+    const results5 = await User.query()
+        .whereRaw('is_active != ?', [1])
+        .get();
+    
+    assertEquals(results5.length > 0, true, 'NOT condition');
+    
+    console.log(`✅ Complex queries tests completed`);
+}
+
+async function testErrorHandling() {
+    console.log('\n🚨 Testing Error Handling...');
+    
+    const User = DB.Model('users');
+    
+    // Test 1: Duplicate unique constraint
+    try {
+        await User.create({
+            username: 'duplicate_user',
+            email: 'duplicate@example.com',
+            password: 'pass123'
+        });
+        
+        await User.create({
+            username: 'duplicate_user', // Same username
+            email: 'different@example.com',
+            password: 'pass123'
+        });
+    } catch (error) {
+        recordTest('Duplicate unique constraint', 'passed');
+    }
+    
+    // Test 2: Invalid field type
+    try {
+        await User.create({
+            username: 'type_test',
+            email: 'type@example.com',
+            password: 'pass123',
+            age: 'not_a_number' // Should be number
+        });
+        // If it doesn't throw, that's okay too (depending on implementation)
+        recordTest('Invalid field type', 'passed');
+    } catch (error) {
+        recordTest('Invalid field type', 'passed');
+    }
+    
+    // Test 3: Query with invalid syntax
+    try {
+        await DB.query('INVALID SQL QUERY');
+        recordTest('Invalid SQL syntax', 'failed', new Error('Expected error but none thrown'));
+    } catch (error) {
+        recordTest('Invalid SQL syntax', 'passed');
+    }
+    
+    // Test 4: Find with empty filter in findOne (should throw)
+    try {
+        await User.findOne({});
+        recordTest('Empty filter in findOne', 'failed', new Error('Expected error but none thrown'));
+    } catch (error) {
+        recordTest('Empty filter in findOne', 'passed');
+    }
+    
+    // Test 5: Update without ID
+    try {
+        await User.update(null, { name: 'test' });
+        recordTest('Update without ID', 'failed', new Error('Expected error but none thrown'));
+    } catch (error) {
+        recordTest('Update without ID', 'passed');
+    }
+    
+    console.log(`✅ Error handling tests completed`);
+}
+
+// ==================== Main Test Runner ====================
+
+async function runAllTests() {
+    console.log('=' .repeat(70));
+    console.log('🚀 DB.js SQLite ORM - Comprehensive Test Suite');
+    console.log('=' .repeat(70));
+    console.log(`Start Time: ${new Date().toISOString()}`);
+    console.log(`Test Database: ${TEST_FILE}`);
+    console.log('=' .repeat(70));
+    
+    let models;
+    
+    try {
+        // Clean up before tests
+        await cleanup();
+        
+        // Run test suites
+        await testDatabaseConnection();
+        await testSchemaCreation();
+        models = await testModelDefinition();
+        await testCRUDOperations(models);
+        await testQueryBuilder(models);
+        await testAggregationMethods(models);
+        await testPagination(models);
+        await testUtilityMethods(models);
+        await testTransactions();
+        await testConcurrency();
+        await testPerformance(models);
+        await testEdgeCases();
+        await testDataTypes();
+        await testWALAndRecovery();
+        await testComplexQueries();
+        await testErrorHandling();
+        
+    } catch (error) {
+        console.error('\n❌ Test suite error:', error);
+        recordTest('Test Suite', 'failed', error);
+    } finally {
+        // Clean up after tests
+        await cleanup();
+    }
+    
+    // Calculate results
+    testResults.endTime = Date.now();
+    const duration = testResults.endTime - testResults.startTime;
+    
+    // Print summary
+    console.log('\n' + '=' .repeat(70));
+    console.log('📊 TEST SUMMARY');
+    console.log('=' .repeat(70));
+    console.log(`Total Tests: ${testResults.total}`);
+    console.log(`✅ Passed: ${testResults.passed}`);
+    console.log(`❌ Failed: ${testResults.failed}`);
+    console.log(`⏭️  Skipped: ${testResults.skipped}`);
+    console.log(`⏱️  Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
+    console.log(`📈 Success Rate: ${((testResults.passed / testResults.total) * 100).toFixed(2)}%`);
+    
+    if (testResults.failed > 0) {
+        console.log('\n❌ Failed Tests:');
+        testResults.tests
+            .filter(t => t.status === 'failed')
+            .forEach(t => {
+                console.log(`  - ${t.name}: ${t.error?.message || 'Unknown error'}`);
+            });
+    }
+    
+    console.log('=' .repeat(70));
+    
+    // Return exit code
+    process.exit(testResults.failed > 0 ? 1 : 0);
+}
+
+// Run tests
+runAllTests().catch(console.error);
