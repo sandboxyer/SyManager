@@ -3841,11 +3841,7 @@ class Model {
            data
        );
        
-       if (result.success && result.id) {
-           return this.findById(result.id);
-       }
-       
-       throw new Error(result.error || 'Failed to create document');
+      return result
    }
 
    /**
