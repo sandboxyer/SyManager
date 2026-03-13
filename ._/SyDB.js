@@ -3254,42 +3254,71 @@ class SyDB {
    }
 
    /**
-    * Create a new collection with schema
-    * @static
-    * @async
-    * @param {string} databaseName - Database name
-    * @param {string} collectionName - Collection name
-    * @param {Array} schema - Collection schema
-    * @returns {Promise<Object>} Operation result
-    */
-   static async createCollection(databaseName, collectionName, schema) {
-       if (!databaseName || typeof databaseName !== 'string') {
-           return {
-               success: false,
-               error: 'Database name is required and must be a string'
-           };
-       }
-       if (!collectionName || typeof collectionName !== 'string') {
-           return {
-               success: false,
-               error: 'Collection name is required and must be a string'
-           };
-       }
-       if (!Array.isArray(schema)) {
-           return {
-               success: false,
-               error: 'Schema must be an array'
-           };
-       }
+ * Create a new collection with schema
+ * @static
+ * @async
+ * @param {string} databaseName - Database name
+ * @param {string} collectionName - Collection name
+ * @param {Array} schema - Collection schema
+ * @returns {Promise<Object>} Operation result
+ */
+static async createCollection(databaseName, collectionName, schema) {
+    if (!databaseName || typeof databaseName !== 'string') {
+        return {
+            success: false,
+            error: 'Database name is required and must be a string'
+        };
+    }
+    if (!collectionName || typeof collectionName !== 'string') {
+        return {
+            success: false,
+            error: 'Collection name is required and must be a string'
+        };
+    }
+    if (!Array.isArray(schema)) {
+        return {
+            success: false,
+            error: 'Schema must be an array'
+        };
+    }
 
-       return await this.#makeRequest('POST', 
-           `/api/databases/${encodeURIComponent(databaseName)}/collections`, 
-           {
-               name: collectionName,
-               schema: schema
-           }
-       );
-   }
+    // FIX: Normalize schema fields to ensure properties are in the correct order
+    // The C server expects: name, type, required, indexed (in that order)
+    const normalizedSchema = schema.map(field => {
+        // Create a new object with properties in the EXACT order the C server expects
+        const normalizedField = {
+            name: field.name || field.field || '',  // Handle both 'name' and 'field'
+            type: field.type || 'string'
+        };
+        
+        // Add required if it exists (default to false)
+        if (field.required !== undefined) {
+            normalizedField.required = field.required;
+        } else {
+            normalizedField.required = false;  // Explicit default
+        }
+        
+        // Add indexed if it exists (default to false)
+        if (field.indexed !== undefined) {
+            normalizedField.indexed = field.indexed;
+        } else {
+            normalizedField.indexed = false;  // Explicit default
+        }
+        
+        return normalizedField;
+    });
+
+    // Debug log to see the normalized schema
+    // console.log('Normalized schema:', JSON.stringify(normalizedSchema, null, 2));
+
+    return await this.#makeRequest('POST', 
+        `/api/databases/${encodeURIComponent(databaseName)}/collections`, 
+        {
+            name: collectionName,
+            schema: normalizedSchema
+        }
+    );
+}
 
    /**
     * Delete a collection
