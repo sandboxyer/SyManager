@@ -3166,12 +3166,20 @@ class SyDB {
     * });
     */
    static Model(collectionName, schemaDefinition) {
-    // Instead of throwing error, create model that will wait for connection
-    // We'll check connection on first use, not at creation time
+    // Create a base object with the collection name
+    const modelBase = {
+        collectionName: collectionName,  // Add this property
+        _connection: null  // Will be set when methods are called
+    };
     
     // Create a proxy that will dynamically resolve the connection
-    return new Proxy({}, {
+    return new Proxy(modelBase, {
         get: (target, prop) => {
+            // Return collectionName directly without needing connection
+            if (prop === 'collectionName') {
+                return target.collectionName;
+            }
+            
             // When any method is accessed, ensure connection exists and delegate to actual model
             return async (...args) => {
                 if (!SyDB.#currentConnection) {
@@ -3194,7 +3202,7 @@ class SyDB {
             };
         }
     });
- }
+}
 
    /**
     * Close all connections
