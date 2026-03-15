@@ -3166,11 +3166,35 @@ class SyDB {
     * });
     */
    static Model(collectionName, schemaDefinition) {
-       if (!this.#currentConnection) {
-           throw new Error('No active connection. Call Connect() first.');
-       }
-       return new Model(this.#currentConnection, collectionName, schemaDefinition);
-   }
+    // Instead of throwing error, create model that will wait for connection
+    // We'll check connection on first use, not at creation time
+    
+    // Create a proxy that will dynamically resolve the connection
+    return new Proxy({}, {
+        get: (target, prop) => {
+            // When any method is accessed, ensure connection exists and delegate to actual model
+            return async (...args) => {
+                if (!SyDB.#currentConnection) {
+                    throw new Error('No active connection. Call SyDB.Connect() before using model methods.');
+                }
+                
+                // Get or create the actual model
+                let model = SyDB.#currentConnection.models.get(collectionName);
+                if (!model) {
+                    model = new Model(SyDB.#currentConnection, collectionName, schemaDefinition);
+                    SyDB.#currentConnection.models.set(collectionName, model);
+                }
+                
+                // Call the method on the actual model
+                if (typeof model[prop] === 'function') {
+                    return await model[prop](...args);
+                }
+                
+                throw new Error(`Method ${prop} not found on model`);
+            };
+        }
+    });
+ }
 
    /**
     * Close all connections
@@ -3651,328 +3675,374 @@ class Connection {
 * @implements {ModelInterface<T>}
 */
 class Model {
-   /**
-    * @private
-    * @param {Connection} connection 
-    * @param {string} collectionName 
-    * @param {SchemaDefinition} schemaDefinition 
-    */
-   constructor(connection, collectionName, schemaDefinition) {
-       /** @private */
-       this.connection = connection;
-       
-       /** @private */
-       this.collectionName = collectionName;
-       
-       /** @private */
-       this.schema = this.#parseSchema(schemaDefinition);
-       
-       /** @private */
-       this.fieldNames = Object.keys(schemaDefinition);
-       
-       this.#initializeCollection();
-   }
-
-   /**
-    * Parse schema definition
-    * @private
-    * @param {SchemaDefinition} schemaDefinition 
-    * @returns {Array}
-    */
-   #parseSchema(schemaDefinition) {
-       const schema = [];
-       
-       for (const [fieldName, fieldConfig] of Object.entries(schemaDefinition)) {
-           let type = 'string';
-           let required = false;
-           let indexed = false;
-           
-           if (typeof fieldConfig === 'string') {
-               type = fieldConfig;
-           } else if (typeof fieldConfig === 'object') {
-               type = fieldConfig.type || 'string';
-               required = fieldConfig.required || false;
-               indexed = fieldConfig.indexed || false;
-           }
-           
-           schema.push({
-               name: fieldName,
-               type: this.#mapType(type),
-               required,
-               indexed
-           });
-       }
-       
-       return schema;
-   }
-
-   /**
-    * Map simplified types to SyDB types
-    * @private
-    * @param {string} type 
-    * @returns {string}
-    */
-   #mapType(type) {
-       const typeMap = {
-           'string': 'string',
-           'number': 'float',
-           'int': 'int',
-           'float': 'float',
-           'boolean': 'bool',
-           'bool': 'bool',
-           'array': 'array',
-           'object': 'object'
-       };
-       return typeMap[type.toLowerCase()] || 'string';
-   }
-
-   /**
-    * Initialize collection with schema
-    * @private
-    * @async
-    */
-   async #initializeCollection() {
-       try {
-           await SyDB.createCollection(
-               this.connection.databaseName,
-               this.collectionName,
-               this.schema
-           );
-       } catch (error) {
-           // Collection might already exist
-       }
-   }
-
-   /**
-    * Build query string from filter object
-    * @private
-    * @param {Partial<T>} filter 
-    * @returns {string}
-    */
-   #buildQueryString(filter) {
-       if (!filter || Object.keys(filter).length === 0) return '';
-       
-       return Object.entries(filter)
-           .map(([key, value]) => `${key}:${value}`)
-           .join(',');
-   }
-
-   /**
-    * Wrap document with helper methods
-    * @private
-    * @param {T & {_id: string}} doc 
-    * @returns {Document<T>}
-    */
-   #wrapDocument(doc) {
-       const wrapped = { ...doc };
-       
-       wrapped.update = async (data) => {
-           const updated = await this.update(doc._id, data);
-           Object.assign(wrapped, updated);
-           return wrapped;
-       };
-       
-       wrapped.delete = async () => {
-           return await this.delete(doc._id);
-       };
-       
-       wrapped.refresh = async () => {
-           const fresh = await this.findById(doc._id);
-           if (fresh) {
-               Object.assign(wrapped, fresh);
-           }
-           return wrapped;
-       };
-       
-       return wrapped;
-   }
-
-   /**
-    * Find one document
-    * @async
-    * @param {Partial<T>} [filter={}]
-    * @returns {Promise<Document<T>|null>}
-    */
-   async findOne(filter = {}) {
-       const query = this.#buildQueryString(filter);
-       const result = await SyDB.listInstances(
-           this.connection.databaseName,
-           this.collectionName,
-           query
-       );
-       
-       if (result.success && result.instances?.length) {
-           return this.#wrapDocument(result.instances[0]);
-       }
-       return null;
-   }
-
-   /**
-    * Find all documents
-    * @async
-    * @param {Partial<T>} [filter={}]
-    * @returns {Promise<Document<T>[]>}
-    */
-   async find(filter = {}) {
-       const query = this.#buildQueryString(filter);
-       const result = await SyDB.listInstances(
-           this.connection.databaseName,
-           this.collectionName,
-           query
-       );
-       
-       if (result.success && result.instances) {
-           return result.instances.map(doc => this.#wrapDocument(doc));
-       }
-       return [];
-   }
-
-   /**
-    * Create a new document
-    * @async
-    * @param {T} data
-    * @returns {Promise<Document<T>>}
-    * @throws {Error}
-    */
-   async create(data) {
-       const result = await SyDB.insertInstance(
-           this.connection.databaseName,
-           this.collectionName,
-           data
-       );
-       
-      return result
-   }
-
-   /**
-    * Find document by ID
-    * @async
-    * @param {string} id
-    * @returns {Promise<Document<T>|null>}
-    */
-   async findById(id) {
-       const result = await SyDB.listInstances(
-           this.connection.databaseName,
-           this.collectionName,
-           `_id:${id}`
-       );
-       
-       if (result.success && result.instances?.length) {
-           return this.#wrapDocument(result.instances[0]);
-       }
-       return null;
-   }
-
-   /**
-    * Update a document
-    * @async
-    * @param {string} id
-    * @param {Partial<T>} data
-    * @returns {Promise<Document<T>>}
-    * @throws {Error}
-    */
-   async update(id, data) {
-       const result = await SyDB.updateInstance(
-           this.connection.databaseName,
-           this.collectionName,
-           id,
-           data
-       );
-       
-       if (result.success) {
-           return this.findById(id);
-       }
-       
-       throw new Error(result.error || 'Failed to update document');
-   }
-
-   /**
-    * Delete a document
-    * @async
-    * @param {string} id
-    * @returns {Promise<boolean>}
-    */
-   async delete(id) {
-       const result = await SyDB.deleteInstance(
-           this.connection.databaseName,
-           this.collectionName,
-           id
-       );
-       
-       return result.success === true;
-   }
-
-   /**
-    * Delete many documents
-    * @async
-    * @param {Partial<T>} [filter={}]
-    * @returns {Promise<number>}
-    */
-   async deleteMany(filter = {}) {
-       const documents = await this.find(filter);
-       let deleted = 0;
-       
-       for (const doc of documents) {
-           const success = await this.delete(doc._id);
-           if (success) deleted++;
-       }
-       
-       return deleted;
-   }
-
-   /**
-    * Count documents
-    * @async
-    * @param {Partial<T>} [filter={}]
-    * @returns {Promise<number>}
-    */
-   async count(filter = {}) {
-       const documents = await this.find(filter);
-       return documents.length;
-   }
-
-   /**
-    * Check if document exists
-    * @async
-    * @param {Partial<T>} filter
-    * @returns {Promise<boolean>}
-    */
-   async exists(filter) {
-       const doc = await this.findOne(filter);
-       return doc !== null;
-   }
-
-   /**
-    * Get collection schema
-    * @async
-    * @returns {Promise<Object>}
-    */
-   async getSchema() {
-       const result = await SyDB.getCollectionSchema(
-           this.connection.databaseName,
-           this.collectionName
-       );
-       return result;
-   }
-
-   /**
-    * Drop the collection
-    * @async
-    * @returns {Promise<boolean>}
-    */
-   async drop() {
-       const result = await SyDB.deleteCollection(
-           this.connection.databaseName,
-           this.collectionName
-       );
-       
-       if (result.success) {
-           this.connection.models.delete(this.collectionName);
-       }
-       
-       return result.success;
-   }
-}
+    /**
+     * @private
+     * @param {Connection} connection 
+     * @param {string} collectionName 
+     * @param {SchemaDefinition} schemaDefinition 
+     */
+    constructor(connection, collectionName, schemaDefinition) {
+        /** @private */
+        this.connection = connection;
+        
+        /** @private */
+        this.collectionName = collectionName;
+        
+        /** @private */
+        this.schema = this.#parseSchema(schemaDefinition);
+        
+        /** @private */
+        this.fieldNames = Object.keys(schemaDefinition);
+        
+        /** @private */
+        this.initialized = false;
+        
+        // Don't initialize immediately - wait until first use
+    }
+ 
+    /**
+     * Ensure collection is initialized before operations
+     * @private
+     * @async
+     */
+    async #ensureInitialized() {
+        if (!this.initialized) {
+            try {
+                // Check if connection exists
+                if (!this.connection || !this.connection.databaseName) {
+                    throw new Error('No active database connection. Make sure to call SyDB.Connect() first.');
+                }
+                
+                await SyDB.createCollection(
+                    this.connection.databaseName,
+                    this.collectionName,
+                    this.schema
+                );
+                this.initialized = true;
+            } catch (error) {
+                // Collection might already exist - that's fine
+                if (error.message && error.message.includes('already exists')) {
+                    this.initialized = true;
+                } else {
+                    throw error;
+                }
+            }
+        }
+    }
+ 
+    /**
+     * Parse schema definition
+     * @private
+     * @param {SchemaDefinition} schemaDefinition 
+     * @returns {Array}
+     */
+    #parseSchema(schemaDefinition) {
+        const schema = [];
+        
+        for (const [fieldName, fieldConfig] of Object.entries(schemaDefinition)) {
+            let type = 'string';
+            let required = false;
+            let indexed = false;
+            let defaultValue = undefined;
+            
+            if (typeof fieldConfig === 'string') {
+                type = fieldConfig;
+            } else if (typeof fieldConfig === 'object') {
+                type = fieldConfig.type || 'string';
+                required = fieldConfig.required || false;
+                indexed = fieldConfig.indexed || false;
+                defaultValue = fieldConfig.default;
+            }
+            
+            schema.push({
+                name: fieldName,
+                type: this.#mapType(type),
+                required,
+                indexed,
+                default: defaultValue
+            });
+        }
+        
+        return schema;
+    }
+ 
+    /**
+     * Map simplified types to SyDB types
+     * @private
+     * @param {string} type 
+     * @returns {string}
+     */
+    #mapType(type) {
+        const typeMap = {
+            'string': 'string',
+            'number': 'float',
+            'int': 'int',
+            'float': 'float',
+            'boolean': 'bool',
+            'bool': 'bool',
+            'array': 'array',
+            'object': 'object'
+        };
+        return typeMap[type.toLowerCase()] || 'string';
+    }
+ 
+    /**
+     * Build query string from filter object
+     * @private
+     * @param {Partial<T>} filter 
+     * @returns {string}
+     */
+    #buildQueryString(filter) {
+        if (!filter || Object.keys(filter).length === 0) return '';
+        
+        return Object.entries(filter)
+            .map(([key, value]) => `${key}:${value}`)
+            .join(',');
+    }
+ 
+    /**
+     * Wrap document with helper methods
+     * @private
+     * @param {T & {_id: string}} doc 
+     * @returns {Document<T>}
+     */
+    #wrapDocument(doc) {
+        const wrapped = { ...doc };
+        
+        wrapped.update = async (data) => {
+            const updated = await this.update(doc._id, data);
+            Object.assign(wrapped, updated);
+            return wrapped;
+        };
+        
+        wrapped.delete = async () => {
+            return await this.delete(doc._id);
+        };
+        
+        wrapped.refresh = async () => {
+            const fresh = await this.findById(doc._id);
+            if (fresh) {
+                Object.assign(wrapped, fresh);
+            }
+            return wrapped;
+        };
+        
+        return wrapped;
+    }
+ 
+    /**
+     * Find one document
+     * @async
+     * @param {Partial<T>} [filter={}]
+     * @returns {Promise<Document<T>|null>}
+     */
+    async findOne(filter = {}) {
+        await this.#ensureInitialized();
+        const query = this.#buildQueryString(filter);
+        const result = await SyDB.listInstances(
+            this.connection.databaseName,
+            this.collectionName,
+            query
+        );
+        
+        if (result.success && result.instances?.length) {
+            return this.#wrapDocument(result.instances[0]);
+        }
+        return null;
+    }
+ 
+    /**
+     * Find all documents
+     * @async
+     * @param {Partial<T>} [filter={}]
+     * @returns {Promise<Document<T>[]>}
+     */
+    async find(filter = {}) {
+        await this.#ensureInitialized();
+        const query = this.#buildQueryString(filter);
+        const result = await SyDB.listInstances(
+            this.connection.databaseName,
+            this.collectionName,
+            query
+        );
+        
+        if (result.success && result.instances) {
+            return result.instances.map(doc => this.#wrapDocument(doc));
+        }
+        return [];
+    }
+ 
+    /**
+     * Create a new document
+     * @async
+     * @param {T} data
+     * @returns {Promise<Document<T>>}
+     * @throws {Error}
+     */
+    async create(data) {
+        await this.#ensureInitialized();
+        
+        // Apply default values if not provided
+        const fullData = { ...data };
+        for (const field of this.schema) {
+            if (fullData[field.name] === undefined && field.default !== undefined) {
+                fullData[field.name] = typeof field.default === 'function' 
+                    ? field.default() 
+                    : field.default;
+            }
+        }
+        
+        const result = await SyDB.insertInstance(
+            this.connection.databaseName,
+            this.collectionName,
+            fullData
+        );
+        
+        if (result.success && result.id) {
+            return this.findById(result.id);
+        }
+        
+        throw new Error(result.error || 'Failed to create document');
+    }
+ 
+    /**
+     * Find document by ID
+     * @async
+     * @param {string} id
+     * @returns {Promise<Document<T>|null>}
+     */
+    async findById(id) {
+        await this.#ensureInitialized();
+        const result = await SyDB.listInstances(
+            this.connection.databaseName,
+            this.collectionName,
+            `_id:${id}`
+        );
+        
+        if (result.success && result.instances?.length) {
+            return this.#wrapDocument(result.instances[0]);
+        }
+        return null;
+    }
+ 
+    /**
+     * Update a document
+     * @async
+     * @param {string} id
+     * @param {Partial<T>} data
+     * @returns {Promise<Document<T>>}
+     * @throws {Error}
+     */
+    async update(id, data) {
+        await this.#ensureInitialized();
+        const result = await SyDB.updateInstance(
+            this.connection.databaseName,
+            this.collectionName,
+            id,
+            data
+        );
+        
+        if (result.success) {
+            return this.findById(id);
+        }
+        
+        throw new Error(result.error || 'Failed to update document');
+    }
+ 
+    /**
+     * Delete a document
+     * @async
+     * @param {string} id
+     * @returns {Promise<boolean>}
+     */
+    async delete(id) {
+        await this.#ensureInitialized();
+        const result = await SyDB.deleteInstance(
+            this.connection.databaseName,
+            this.collectionName,
+            id
+        );
+        
+        return result.success === true;
+    }
+ 
+    /**
+     * Delete many documents
+     * @async
+     * @param {Partial<T>} [filter={}]
+     * @returns {Promise<number>}
+     */
+    async deleteMany(filter = {}) {
+        await this.#ensureInitialized();
+        const documents = await this.find(filter);
+        let deleted = 0;
+        
+        for (const doc of documents) {
+            const success = await this.delete(doc._id);
+            if (success) deleted++;
+        }
+        
+        return deleted;
+    }
+ 
+    /**
+     * Count documents
+     * @async
+     * @param {Partial<T>} [filter={}]
+     * @returns {Promise<number>}
+     */
+    async count(filter = {}) {
+        await this.#ensureInitialized();
+        const documents = await this.find(filter);
+        return documents.length;
+    }
+ 
+    /**
+     * Check if document exists
+     * @async
+     * @param {Partial<T>} filter
+     * @returns {Promise<boolean>}
+     */
+    async exists(filter) {
+        await this.#ensureInitialized();
+        const doc = await this.findOne(filter);
+        return doc !== null;
+    }
+ 
+    /**
+     * Get collection schema
+     * @async
+     * @returns {Promise<Object>}
+     */
+    async getSchema() {
+        await this.#ensureInitialized();
+        const result = await SyDB.getCollectionSchema(
+            this.connection.databaseName,
+            this.collectionName
+        );
+        return result;
+    }
+ 
+    /**
+     * Drop the collection
+     * @async
+     * @returns {Promise<boolean>}
+     */
+    async drop() {
+        await this.#ensureInitialized();
+        const result = await SyDB.deleteCollection(
+            this.connection.databaseName,
+            this.collectionName
+        );
+        
+        if (result.success) {
+            this.connection.models.delete(this.collectionName);
+            this.initialized = false;
+        }
+        
+        return result.success;
+    }
+ }
 
 // ============================================================================
 // CLI CLASS (UNCHANGED)
