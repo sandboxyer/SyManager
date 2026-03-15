@@ -3900,15 +3900,11 @@ class Model {
             }
         }
         
-        const result = await SyDB.insertInstance(
+        return await SyDB.insertInstance(
             this.connection.databaseName,
             this.collectionName,
             fullData
         );
-        
-        if (result.success && result.id) {
-            return this.findById(result.id);
-        }
         
         throw new Error(result.error || 'Failed to create document');
     }
