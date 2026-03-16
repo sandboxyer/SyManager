@@ -2,6 +2,22 @@ import SyAPP from '../../../SyAPP.js'
 import SyDB from '../../../SyDB.js'
 import executor from '../../._/Util/executor.js'
 
+function formatObjectKeys(obj) {
+    // Get all keys except '_id' and '_created_at'
+    const keys = Object.keys(obj).filter(key => key !== '_id' && key !== '_created_at');
+    
+    // Take first 2 keys (or fewer if there aren't enough)
+    const selectedKeys = keys.slice(0, 2);
+    
+    // Format as "Key: Value, Key: Value"
+    return selectedKeys.map(key => `${key}: ${obj[key]}`).join(', ');
+  }
+
+  let view = {
+    db : '',
+    collection : ''
+}
+
 class SyDB_Config extends SyAPP.Func() {
     constructor(){
         super(
@@ -10,6 +26,8 @@ class SyDB_Config extends SyAPP.Func() {
                 let uid = props.session.UniqueID
 
                 let extra_message = ''
+
+               
 
                 if(props.resetdb){
                     await executor.removeForce('/var/lib/sydb')
@@ -59,7 +77,7 @@ class SyDB_Config extends SyAPP.Func() {
                                     
                                     if(collections.success){
                                         collections.collections.forEach(e => {
-                                            this.Button(uid,{name : e})
+                                            this.Button(uid,{name : e,props : {page : 'collection',db : dbName,collection : e}})
                                         })
                                     }
     
@@ -90,6 +108,25 @@ class SyDB_Config extends SyAPP.Func() {
 
 
 
+                })
+
+
+                await this.Page(uid,'collection',async () => {
+                    if(props.db){
+                        view.db = props.db
+                        view.collection = props.collection
+                    }
+
+                    this.Text(uid,`${view.db} | ${view.collection}`)
+
+                    let result = await SyDB.listInstances(view.db,view.collection)
+
+                    result.instances.forEach(e => {
+                        this.Button(uid,formatObjectKeys(e))
+                    })
+
+                    this.Button(uid,{name : ' '})
+                    this.Button(uid,{name : '← Return',props : {page : ''}})
                 })
 
 
