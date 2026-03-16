@@ -117,12 +117,17 @@ class SyDB_Config extends SyAPP.Func() {
                         view.collection = props.collection
                     }
 
+                    if(props.deleteinstance){
+                        await SyDB.deleteInstance(view.db,view.collection,props.deleteinstance)
+                      
+                    }
+
                     this.Text(uid,`${view.db} | ${view.collection}`)
 
                     let result = await SyDB.listInstances(view.db,view.collection)
 
                     result.instances.forEach(e => {
-                        this.Button(uid,formatObjectKeys(e))
+                        this.Button(uid,formatObjectKeys(e),{props : {deleteinstance : e._id}})
                     })
 
                     this.Button(uid,{name : ' '})
