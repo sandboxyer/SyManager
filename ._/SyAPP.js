@@ -1407,6 +1407,76 @@ class TerminalHUD extends EventEmitter {
   }
 
   /**
+ * Asks for password input with hidden characters
+ * @private
+ * @param {string} question - The password prompt
+ * @param {string} maskChar - Character to display instead of actual input (default: '*')
+ * @returns {Promise<string>} The password entered
+ */
+async askPassword(question, maskChar = '*') {
+  // Cleanup any existing menu state
+  if (this.isInMenu) {
+    this.cleanupMouseSupport();
+    this.isInMenu = false;
+  }
+
+  // Remove keypress listeners if any
+  stdin.removeAllListeners('keypress');
+  
+  // Ensure raw mode is off initially
+  if (stdin.isRaw) {
+    stdin.setRawMode(false);
+  }
+
+  return new Promise((resolve) => {
+    let password = '';
+    
+    // Write the question
+    stdout.write(`\n${question}`);
+    
+    // Set raw mode for character-by-character input
+    stdin.setRawMode(true);
+    stdin.resume();
+    
+    const handleChar = (data) => {
+      const char = data.toString();
+      
+      // Handle Enter key (CR or LF)
+      if (char === '\r' || char === '\n') {
+        stdout.write('\n'); // New line after password
+        stdin.setRawMode(false);
+        stdin.removeListener('data', handleChar);
+        resolve(password);
+        return;
+      }
+      
+      // Handle Backspace
+      if (char === '\b' || char === '\x7f') {
+        if (password.length > 0) {
+          password = password.slice(0, -1);
+          // Move cursor back, overwrite with space, move back again
+          stdout.write('\b \b');
+        }
+        return;
+      }
+      
+      // Handle Ctrl+C
+      if (char === '\x03') {
+        stdout.write('^C\n');
+        process.exit(0);
+      }
+      
+      // Add character to password
+      password += char;
+      // Display mask character
+      stdout.write(maskChar);
+    };
+    
+    stdin.on('data', handleChar);
+  });
+}
+
+  /**
    * Asks a question to the user
    * @async
    * @param {string} question - The question to ask
@@ -1427,6 +1497,11 @@ class TerminalHUD extends EventEmitter {
    * @emits TerminalHUD#menu:navigation
    */
   async ask(question, configuration = {}) {
+
+    if (configuration.password) {
+      return this.askPassword(question, configuration.mask || '*');
+    }
+  
     // Emit question ask event
     this.emitEvent(this.eventTypes.QUESTION_ASK, {
       question,
@@ -2806,6 +2881,7 @@ class userBuild {
     this.InputPath = ''
     this.InputProps = ''
     this.InputQuestion = ''
+    this.InputPassword = false // Add password flag
     
     // Dropdown state properties
     this.droplevel = 0
@@ -3468,16 +3544,17 @@ this.SetPage = (id, page, unlock = false) => {
 
       }
 
-     this.WaitInput = (id,config = {path : this.Name,props : {},question : ''}) => {
-      this.Builds.get(id).WaitInput = true
-      this.Builds.get(id).InputPath = config.path || this.Name
-      this.Builds.get(id).InputProps = config.props || {}
-      this.Builds.get(id).InputQuestion = config.question || ''
-     } 
+      this.WaitInput = (id, config = { path: this.Name, props: {}, question: '', password: false }) => {
+        this.Builds.get(id).WaitInput = true
+        this.Builds.get(id).InputPath = config.path || this.Name
+        this.Builds.get(id).InputProps = config.props || {}
+        this.Builds.get(id).InputQuestion = config.question || ''
+        this.Builds.get(id).InputPassword = config.password || false // Add password flag
+      }
 
 
       this.Build = async (props = {session : new Session}) => {
-        this.Builds.set(props.session.UniqueID,new userBuild({session : props.session}))
+        this.Builds.set(props.session.UniqueID, new userBuild({session : props.session}))
         await build(props) //handle .catch aqui
         let obj_return = {
           hud_obj : {
@@ -3488,7 +3565,8 @@ this.SetPage = (id, page, unlock = false) => {
           input_obj : {
             path : this.Builds.get(props.session.UniqueID).InputPath,
             props : this.Builds.get(props.session.UniqueID).InputProps,
-            question : this.Builds.get(props.session.UniqueID).InputQuestion
+            question : this.Builds.get(props.session.UniqueID).InputQuestion,
+            password : this.Builds.get(props.session.UniqueID).InputPassword // Add password flag
           }
         }
         this.Builds.delete(props.session.UniqueID)
@@ -3687,12 +3765,40 @@ class SyAPP {
             .catch(e => {
               this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
             });
+          
           if (return_obj.wait_input) {
-            let response = await this.HUD.ask(return_obj.input_obj.question || 'Type : ')
-              .catch(e => {
-                this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+            let response;
+            
+            try {
+              if (return_obj.input_obj.password) {
+                // Use password mode with masked input
+                response = await this.HUD.ask(return_obj.input_obj.question || 'Password: ', {
+                  password: true,
+                  mask: return_obj.input_obj.mask || '*'
+                });
+              } else {
+                // Regular input mode
+                response = await this.HUD.ask(return_obj.input_obj.question || 'Type: ');
+              }
+              
+              // Navigate to next screen with the input value
+              this.LoadScreen(return_obj.input_obj.path, { 
+                props: { 
+                  inputValue: response, 
+                  ...return_obj.input_obj.props 
+                } 
               });
-            this.LoadScreen(return_obj.input_obj.path, { props: { inputValue: response, ...return_obj.input_obj.props } });
+              
+            } catch (e) {
+              // Handle any errors during input
+              this.LoadScreen('error', { 
+                props: { 
+                  error_message: e, 
+                  error_func: funcname, 
+                  mainfunc: this.MainFunc.Name 
+                } 
+              });
+            }
           }
         })
         .catch(e => {
