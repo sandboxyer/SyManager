@@ -1020,6 +1020,52 @@ stop() {
     }
 
     /**
+ * Checks if a process is alive by its unique name
+ * @static
+ * @param {string} processName - Unique name of the process to check
+ * @returns {boolean} True if process is running
+ * 
+ * @example
+ * if (SyPM.isAliveByName('my-unique-app')) {
+ *   console.log('Process is running');
+ * }
+ */
+static isAliveByName(processName) {
+    const registry = this._loadRegistry();
+    const proc = registry.find(p => p.name === processName && p.config.uniqueNameLock === true);
+    
+    if (!proc) {
+        console.error(`Process with name "${processName}" not found or doesn't have unique name lock enabled.`);
+        return false;
+    }
+    
+    return this.isAlive(proc.id);
+}
+
+/**
+ * Kills a process by its unique name
+ * @static
+ * @param {string} processName - Unique name of the process to kill
+ * @returns {boolean} True if process was found and killed
+ * 
+ * @example
+ * // Kill by unique name
+ * SyPM.killByName('my-unique-app');
+ */
+static killByName(processName) {
+    const registry = this._loadRegistry();
+    const proc = registry.find(p => p.name === processName && p.config.uniqueNameLock === true);
+    
+    if (!proc) {
+        console.error(`Process with name "${processName}" not found or doesn't have unique name lock enabled.`);
+        return false;
+    }
+    
+    console.log(`Killing process by name: ${proc.name} (ID: ${proc.id}, PID: ${proc.pid})`);
+    return this.kill(proc.id);
+}
+
+    /**
      * Kills a process by PID or ID
      * @static
      * @param {string|number} pidOrId - Process ID or PID to kill
@@ -1036,7 +1082,7 @@ stop() {
     static kill(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
-       
+        
         if (!proc) {
             console.error('Process not found in registry.');
             return false;
@@ -1182,33 +1228,47 @@ stop() {
     }
    
     /**
-     * Checks if a process is alive by PID or ID
-     * @static
-     * @param {string|number} pidOrId - Process ID or PID to check
-     * @returns {boolean} True if process is running
-     * 
-     * @example
-     * if (SyPM.isAlive('abc123def')) {
-     *   console.log('Process is running');
-     * }
-     */
-    static isAlive(pidOrId) {
-        const registry = this._loadRegistry();
-        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
-   
-        if (!proc) return false;
-   
-        try {
-            if (proc.isAutoRestart && proc.monitorPid) {
-                process.kill(proc.monitorPid, 0);
-            } else {
-                process.kill(proc.pid, 0);
-            }
-            return true;
-        } catch (error) {
-            return false;
-        }
+ * Checks if a process is alive by PID, ID, or name
+ * @static
+ * @param {string|number} identifier - Process ID, PID, or unique name to check
+ * @returns {boolean} True if process is running
+ * 
+ * @example
+ * // Check by PID
+ * SyPM.isAlive(12345);
+ * 
+ * @example
+ * // Check by ID
+ * SyPM.isAlive('abc123def');
+ * 
+ * @example
+ * // Check by name
+ * SyPM.isAlive('my-unique-app');
+ */
+static isAlive(identifier) {
+    const registry = this._loadRegistry();
+    
+    // Try to find by ID or PID first
+    let proc = registry.find(p => p.pid == identifier || p.id === identifier);
+    
+    // If not found, try to find by name (only if it has unique name lock)
+    if (!proc && typeof identifier === 'string') {
+        proc = registry.find(p => p.name === identifier && p.config.uniqueNameLock === true);
     }
+    
+    if (!proc) return false;
+    
+    try {
+        if (proc.isAutoRestart && proc.monitorPid) {
+            process.kill(proc.monitorPid, 0);
+        } else {
+            process.kill(proc.pid, 0);
+        }
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
 
     /**
      * Follows logs of a process in real-time
@@ -2163,59 +2223,63 @@ setInterval(() => {
      */
     static displayHelp() {
         console.log(`
-Process Manager CLI Usage (Global):
-  node SyPM [command] [options]
-
-Commands:
-  --run <file>          Run a Node.js script as a background process
-  --list                List all managed processes (global)
-  --kill <pid|id>       Kill a process by PID or ID
-  --kill-all            Stop all managed processes and remove from registry
-  --restart <pid|id>    Restart a process by PID or ID
-  --alive <pid|id>      Check if a process is alive
-  --log [pid|id]        Follow logs of a process (real-time) or all processes if no PID/ID specified
-  --cleanup             Remove dead processes from registry
-  --info                Show global SyPM information
-  --enable-daemon <id>  Enable daemon mode for a process (auto-start on boot)
-  --disable-daemon <id> Disable daemon mode for a process
-  --test                Run comprehensive test suite
-  --help                Display this help message
-
-Options for --run:
-  --name <name>         Specify a name for the process
-  --auto-restart        Auto-restart the process if it crashes
-  --restart-tries <n>   Number of restart attempts (implies auto-restart)
-  --working-dir <path>  Run the process in specified working directory
-  --daemon              Run as system daemon (auto-start on system boot)
-  --unique-name-lock    Lock the process name as unique (prevent duplicates)
-
-Global Features:
-  • Processes are managed system-wide from: ${GLOBAL_BASE_DIR}
-  • Access process list from any directory
-  • Persistent registry across terminal sessions
-  • Real-time status updates for auto-restart processes
-  • Optional working directory support
-  • Daemon mode for auto-start on system reboot (Linux only)
-  • Support for Ubuntu (systemd) and Alpine Linux (OpenRC)
-  • Automatic shell detection (bash/ash)
-  • Unique name locking to prevent duplicate process names
-  • Follow logs for all processes simultaneously
-
-Examples:
-  node SyPM --run app.js --name my-app
-  node SyPM --run app.js --auto-restart
-  node SyPM --run app.js --restart-tries 3
-  node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
-  node SyPM --run app.js --working-dir /path/to/directory
-  node SyPM --run app.js --daemon
-  node SyPM --run app.js --unique-name-lock --name my-unique-app
-  node SyPM --enable-daemon abc123def
-  node SyPM --disable-daemon abc123def
-  node SyPM --log                    # Follow logs for all processes
-  node SyPM --log abc123def          # Follow logs for specific process
-  node SyPM --list                   # Shows all processes regardless of current directory
-  node SyPM --test                   # Run comprehensive test suite
-        `);
+    Process Manager CLI Usage (Global):
+      node SyPM [command] [options]
+    
+    Commands:
+      --run <file>          Run a Node.js script as a background process
+      --list                List all managed processes (global)
+      --kill <pid|id|name>  Kill a process by PID, ID, or unique name
+      --kill-all            Stop all managed processes and remove from registry
+      --restart <pid|id>    Restart a process by PID or ID
+      --alive <pid|id|name> Check if a process is alive by PID, ID, or unique name
+      --log [pid|id]        Follow logs of a process (real-time) or all processes if no PID/ID specified
+      --cleanup             Remove dead processes from registry
+      --info                Show global SyPM information
+      --enable-daemon <id>  Enable daemon mode for a process (auto-start on boot)
+      --disable-daemon <id> Disable daemon mode for a process
+      --test                Run comprehensive test suite
+      --help                Display this help message
+    
+    Options for --run:
+      --name <name>         Specify a name for the process
+      --auto-restart        Auto-restart the process if it crashes
+      --restart-tries <n>   Number of restart attempts (implies auto-restart)
+      --working-dir <path>  Run the process in specified working directory
+      --daemon              Run as system daemon (auto-start on system boot)
+      --unique-name-lock    Lock the process name as unique (prevent duplicates)
+    
+    Global Features:
+      • Processes are managed system-wide from: ${GLOBAL_BASE_DIR}
+      • Access process list from any directory
+      • Persistent registry across terminal sessions
+      • Real-time status updates for auto-restart processes
+      • Optional working directory support
+      • Daemon mode for auto-start on system reboot (Linux only)
+      • Support for Ubuntu (systemd) and Alpine Linux (OpenRC)
+      • Automatic shell detection (bash/ash)
+      • Unique name locking to prevent duplicate process names
+      • Kill and check alive status by unique name
+      • Follow logs for all processes simultaneously
+    
+    Examples:
+      node SyPM --run app.js --name my-app --unique-name-lock
+      node SyPM --alive my-app                    # Check if process is alive by name
+      node SyPM --kill my-app                      # Kill process by name
+      node SyPM --kill 12345                        # Kill by PID
+      node SyPM --kill abc123def                    # Kill by ID
+      node SyPM --run app.js --auto-restart
+      node SyPM --run app.js --restart-tries 3
+      node SyPM --run app.js --name my-app --auto-restart --restart-tries 5
+      node SyPM --run app.js --working-dir /path/to/directory
+      node SyPM --run app.js --daemon
+      node SyPM --enable-daemon abc123def
+      node SyPM --disable-daemon abc123def
+      node SyPM --log                    # Follow logs for all processes
+      node SyPM --log abc123def          # Follow logs for specific process
+      node SyPM --list                   # Shows all processes regardless of current directory
+      node SyPM --test                   # Run comprehensive test suite
+            `);
     }
 
     /**
@@ -2225,17 +2289,17 @@ Examples:
      */
     static parseArguments() {
         const args = process.argv.slice(2);
-       
+        
         if (args.length === 0 || args.includes('--help')) {
             this.displayHelp();
             return;
         }
-
+    
         if (args.includes('--info')) {
             this.info();
             return;
         }
-
+    
         if (args.includes('--test')) {
             this.Test().then(success => {
                 process.exit(success ? 0 : 1);
@@ -2245,7 +2309,7 @@ Examples:
             });
             return;
         }
-
+    
         if (args.includes('--list')) {
             const processes = this.list();
             console.log('Managed Processes (Global):');
@@ -2256,28 +2320,28 @@ Examples:
             }
             return;
         }
-
+    
         if (args.includes('--run')) {
             const runIndex = args.indexOf('--run');
             if (runIndex + 1 >= args.length || args[runIndex + 1].startsWith('--')) {
                 console.error('Error: --run requires a file path');
                 return;
             }
-           
+            
             const filePath = args[runIndex + 1];
             const config = {};
-           
+            
             if (args.includes('--name')) {
                 const nameIndex = args.indexOf('--name');
                 if (nameIndex + 1 < args.length && !args[nameIndex + 1].startsWith('--')) {
                     config.name = args[nameIndex + 1];
                 }
             }
-           
+            
             if (args.includes('--auto-restart')) {
                 config.autoRestart = true;
             }
-           
+            
             if (args.includes('--restart-tries')) {
                 const triesIndex = args.indexOf('--restart-tries');
                 if (triesIndex + 1 < args.length && !args[triesIndex + 1].startsWith('--')) {
@@ -2288,22 +2352,22 @@ Examples:
                     }
                 }
             }
-
+    
             if (args.includes('--working-dir')) {
                 const dirIndex = args.indexOf('--working-dir');
                 if (dirIndex + 1 < args.length && !args[dirIndex + 1].startsWith('--')) {
                     config.workingDir = args[dirIndex + 1];
                 }
             }
-
+    
             if (args.includes('--daemon')) {
                 config.daemon = true;
             }
-
+    
             if (args.includes('--unique-name-lock')) {
                 config.uniqueNameLock = true;
             }
-           
+            
             try {
                 const result = this.run(filePath, config);
                 console.log(`✓ Started process: ${result.name} (PID: ${result.pid}, ID: ${result.id})`);
@@ -2319,55 +2383,67 @@ Examples:
                 }
                 if (config.uniqueNameLock) {
                     console.log(`✓ Unique name lock: Enabled (no duplicate names allowed)`);
+                    console.log(`✓ You can now use "${result.name}" with --alive and --kill commands`);
                 }
             } catch (error) {
                 console.error('✗ Error starting process:', error.message);
             }
             return;
         }
-
+    
         if (args.includes('--kill')) {
             const killIndex = args.indexOf('--kill');
             if (killIndex + 1 >= args.length || args[killIndex + 1].startsWith('--')) {
-                console.error('Error: --kill requires a PID or ID');
+                console.error('Error: --kill requires a PID, ID, or name');
                 return;
             }
-           
-            const pidOrId = args[killIndex + 1];
-            this.kill(pidOrId);
+            
+            const identifier = args[killIndex + 1];
+            
+            // First try to kill by name (if it's a string and not a number)
+            if (isNaN(identifier)) {
+                const killed = this.killByName(identifier);
+                if (!killed) {
+                    // If name not found, try as ID
+                    this.kill(identifier);
+                }
+            } else {
+                // If it's a number, treat as PID or ID
+                this.kill(identifier);
+            }
             return;
         }
-
+    
         if (args.includes('--kill-all')) {
             this.killAll();
             return;
         }
-
+    
         if (args.includes('--restart')) {
             const restartIndex = args.indexOf('--restart');
             if (restartIndex + 1 >= args.length || args[restartIndex + 1].startsWith('--')) {
                 console.error('Error: --restart requires a PID or ID');
                 return;
             }
-           
+            
             const pidOrId = args[restartIndex + 1];
             this.restart(pidOrId);
             return;
         }
-
+    
         if (args.includes('--alive')) {
             const aliveIndex = args.indexOf('--alive');
             if (aliveIndex + 1 >= args.length || args[aliveIndex + 1].startsWith('--')) {
-                console.error('Error: --alive requires a PID or ID');
+                console.error('Error: --alive requires a PID, ID, or name');
                 return;
             }
-           
-            const pidOrId = args[aliveIndex + 1];
-            const isAlive = this.isAlive(pidOrId);
-            console.log(`Process ${pidOrId} is ${isAlive ? 'alive' : 'not alive'}`);
+            
+            const identifier = args[aliveIndex + 1];
+            const isAlive = this.isAlive(identifier);
+            console.log(`Process "${identifier}" is ${isAlive ? 'alive' : 'not alive'}`);
             return;
         }
-
+    
         if (args.includes('--log')) {
             const logIndex = args.indexOf('--log');
             let pidOrId;
@@ -2377,40 +2453,40 @@ Examples:
                 pidOrId = args[logIndex + 1];
             }
             // If no PID/ID specified, follow all processes
-           
+            
             this.log(pidOrId);
             return;
         }
-
+    
         if (args.includes('--enable-daemon')) {
             const daemonIndex = args.indexOf('--enable-daemon');
             if (daemonIndex + 1 >= args.length || args[daemonIndex + 1].startsWith('--')) {
                 console.error('Error: --enable-daemon requires a process ID');
                 return;
             }
-           
+            
             const processId = args[daemonIndex + 1];
             this.enableDaemon(processId);
             return;
         }
-
+    
         if (args.includes('--disable-daemon')) {
             const daemonIndex = args.indexOf('--disable-daemon');
             if (daemonIndex + 1 >= args.length || args[daemonIndex + 1].startsWith('--')) {
                 console.error('Error: --disable-daemon requires a process ID');
                 return;
             }
-           
+            
             const processId = args[daemonIndex + 1];
             this.disableDaemon(processId);
             return;
         }
-
+    
         if (args.includes('--cleanup')) {
             this.cleanup();
             return;
         }
-
+    
         console.error('Error: Unknown command or invalid arguments');
         this.displayHelp();
     }
