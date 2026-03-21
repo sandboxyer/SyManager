@@ -14,7 +14,8 @@ static DefaultFunc = Sy
 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-    new SyAPP({mainfunc : SyManager.DefaultFunc})
+   let app = new SyAPP(SyManager.DefaultFunc)
+    await SyDB.Connect(app.MainFunc.Name)
   }
   
   
