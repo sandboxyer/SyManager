@@ -5,7 +5,7 @@ import Git from '../../._/Util/Git.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import os from 'os'
-import FastHTTP from './FastHTTP.js'
+import FastHTTP from './FastHTTP/FastHTTP.js'
 
 const execAsync = promisify(exec)
 

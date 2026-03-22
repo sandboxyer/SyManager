@@ -65,6 +65,27 @@ class HTTPClient {
     return body;
   }
 
+  static colorHttpMethod(method) {
+    // Color mappings for different HTTP methods
+    const colorMap = {
+        'get': '\x1b[33m',      // Yellow
+        'post': '\x1b[32m',     // Green
+        'put': '\x1b[34m',      // Blue
+        'delete': '\x1b[31m',   // Red
+        'patch': '\x1b[35m',    // Magenta
+        'head': '\x1b[36m',     // Cyan
+        'options': '\x1b[90m'   // Gray
+    };
+    
+    const resetColor = '\x1b[0m';
+    const upperMethod = method.toUpperCase();
+    
+    // Get color for the method, default to white if method not found
+    const color = colorMap[method.toLowerCase()] || '\x1b[37m';
+    
+    return `${color}${upperMethod}${resetColor}`;
+}
+
   /**
    * Handle redirects
    * @param {string} location
