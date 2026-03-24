@@ -3,6 +3,8 @@ import HTTPClient from "../../../._/Util/HTTPClient.js"
 import SyDB from '../../../../SyDB.js'
 import Route from './entities/Route.js'
 import Group from './entities/Group.js'
+import BodyKey from './entities/BodyKey.js'
+
 
 class FastHTTP extends SyAPP.Func() {
     constructor(){
@@ -55,11 +57,25 @@ class FastHTTP extends SyAPP.Func() {
                             if(props.newurl){
                                 await route.update({Url : props.inputValue})
                             }
+
+                            if(props.newkeyvalue_key){
+                                this.Storages.Delete(uid,'keyvalue')
+                                this.Storages.Set(uid,'keyvalue',props.inputValue)
+                                this.WaitInput(uid,{question : 'Key value : ',props : {newkeyvalue_value: true}})
+                            }
+
+                            if(props.newkeyvalue_value){
+                               await BodyKey.Model.create({RouteID : route._id,Key : this.Storages.Get(uid,'keyvalue'),Value : props.inputValue})
+                            }
                         }
+
+                        if(props.newkeyvalue){ this.WaitInput(uid,{question : 'Key name : ',props : {newkeyvalue_key: true}}) }
 
                         if(props.renameroute){ this.WaitInput(uid,{props : {newroutename : true}}) }
 
                         if(props.editurl){ this.WaitInput(uid,{props : {newurl : true}})  }
+
+                        if(props.removebodykey){BodyKey.Model.delete(props.removebodykey)}
                         
 
                         this.Text(uid,' ')
@@ -74,8 +90,21 @@ class FastHTTP extends SyAPP.Func() {
                             })
                         },{up_buttontext : `Change Method | ${HTTPClient.colorHttpMethod(route.Method)}`,down_buttontext : 'Change Method',horizontal : true})
                         await this.DropDown(uid,'editbody',async () => {
-                            this.Button(uid,'')
-                        })
+                            this.Button(uid,' ')
+                                let keys = await BodyKey.Model.find({RouteID : route._id})
+                                if(keys.length){this.Button(uid,this.TextColor.white('{'))}
+                                keys.forEach((e,i) => {
+                                    if(i == keys.length-1){
+                                        this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}`,{props : {removebodykey : e._id}})
+                                    } else {
+                                        this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}${this.TextColor.white(',')}`,{props : {removebodykey : e._id}})
+                                    }
+                                    
+                                })
+                                if(keys.length){this.Button(uid,this.TextColor.white('}'))}
+                                this.Button(uid,' ')
+                            this.Button(uid,`+ New ${this.TextColor.gold('key:value')}`,{props : {newkeyvalue : true}})
+                        },{up_buttontext : 'Edit body',down_buttontext : 'Edit body'})
                         
                         this.Button(uid,' ')
                         this.Button(uid,'<- Return',{props : {exitedit : true}})
