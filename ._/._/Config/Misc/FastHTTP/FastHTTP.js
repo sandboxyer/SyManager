@@ -320,9 +320,9 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
                                 if(result.statusCode){
-                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
-                                        formatData(result.data,uid)
+                                        this.Storages.Set(uid,'request_data',result.data)
                                     }
                                     
                                 } else {
@@ -337,9 +337,9 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.get(route.Url).catch(e =>{return e})
                                 if(result.statusCode){
-                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
-                                        formatData(result.data,uid)
+                                        this.Storages.Set(uid,'request_data',result.data)
                                     }
                                 } else {
                                     this.Text(uid,this.TextColor.red(result))
@@ -349,6 +349,23 @@ class FastHTTP extends SyAPP.Func() {
                                     this.Text(uid,this.TextColor.yellow('Method not configured'))
                                 }
                             }
+                        }
+
+                        if(props.resetreqdata){
+                            this.Storages.Delete(uid,'request_data')
+                            this.Storages.Delete(uid,'request_data_status')
+                        }
+
+                        if(this.Storages.Has(uid,'request_data') || this.Storages.Has(uid,'request_data_status')){
+                            this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
+                            formatData(this.Storages.Get(uid,'request_data'),uid)
+                            this.Buttons(uid,[
+                            {name : 'Save'},
+                            {name : 'Reset',props : {resetreqdata : true}},
+                            {name : 'Navigate'}
+                            ])
+                            this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
+
                         }
     
                         let routes = await Route.Model.find()
