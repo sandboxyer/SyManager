@@ -391,20 +391,16 @@ class FastHTTP extends SyAPP.Func() {
                 })
 
 
-                await this.Page(uid,'env',async () => {
+                await this.Page(uid,'settings',async () => {
 
-                  this.Button(uid,'teste1')
-
-
-                })
-
-
-                await this.Page(uid,'globalvar',async () => {
-
-                    this.Button(uid,'teste2')
+                  this.Button(uid,'Auto save')
+                  this.Button(uid,'Variables')
+                  this.Button(uid,'Search APIs')
 
 
                 })
+
+
 
 
 
@@ -414,8 +410,7 @@ class FastHTTP extends SyAPP.Func() {
                 this.Button(uid,this.TextColor.blue('――――――――――――――――――――――――――――――――――――――――――――――'))
                 this.Buttons(uid,[
                     {name : (props.page == '' || !props.page) ? this.TextColor.yellow('Home') : 'Home' ,props : {page : ''}},
-                    {name : (props.page == 'env') ? this.TextColor.yellow('Env') : 'Env' ,props : {page : 'env'}},
-                    {name : (props.page == 'globalvar') ? this.TextColor.yellow('Global Variables') : 'Global Variables'  ,props : {page : 'globalvar'}},
+                    {name : (props.page == 'settings') ? this.TextColor.yellow('Settings') : 'Settings' ,props : {page : 'settings'}},
                     {name :'<- Return',path : this.Storages.Get(uid,'parentfunc')}
                 ])
             })
