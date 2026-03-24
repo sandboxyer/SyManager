@@ -5,6 +5,29 @@ import Route from './entities/Route.js'
 import Group from './entities/Group.js'
 import BodyKey from './entities/BodyKey.js'
 
+function formatStatusWithColor(statusCode) {
+    // Define color codes
+    const colors = {
+        green: '\x1b[32m',
+        yellow: '\x1b[33m',
+        red: '\x1b[31m',
+        reset: '\x1b[0m'
+    };
+    
+    let color;
+    
+    if (statusCode >= 200 && statusCode < 300) {
+        color = colors.green;      // 2xx - Success
+    } else if (statusCode >= 300 && statusCode < 400) {
+        color = colors.yellow;     // 3xx - Redirection
+    } else if (statusCode >= 400 && statusCode < 600) {
+        color = colors.red;        // 4xx/5xx - Client/Server errors
+    } else {
+        color = colors.reset;      // Unknown status codes
+    }
+    
+    return `${color}${statusCode}${colors.reset}`;
+}
 
 class FastHTTP extends SyAPP.Func() {
     constructor(){
@@ -15,6 +38,172 @@ class FastHTTP extends SyAPP.Func() {
 
                 if(!this.Storages.Has(uid,'parentfunc')){this.Storages.Set(uid,'parentfunc',props.session.PreviousPath)}
                 //if(have && previous!=actual){refresh}
+
+                let formatData = (data, uid, maxDepth = 0, currentDepth = 0) => {
+                    const indent = '  '.repeat(currentDepth);
+                    const textFunc = this.Text.bind(this);
+                    
+                    // Safe text output function with fallback
+                    const safeText = (uid, text) => {
+                        try {
+                            if (this.Text && typeof this.Text === 'function') {
+                                this.Text(uid, text);
+                            } else if (textFunc) {
+                                textFunc(uid, text);
+                            } else {
+                                console.log(text);
+                            }
+                        } catch (err) {
+                            console.log(text);
+                        }
+                    };
+                    
+                    // Safe color function
+                    const colorText = (text) => {
+                        try {
+                            if (this.TextColor && this.TextColor.gold && typeof this.TextColor.gold === 'function') {
+                                return this.TextColor.gold(text);
+                            }
+                            return text;
+                        } catch (err) {
+                            return text;
+                        }
+                    };
+                    
+                    // Helper function to format primitive value
+                    const formatPrimitive = (value) => {
+                        if (value === null) return 'null';
+                        if (typeof value === 'boolean') return value.toString();
+                        if (typeof value === 'number') return value.toString();
+                        if (typeof value === 'string') return `'${value}'`;
+                        return `'${value}'`;
+                    };
+                    
+                    // Helper function to check if array contains only primitives
+                    const isPrimitiveArray = (arr) => {
+                        return arr.every(item => 
+                            item === null || 
+                            typeof item === 'string' || 
+                            typeof item === 'number' || 
+                            typeof item === 'boolean'
+                        );
+                    };
+                    
+                    // Handle null/undefined
+                    if (data === null || data === undefined) {
+                        safeText(uid, `${indent}null`);
+                        return;
+                    }
+                    
+                    // Handle arrays
+                    if (Array.isArray(data)) {
+                        // Check if we've reached max depth
+                        if (maxDepth > 0 && currentDepth >= maxDepth) {
+                            safeText(uid, `${indent}[array]`);
+                            return;
+                        }
+                        
+                        if (data.length === 0) {
+                            safeText(uid, `${indent}[]`);
+                            return;
+                        }
+                        
+                        // Check if array contains only primitives and we're not at the first level of object property
+                        if (isPrimitiveArray(data) && currentDepth > 0) {
+                            // Compact format for primitive arrays
+                            const formattedValues = data.map(item => formatPrimitive(item)).join(', ');
+                            safeText(uid, `${indent}[${formattedValues}]`);
+                            return;
+                        }
+                        
+                        // Multi-line format for arrays with objects or nested arrays
+                        safeText(uid, `${indent}[`);
+                        data.forEach((item, index) => {
+                            if (index > 0) safeText(uid, `, `);
+                            formatData(item, uid, maxDepth, currentDepth + 1);
+                        });
+                        safeText(uid, `]`);
+                        return;
+                    }
+                    
+                    // Handle objects
+                    if (typeof data === 'object') {
+                        // Check if we've reached max depth
+                        if (maxDepth > 0 && currentDepth >= maxDepth) {
+                            safeText(uid, `${indent}[object]`);
+                            return;
+                        }
+                        
+                        const result_keys = Object.keys(data);
+                        if (result_keys.length === 0) {
+                            safeText(uid, `${indent}{}`);
+                            return;
+                        }
+                        
+                        safeText(uid, `${indent}{`);
+                        result_keys.forEach((key, index) => {
+                            const value = data[key];
+                            const valueType = typeof value;
+                            const lineIndent = `${indent}  `;
+                            const isLast = index === result_keys.length - 1;
+                            
+                            try {
+                                if (value === null) {
+                                    safeText(uid, `\n${lineIndent}${key} : null${isLast ? '' : ','}`);
+                                } else if (Array.isArray(value)) {
+                                    // Check if next level would exceed max depth
+                                    if (maxDepth > 0 && currentDepth + 1 >= maxDepth) {
+                                        safeText(uid, `\n${lineIndent}${key} : ${colorText('[array]')}${isLast ? '' : ','}`);
+                                    } else {
+                                        // Check if it's a primitive array for compact display
+                                        if (isPrimitiveArray(value) && currentDepth + 1 > 0) {
+                                            const formattedValues = value.map(item => formatPrimitive(item)).join(', ');
+                                            safeText(uid, `\n${lineIndent}${key} : ${colorText(`[${formattedValues}]`)}${isLast ? '' : ','}`);
+                                        } else {
+                                            safeText(uid, `\n${lineIndent}${key} : `);
+                                            formatData(value, uid, maxDepth, currentDepth + 1);
+                                            if (!isLast) safeText(uid, `,`);
+                                        }
+                                    }
+                                } else if (valueType === 'object') {
+                                    // Check if next level would exceed max depth
+                                    if (maxDepth > 0 && currentDepth + 1 >= maxDepth) {
+                                        safeText(uid, `\n${lineIndent}${key} : ${colorText('[object]')}${isLast ? '' : ','}`);
+                                    } else {
+                                        safeText(uid, `\n${lineIndent}${key} : `);
+                                        formatData(value, uid, maxDepth, currentDepth + 1);
+                                        if (!isLast) safeText(uid, `,`);
+                                    }
+                                } else if (valueType === 'boolean') {
+                                    safeText(uid, `\n${lineIndent}${key} : ${colorText(value.toString())}${isLast ? '' : ','}`);
+                                } else if (valueType === 'number') {
+                                    safeText(uid, `\n${lineIndent}${key} : ${colorText(value.toString())}${isLast ? '' : ','}`);
+                                } else if (valueType === 'string') {
+                                    safeText(uid, `\n${lineIndent}${key} : ${colorText(`'${value}'`)}${isLast ? '' : ','}`);
+                                } else {
+                                    safeText(uid, `\n${lineIndent}${key} : ${colorText(`'${value}'`)}${isLast ? '' : ','}`);
+                                }
+                            } catch (err) {
+                                safeText(uid, `\n${lineIndent}${key} : ${colorText('[error]')}${isLast ? '' : ','}`);
+                            }
+                        });
+                        safeText(uid, `\n${indent}}`);
+                        return;
+                    }
+                    
+                    // Handle primitive values for array items
+                    try {
+                        if (typeof data === 'boolean') {
+                            safeText(uid, `${colorText(data.toString())}`);
+                        } else if (typeof data === 'number') {
+                            safeText(uid, `${colorText(data.toString())}`);
+                        } else {
+                            safeText(uid, `${colorText(`'${data}'`)}`);
+                        }
+                    } catch (err) {
+                        safeText(uid, `${colorText('[error]')}`);
+                    }
+                };
 
                 const CloseDropdown = (name) => {
                     const storageKey = `dropdown-${name}`;
@@ -118,13 +307,56 @@ class FastHTTP extends SyAPP.Func() {
                         if(props.removeroute){
                             await Route.Model.delete(props.removeroute)
                         }
+
+                        if(props.runroute){
+                            this.Text(uid,' ')
+                            let route = await Route.Model.findById(props.runroute)
+                            if(route._id){
+                                if(route.Method.toLocaleLowerCase() == 'post'){
+                                    let keys = await BodyKey.Model.find({RouteID : route._id})
+                                    let body = {}
+                                    keys.forEach(e => {
+                                        body[e.Key] = e.Value
+                                    })
+                                let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
+                                if(result.statusCode){
+                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    if(typeof result.data == 'object'){
+                                        formatData(result.data,uid)
+                                    }
+                                    
+                                } else {
+                                    this.Text(uid,this.TextColor.red(result))
+                                }
+                                 
+                                } else if(route.Method.toLocaleLowerCase() == 'get'){
+                                    let keys = await BodyKey.Model.find({RouteID : route._id})
+                                    let body = {}
+                                    keys.forEach(e => {
+                                        body[e.Key] = e.Value
+                                    })
+                                let result = await HTTPClient.get(route.Url).catch(e =>{return e})
+                                if(result.statusCode){
+                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    if(typeof result.data == 'object'){
+                                        formatData(result.data,uid)
+                                    }
+                                } else {
+                                    this.Text(uid,this.TextColor.red(result))
+                                }
+                                 
+                                } else {
+                                    this.Text(uid,this.TextColor.yellow('Method not configured'))
+                                }
+                            }
+                        }
     
                         let routes = await Route.Model.find()
     
                         for (const [index, route] of routes.entries()) {
                             await this.DropDown(uid,route._id,async () => {
                                 this.Buttons(uid,[
-                                    {name : 'Run'},
+                                    {name : 'Run',props : {runroute : route._id}},
                                     {name : 'Edit',props : {editroute : route._id}},
                                     {name : 'Remove',props : {removeroute : route._id}}
                                 ])
