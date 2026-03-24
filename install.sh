@@ -23,8 +23,8 @@ MAIN_SOURCE_DIR="$REPO_DIR"                         # Root of your project files
 
 # NODE.JS COMMAND MAPPING (REQUIRED - define your commands)
 # Using space-separated lists for ash compatibility (no associative arrays)
-NODE_ENTRY_POINTS_SRC="SyManager.js ._/SyPM.js ._/SyDB.js pkg-cli.js"
-NODE_ENTRY_POINTS_CMD="sy sypm sydb pkg"
+NODE_ENTRY_POINTS_SRC="SyManager.js ._/SyPM.js ._/SyDB.js pkg-cli.js ._/._/._/Packager/Pack.js"
+NODE_ENTRY_POINTS_CMD="sy sypm sydb pkg pack"
 
 # COMMAND WORKING DIRECTORY CONFIGURATION
 # Set to "caller" to use the directory where command was called from
@@ -37,6 +37,7 @@ get_command_working_dir() {
         "sypm") echo "caller" ;;
         "sydb") echo "global" ;;
         "pkg") echo "caller" ;;
+        "pack") echo "caller" ;;
         "git-config") echo "global" ;;
         *) echo "global" ;;
     esac
@@ -96,6 +97,13 @@ show_help() {
     echo "  pkg start                    Create package.json (if missing) with version 0.0.1 and type:module"
     echo "  pkg run <script> [args...]   Run npm script from any package.json with arguments"
     echo "  pkg version <type|ver>        Update version (major|minor|patch|X.Y.Z) and git commit"
+    echo
+    echo "pack command features:"
+    echo "  pack [path1] [path2] ...     Compare directories and show differences"
+    echo "  Examples:"
+    echo "    pack path/to/project              Compare single directory with itself"
+    echo "    pack path/to/one path/to/two      Compare two directories"
+    echo "    pack path/one path/two path/three Compare multiple directories"
     exit 0
 }
 
@@ -876,8 +884,20 @@ echo "pkg command features:"
 echo "  pkg start                    - Create/ensure package.json has version 0.0.1 and type:module"
 echo "  pkg run <script> [args...]   - Run any script from package.json with arguments"
 echo "  pkg version <type|ver>       - Update version and create git commit"
+
+printf "\n"
+echo "pack command features:"
+echo "  pack [path1] [path2] ...     - Compare directories and show differences"
+echo "  Examples:"
+echo "    pack path/to/project              - Compare single directory with itself"
+echo "    pack path/to/one path/to/two      - Compare two directories"
+echo "    pack path/one path/two path/three - Compare multiple directories"
+
+printf "\n"
+echo "Other commands:"
 echo "  wsave                        - Surgically fix VSCode save permissions silently"
 echo "  git-config                    - Complete Git setup (finds and runs Git.js --setup)"
+
 printf "\n"
 echo "pkg version supports:"
 echo "  • patch    - Bump patch version (1.2.3 → 1.2.4)"
@@ -885,6 +905,7 @@ echo "  • minor    - Bump minor version (1.2.3 → 1.3.0)"
 echo "  • major    - Bump major version (1.2.3 → 2.0.0)"
 echo "  • X.Y.Z    - Set specific version"
 echo "  • X.Y.Z-prerelease - Set version with prerelease tag"
+
 printf "\n"
 echo "Examples:"
 echo "  pkg start                     # Creates/ensures package.json has version 0.0.1 and type:module"
@@ -892,9 +913,13 @@ echo "  pkg run test                  # Runs 'test' script from package.json"
 echo "  pkg run build                 # Runs 'build' script from package.json"
 echo "  pkg run dev --port 3000       # Runs 'dev' script with --port argument"
 echo "  pkg version patch             # Bumps patch version and commits"
+echo "  pack ./project1 ./project2    # Compares two directories"
+echo "  pack ./src ./dist             # Compares source and distribution directories"
 echo "  git-config                     # Complete Git setup (Git.js --setup)"
+
 printf "\n"
 echo "Note: pkg works from any directory. 'pkg start' ensures package.json has version 0.0.1 and type:module"
+echo "Note: pack works from any directory and supports multiple paths as arguments"
 echo "Note: git-config finds Git.js anywhere in the installation tree"
 
 printf "\n"
