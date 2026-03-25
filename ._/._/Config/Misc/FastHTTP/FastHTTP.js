@@ -301,6 +301,12 @@ class FastHTTP extends SyAPP.Func() {
 
                     } else {
 
+                        if(props.inputValue){
+                            if(props.groupnewname){
+                                await Component.Model.update(props.groupnewname,{Name : props.inputValue})
+                            }
+                        }
+
                         if(props.newroutechild){
                             await Route.New({GroupID : props.newroutechild})
                         }
@@ -317,6 +323,16 @@ class FastHTTP extends SyAPP.Func() {
     
                         if(props.removeroute){
                             await Route.Model.delete(props.removeroute)
+                        }
+
+                        
+
+                        if(props.renamegroup){
+                            this.WaitInput(uid,{question : 'New group name : ',props : {groupnewname : props.renamegroup}})
+                        }
+
+                        if(props.deletegroup){
+                            Component.Model.delete(props.deletegroup)
                         }
 
                         if(props.runroute){
@@ -407,7 +423,12 @@ class FastHTTP extends SyAPP.Func() {
                                             ])
                                         },{up_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`,down_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`})
                                     }
-                                    this.Button(uid,'+ New',{props : {newroutechild : component._id}})
+                                    
+                                    this.Buttons(uid,[
+                                        {name : this.TextColor.rgb('  + New',0,255,0),props : {newroutechild : component._id}},
+                                        {name : 'Rename group',props : {renamegroup : component._id}},
+                                        {name : 'Delete group',props : {deletegroup : component._id}}
+                                    ])
                                 },{up_buttontext : `${component.Name} (${childs.length})`,down_buttontext : `${component.Name} (${childs.length})`})
                             }
                             }
@@ -418,7 +439,7 @@ class FastHTTP extends SyAPP.Func() {
                             {name : 'Route',props : {newroute : true}},
                             {name : 'Group',props : {newgroup : true}}
                         ])
-                       },{up_buttontext : this.TextColor.brightWhite('New'),down_buttontext : this.TextColor.brightWhite('New'),up_emoji : this.TextColor.green('+')})
+                       },{up_buttontext : this.TextColor.rgb('+ New',0,255,0),down_buttontext : this.TextColor.rgb('New',0,255,0),up_emoji : ''})
                       
 
 
