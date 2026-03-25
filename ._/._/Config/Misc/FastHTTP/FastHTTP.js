@@ -274,11 +274,92 @@ class FastHTTP extends SyAPP.Func() {
                         if(props.editurl){ this.WaitInput(uid,{props : {newurl : true}})  }
 
                         if(props.removebodykey){BodyKey.Model.delete(props.removebodykey)}
-                        
 
                         this.Text(uid,' ')
                         this.Text(uid,`${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`)
-                        this.Button(uid,this.TextColor.pink('Run'))
+                        
+
+                        if(props.resetreqdata){
+                            this.Storages.Delete(uid,'request_data')
+                            this.Storages.Delete(uid,'request_data_status')
+                        }
+
+                        if(props.requestaddroutes){
+                            let group = await Group.New()
+                            for(const routestring of this.Storages.Get(uid,'request_data').available){
+                                let reqobj = parseHttpRequest(routestring)
+                                await Route.New({Method : reqobj.Method,Url : `http://localhost:3000${reqobj.Route}`,GroupID : group.id})
+                            }
+                            this.Text(uid,' ')
+                            this.Text(uid,this.TextColor.green('Group with routes created !'))
+                            
+                        }
+
+                        if(props.runroute){
+                            props.runroute = route._id
+                            //let route = await Route.Model.findById(props.runroute)
+                            if(route._id){
+                                if(route.Method.toLocaleLowerCase() == 'post'){
+                                    let keys = await BodyKey.Model.find({RouteID : route._id})
+                                    let body = {}
+                                    keys.forEach(e => {
+                                        body[e.Key] = e.Value
+                                    })
+                                let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
+                                if(result.statusCode){
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
+                                    if(typeof result.data == 'object'){
+                                        this.Storages.Set(uid,'request_data',result.data)
+                                    }
+                                    
+                                } else {
+                                    this.Text(uid,this.TextColor.red(result))
+                                }
+                                 
+                                } else if(route.Method.toLocaleLowerCase() == 'get'){
+                                    let keys = await BodyKey.Model.find({RouteID : route._id})
+                                    let body = {}
+                                    keys.forEach(e => {
+                                        body[e.Key] = e.Value
+                                    })
+                                let result = await HTTPClient.get(route.Url).catch(e =>{return e})
+                                if(result.statusCode){
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
+                                    if(typeof result.data == 'object'){
+                                        this.Storages.Set(uid,'request_data',result.data)
+                                    }
+                                } else {
+                                    this.Text(uid,this.TextColor.red(result))
+                                }
+                                 
+                                } else {
+                                    this.Text(uid,this.TextColor.yellow('Method not configured'))
+                                }
+                            }
+                        }
+
+                        if(this.Storages.Has(uid,'request_data') || this.Storages.Has(uid,'request_data_status')){
+                            this.Text(uid,' ')
+                            this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
+                            let addroutes = false
+                            if(this.Storages.Get(uid,'request_data').error && this.Storages.Get(uid,'request_data').error == 'Route not found'){
+                                if(this.Storages.Get(uid,'request_data').available && this.Storages.Get(uid,'request_data').available.length > 0){
+                                    addroutes = true
+                                }
+                            }
+                            formatData(this.Storages.Get(uid,'request_data'),uid)
+                            this.Buttons(uid,[
+                            {name : 'Save'},
+                            {name : 'Reset',props : {resetreqdata : true}},
+                            {name : 'Navigate'},
+                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : [])
+                            ])
+                            this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
+
+                        }
+
+                        
+                        this.Button(uid,this.TextColor.pink('Run'),{props : {runroute : true}})
                         this.Button(uid,'Rename',{props : {renameroute : true}})
                         this.Button(uid,'Edit URL',{props : {editurl : true}})
                         await this.DropDown(uid,'changemethod',async () => {
@@ -344,7 +425,6 @@ class FastHTTP extends SyAPP.Func() {
                         }
 
                         if(props.runroute){
-                            this.Text(uid,' ')
                             let route = await Route.Model.findById(props.runroute)
                             if(route._id){
                                 if(route.Method.toLocaleLowerCase() == 'post'){
@@ -444,6 +524,7 @@ class FastHTTP extends SyAPP.Func() {
                                                 {name : 'Edit',props : {editroute : child._id}},
                                                 {name : 'Remove',props : {removeroute : child._id}}
                                             ])
+                                            if(index == childs.length-1){this.Button(uid,' ')}
                                         },{up_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`,down_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`})
                                     }
                                     
