@@ -6,6 +6,14 @@ import Group from './entities/Group.js'
 import BodyKey from './entities/BodyKey.js'
 import Component from './entities/Component.js'
 
+function parseHttpRequest(requestString) {
+    const [method, route] = requestString.trim().split(' ');
+    return {
+        Method: method.toUpperCase(),
+        Route: route
+    };
+}
+
 function formatStatusWithColor(statusCode) {
     // Define color codes
     const colors = {
@@ -383,13 +391,28 @@ class FastHTTP extends SyAPP.Func() {
                             this.Storages.Delete(uid,'request_data_status')
                         }
 
+                        if(props.requestaddroutes){
+                            let group = await Group.New()
+                            for(const routestring of this.Storages.Get(uid,'request_data').available){
+                                let reqobj = parseHttpRequest(routestring)
+                                await Route.New({Method : reqobj.Method,Url : `http://localhost:3000${reqobj.Route}`,GroupID : group.id})
+                            }
+                        }
+
                         if(this.Storages.Has(uid,'request_data') || this.Storages.Has(uid,'request_data_status')){
                             this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
+                            let addroutes = false
+                            if(this.Storages.Get(uid,'request_data').error && this.Storages.Get(uid,'request_data').error == 'Route not found'){
+                                if(this.Storages.Get(uid,'request_data').available && this.Storages.Get(uid,'request_data').available.length > 0){
+                                    addroutes = true
+                                }
+                            }
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
                             {name : 'Reset',props : {resetreqdata : true}},
-                            {name : 'Navigate'}
+                            {name : 'Navigate'},
+                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : [])
                             ])
                             this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
 
