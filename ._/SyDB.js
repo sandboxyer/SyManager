@@ -271,6 +271,29 @@ class SyPM {
     }
 
     /**
+     * Checks if a process name is already in use and locked
+     * @static
+     * @private
+     * @param {string} processName - Name to check
+     * @param {boolean} uniqueNameLock - Whether unique name locking is enabled
+     * @returns {boolean} True if name is already in use and locked
+     */
+    static _isNameLocked(processName, uniqueNameLock) {
+        if (!uniqueNameLock) {
+            return false;
+        }
+        
+        const registry = this._loadRegistry();
+        const existingProcess = registry.find(process => 
+            process.name === processName && 
+            process.config.uniqueNameLock === true &&
+            this.isAlive(process.id) // Only consider alive processes as locked
+        );
+        
+        return !!existingProcess;
+    }
+
+    /**
      * Creates a monitor script for auto-restart processes
      * @static
      * @private
@@ -282,9 +305,10 @@ class SyPM {
      * @param {number} restartTries - Number of restart attempts
      * @param {string} [workingDir] - Optional working directory
      * @param {boolean} [daemon] - Whether to run as daemon
+     * @param {boolean} [uniqueNameLock] - Whether to lock the process name as unique
      * @returns {string} Path to the created monitor script
      */
-    static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir, daemon = false) {
+    static _createMonitorScript(processId, filePath, processName, logPath, autoRestart, restartTries, workingDir, daemon = false, uniqueNameLock = false) {
         const systemInfo = this._detectSystem();
         const shell = systemInfo.shell;
         
@@ -708,24 +732,9 @@ stop() {
      * @param {number} [config.restartTries] - Number of restart attempts (implies autoRestart)
      * @param {string} [config.workingDir] - Working directory to run the process in
      * @param {boolean} [config.daemon] - Whether to run as system daemon (auto-start on boot)
+     * @param {boolean} [config.uniqueNameLock] - Whether to lock the process name as unique
      * @returns {Object} Process entry object with process details
      * @throws {Error} If file not found or working directory is invalid
-     * 
-     * @example
-     * // Run a file with auto-restart and daemon mode
-     * SyPM.run('/path/to/app.js', { 
-     *   name: 'my-app',
-     *   autoRestart: true,
-     *   restartTries: 3,
-     *   daemon: true
-     * });
-     * 
-     * @example
-     * // Run code string with working directory
-     * SyPM.run('console.log("Hello World")', {
-     *   name: 'hello-script',
-     *   workingDir: '/tmp'
-     * });
      */
     static run(filepathOrCode, config = {}) {
         let resolvedPath;
@@ -809,6 +818,11 @@ stop() {
         const processName = config.name || this._generateProcessName();
         const logPath = path.join(LOG_DIR, `${processName}.log`);
     
+        // Check if name is already locked and in use
+        if (config.uniqueNameLock && this._isNameLocked(processName, config.uniqueNameLock)) {
+            throw new Error(`Process name "${processName}" is already in use and locked as unique. Cannot start another process with the same name.`);
+        }
+    
         // Create initial log entry
         fs.writeFileSync(logPath, `Process Manager - Started: ${new Date().toISOString()}\n`, 'utf-8');
     
@@ -825,7 +839,8 @@ stop() {
                 config.autoRestart ? 'true' : 'false',
                 config.restartTries || 0,
                 workingDir,
-                config.daemon
+                config.daemon,
+                config.uniqueNameLock
             );
            
             const systemInfo = this._detectSystem();
@@ -872,7 +887,8 @@ stop() {
                 restartTries: config.restartTries || 0,
                 currentTries: 0,
                 workingDir: workingDir,
-                daemon: !!config.daemon
+                daemon: !!config.daemon,
+                uniqueNameLock: !!config.uniqueNameLock
             },
             isAutoRestart: !!(config.autoRestart || config.restartTries),
             monitorPid: (config.autoRestart || config.restartTries) ? actualPid : null,
@@ -894,6 +910,12 @@ stop() {
                 console.log(`✓ Process will auto-start on system reboot`);
             }
         }
+
+        // Notify about unique name lock if enabled
+        if (config.uniqueNameLock) {
+            console.log(`✓ Unique name lock enabled for process: ${processName}`);
+            console.log(`✓ No other process can use this name while this process exists`);
+        }
     
         return entry;
     }
@@ -902,10 +924,6 @@ stop() {
      * Lists all managed processes with their current status
      * @static
      * @returns {Array<Object>} Array of process objects with status information
-     * 
-     * @example
-     * const processes = SyPM.list();
-     * console.table(processes);
      */
     static list() {
         // Sync daemon processes status first
@@ -928,6 +946,7 @@ stop() {
                     tries: proc.config?.currentTries || 0,
                     autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
                     daemon: proc.config?.daemon ? 'Yes' : 'No',
+                    uniqueNameLock: proc.config?.uniqueNameLock ? 'Yes' : 'No',
                     workingDir: proc.config?.workingDir || 'Default',
                     path: proc.path
                 });
@@ -976,6 +995,7 @@ stop() {
                 tries: proc.config?.currentTries || 0,
                 autoRestart: proc.isAutoRestart ? 'Yes' : 'No',
                 daemon: proc.config?.daemon ? 'Yes' : 'No',
+                uniqueNameLock: proc.config?.uniqueNameLock ? 'Yes' : 'No',
                 workingDir: proc.config?.workingDir || 'Default',
                 path: proc.path
             });
@@ -1004,23 +1024,52 @@ stop() {
     }
 
     /**
+     * Checks if a process is alive by its unique name
+     * @static
+     * @param {string} processName - Unique name of the process to check
+     * @returns {boolean} True if process is running
+     */
+    static isAliveByName(processName) {
+        const registry = this._loadRegistry();
+        const proc = registry.find(p => p.name === processName && p.config.uniqueNameLock === true);
+        
+        if (!proc) {
+            console.error(`Process with name "${processName}" not found or doesn't have unique name lock enabled.`);
+            return false;
+        }
+        
+        return this.isAlive(proc.id);
+    }
+
+    /**
+     * Kills a process by its unique name
+     * @static
+     * @param {string} processName - Unique name of the process to kill
+     * @returns {boolean} True if process was found and killed
+     */
+    static killByName(processName) {
+        const registry = this._loadRegistry();
+        const proc = registry.find(p => p.name === processName && p.config.uniqueNameLock === true);
+        
+        if (!proc) {
+            console.error(`Process with name "${processName}" not found or doesn't have unique name lock enabled.`);
+            return false;
+        }
+        
+        console.log(`Killing process by name: ${proc.name} (ID: ${proc.id}, PID: ${proc.pid})`);
+        return this.kill(proc.id);
+    }
+
+    /**
      * Kills a process by PID or ID
      * @static
      * @param {string|number} pidOrId - Process ID or PID to kill
      * @returns {boolean} True if process was found and killed
-     * 
-     * @example
-     * // Kill by PID
-     * SyPM.kill(12345);
-     * 
-     * @example
-     * // Kill by ID
-     * SyPM.kill('abc123def');
      */
     static kill(pidOrId) {
         const registry = this._loadRegistry();
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
-       
+        
         if (!proc) {
             console.error('Process not found in registry.');
             return false;
@@ -1078,10 +1127,6 @@ stop() {
      * Kills all managed processes
      * @static
      * @returns {number} Number of processes killed
-     * 
-     * @example
-     * const killedCount = SyPM.killAll();
-     * console.log(`Killed ${killedCount} processes`);
      */
     static killAll() {
         const registry = this._loadRegistry();
@@ -1166,22 +1211,24 @@ stop() {
     }
    
     /**
-     * Checks if a process is alive by PID or ID
+     * Checks if a process is alive by PID, ID, or name
      * @static
-     * @param {string|number} pidOrId - Process ID or PID to check
+     * @param {string|number} identifier - Process ID, PID, or unique name to check
      * @returns {boolean} True if process is running
-     * 
-     * @example
-     * if (SyPM.isAlive('abc123def')) {
-     *   console.log('Process is running');
-     * }
      */
-    static isAlive(pidOrId) {
+    static isAlive(identifier) {
         const registry = this._loadRegistry();
-        const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
-   
+        
+        // Try to find by ID or PID first
+        let proc = registry.find(p => p.pid == identifier || p.id === identifier);
+        
+        // If not found, try to find by name (only if it has unique name lock)
+        if (!proc && typeof identifier === 'string') {
+            proc = registry.find(p => p.name === identifier && p.config.uniqueNameLock === true);
+        }
+        
         if (!proc) return false;
-   
+        
         try {
             if (proc.isAutoRestart && proc.monitorPid) {
                 process.kill(proc.monitorPid, 0);
@@ -1197,14 +1244,131 @@ stop() {
     /**
      * Follows logs of a process in real-time
      * @static
-     * @param {string|number} pidOrId - Process ID or PID to follow logs for
-     * 
-     * @example
-     * // Follow logs for a process
-     * SyPM.log('abc123def');
+     * @param {string|number} [pidOrId] - Process ID or PID to follow logs for, or undefined for all processes
      */
     static log(pidOrId) {
         const registry = this._loadRegistry();
+        
+        // If no PID/ID specified, follow all processes
+        if (pidOrId === undefined) {
+            console.log(`🚀 Following logs for ALL processes (${registry.length} total)`);
+            console.log('=' .repeat(80));
+            
+            if (registry.length === 0) {
+                console.log('No processes found to follow logs.');
+                return;
+            }
+            
+            // Create a map of log files and their corresponding process names
+            const logFiles = new Map();
+            for (const proc of registry) {
+                if (fs.existsSync(proc.log)) {
+                    logFiles.set(proc.log, proc.name);
+                }
+            }
+            
+            console.log(`Following ${logFiles.size} log files:`);
+            for (const [logPath, processName] of logFiles) {
+                console.log(`  - ${processName}: ${logPath}`);
+            }
+            console.log('=' .repeat(80));
+            console.log('Press Ctrl+C to stop following logs\n');
+            
+            // Read initial content of all log files
+            for (const [logPath, processName] of logFiles) {
+                try {
+                    const existingContent = fs.readFileSync(logPath, 'utf-8');
+                    const lines = existingContent.split('\n');
+                    for (const line of lines) {
+                        if (line.trim()) {
+                            console.log(`[${processName}] ${line}`);
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error reading log file for ${processName}:`, error.message);
+                }
+            }
+            
+            // Track last read positions for each log file
+            const lastPositions = new Map();
+            for (const logPath of logFiles.keys()) {
+                try {
+                    const stats = fs.statSync(logPath);
+                    lastPositions.set(logPath, stats.size);
+                } catch (error) {
+                    lastPositions.set(logPath, 0);
+                }
+            }
+            
+            // Watch all log files for changes
+            const watchers = [];
+            
+            for (const [logPath, processName] of logFiles) {
+                const watcher = fs.watch(logPath, (eventType) => {
+                    if (eventType === 'change') {
+                        try {
+                            const stats = fs.statSync(logPath);
+                            const lastPosition = lastPositions.get(logPath) || 0;
+                            
+                            if (stats.size > lastPosition) {
+                                const stream = fs.createReadStream(logPath, {
+                                    start: lastPosition,
+                                    end: stats.size
+                                });
+
+                                stream.on('data', (chunk) => {
+                                    const lines = chunk.toString().split('\n');
+                                    for (const line of lines) {
+                                        if (line.trim()) {
+                                            console.log(`[${processName}] ${line}`);
+                                        }
+                                    }
+                                });
+
+                                stream.on('end', () => {
+                                    lastPositions.set(logPath, stats.size);
+                                });
+
+                                stream.on('error', () => {
+                                    // Ignore stream errors
+                                });
+                            } else if (stats.size < lastPosition) {
+                                // File was truncated, read from beginning
+                                lastPositions.set(logPath, 0);
+                                const fullContent = fs.readFileSync(logPath, 'utf-8');
+                                const lines = fullContent.split('\n');
+                                for (const line of lines) {
+                                    if (line.trim()) {
+                                        console.log(`[${processName}] ${line}`);
+                                    }
+                                }
+                                lastPositions.set(logPath, fullContent.length);
+                            }
+                        } catch (error) {
+                            // File might be temporarily unavailable
+                        }
+                    }
+                });
+                
+                watchers.push(watcher);
+            }
+            
+            // Handle cleanup
+            const cleanup = () => {
+                for (const watcher of watchers) {
+                    watcher.close();
+                }
+                console.log('\n\n📋 Log following stopped for all processes.');
+                process.exit(0);
+            };
+
+            process.on('SIGINT', cleanup);
+            process.on('SIGTERM', cleanup);
+            
+            return;
+        }
+        
+        // Original single process log following logic
         const proc = registry.find(p => p.pid == pidOrId || p.id === pidOrId);
 
         if (!proc) {
@@ -1226,6 +1390,9 @@ stop() {
         }
         if (proc.config?.daemon) {
             console.log(`🔧 Daemon mode: Enabled`);
+        }
+        if (proc.config?.uniqueNameLock) {
+            console.log(`🔒 Unique name lock: Enabled`);
         }
         console.log('=' .repeat(80));
         console.log('Press Ctrl+C to stop following logs\n');
@@ -1292,9 +1459,6 @@ stop() {
      * @static
      * @param {string|number} pidOrId - Process ID or PID to restart
      * @returns {boolean} True if process was found and restarted
-     * 
-     * @example
-     * SyPM.restart('abc123def');
      */
     static restart(pidOrId) {
         const registry = this._loadRegistry();
@@ -1322,7 +1486,8 @@ stop() {
                 autoRestart: proc.config.autoRestart,
                 restartTries: proc.config.restartTries,
                 workingDir: proc.config.workingDir,
-                daemon: proc.config.daemon
+                daemon: proc.config.daemon,
+                uniqueNameLock: proc.config.uniqueNameLock
             });
            
             console.log(`✓ Successfully restarted: ${newProcess.name} (New PID: ${newProcess.pid}, ID: ${newProcess.id})`);
@@ -1331,6 +1496,9 @@ stop() {
             }
             if (newProcess.config.daemon) {
                 console.log(`✓ Daemon mode: Enabled`);
+            }
+            if (newProcess.config.uniqueNameLock) {
+                console.log(`✓ Unique name lock: Enabled`);
             }
         }, 1000);
        
@@ -1342,9 +1510,6 @@ stop() {
      * @static
      * @param {string|number} pidOrId - Process ID or PID to enable daemon mode for
      * @returns {boolean} True if daemon mode was successfully enabled
-     * 
-     * @example
-     * SyPM.enableDaemon('abc123def');
      */
     static enableDaemon(pidOrId) {
         const registry = this._loadRegistry();
@@ -1380,9 +1545,6 @@ stop() {
      * @static
      * @param {string|number} pidOrId - Process ID or PID to disable daemon mode for
      * @returns {boolean} True if daemon mode was successfully disabled
-     * 
-     * @example
-     * SyPM.disableDaemon('abc123def');
      */
     static disableDaemon(pidOrId) {
         const registry = this._loadRegistry();
@@ -1416,10 +1578,6 @@ stop() {
     /**
      * Cleans up dead processes and removes them from registry
      * @static
-     * 
-     * @example
-     * // Clean up dead processes
-     * SyPM.cleanup();
      */
     static cleanup() {
         const registry = this._loadRegistry();
@@ -1471,9 +1629,6 @@ stop() {
     /**
      * Displays global SyPM information
      * @static
-     * 
-     * @example
-     * SyPM.info();
      */
     static info() {
         const systemInfo = this._detectSystem();
@@ -1492,453 +1647,9 @@ stop() {
         console.log(`Total Processes: ${registry.length}`);
         console.log(`Active Processes: ${registry.filter(p => this.isAlive(p.id)).length}`);
         console.log(`Daemon Processes: ${registry.filter(p => p.config?.daemon).length}`);
+        console.log(`Unique Name Locked Processes: ${registry.filter(p => p.config?.uniqueNameLock).length}`);
     }
 
-    /**
-     * Comprehensive test method to verify all SyPM functionality including daemon support
-     * @static
-     * @returns {Promise<boolean>} True if all tests pass
-     * 
-     * @example
-     * // Run comprehensive tests
-     * SyPM.Test();
-     */
-    static async Test() {
-        console.log('🧪 Starting SyPM Comprehensive Test Suite...\n');
-        
-        let testCount = 0;
-        let passedTests = 0;
-        let failedTests = 0;
-        
-        /**
-         * Test utility function with async support
-         * @param {string} testName - Name of the test
-         * @param {Function} testFunction - Test function to execute
-         */
-        const runTest = async (testName, testFunction) => {
-            testCount++;
-            process.stdout.write(`  ${testCount}. ${testName}... `);
-            
-            try {
-                await testFunction();
-                console.log('✓ PASSED');
-                passedTests++;
-            } catch (error) {
-                console.log('✗ FAILED');
-                console.log(`     Error: ${error.message}`);
-                failedTests++;
-            }
-        };
-
-        /**
-         * Wait for a condition to be true
-         * @param {Function} condition - Function that returns a boolean
-         * @param {number} timeout - Timeout in milliseconds
-         * @param {number} interval - Check interval in milliseconds
-         */
-        const waitFor = (condition, timeout = 5000, interval = 100) => {
-            return new Promise((resolve, reject) => {
-                const startTime = Date.now();
-                
-                const checkCondition = () => {
-                    try {
-                        if (condition()) {
-                            resolve();
-                        } else if (Date.now() - startTime > timeout) {
-                            reject(new Error(`Timeout waiting for condition after ${timeout}ms`));
-                        } else {
-                            setTimeout(checkCondition, interval);
-                        }
-                    } catch (error) {
-                        reject(error);
-                    }
-                };
-                
-                checkCondition();
-            });
-        };
-
-        /**
-         * Clean up before tests
-         */
-        const cleanupBeforeTests = () => {
-            // Kill all existing processes
-            const registry = this._loadRegistry();
-            if (registry.length > 0) {
-                console.log('Cleaning up existing processes before tests...');
-                this.killAll();
-            }
-            
-            // Clear registry
-            this._saveRegistry([]);
-        };
-
-        /**
-         * Create test scripts
-         */
-        const createTestScripts = () => {
-            // Simple script that runs for a short time
-            const simpleScript = `
-console.log('Simple test script started');
-setTimeout(() => {
-    console.log('Simple test script completed');
-}, 5000);
-`;
-            
-            // Script that exits immediately (for crash testing)
-            const crashScript = `
-console.log('Crash test script started');
-process.exit(1);
-`;
-            
-            // Long running script
-            const longRunningScript = `
-console.log('Long running test script started');
-setInterval(() => {
-    console.log('Long running script still alive...');
-}, 10000);
-`;
-
-            const scripts = {
-                simple: { code: simpleScript, file: path.join(tmpdir(), 'test_simple.js') },
-                crash: { code: crashScript, file: path.join(tmpdir(), 'test_crash.js') },
-                long: { code: longRunningScript, file: path.join(tmpdir(), 'test_long.js') }
-            };
-
-            // Write test scripts to files
-            for (const script of Object.values(scripts)) {
-                fs.writeFileSync(script.file, script.code, 'utf-8');
-            }
-
-            return scripts;
-        };
-
-        /**
-         * Clean up test scripts
-         */
-        const cleanupTestScripts = (scripts) => {
-            for (const script of Object.values(scripts)) {
-                try {
-                    if (fs.existsSync(script.file)) {
-                        fs.unlinkSync(script.file);
-                    }
-                } catch (error) {
-                    // Ignore cleanup errors
-                }
-            }
-        };
-
-        // Start comprehensive testing
-        cleanupBeforeTests();
-        const testScripts = createTestScripts();
-
-        console.log('📋 Running Core Functionality Tests:\n');
-
-        // Test 1: Registry operations
-        await runTest('Registry load/save operations', () => {
-            const testData = [{ id: 'test', name: 'test' }];
-            this._saveRegistry(testData);
-            const loadedData = this._loadRegistry();
-            if (JSON.stringify(loadedData) !== JSON.stringify(testData)) {
-                throw new Error('Registry save/load mismatch');
-            }
-            this._saveRegistry([]); // Reset
-        });
-
-        // Test 2: ID generation
-        await runTest('Unique ID generation', () => {
-            const id1 = this._generateId();
-            const id2 = this._generateId();
-            if (id1 === id2) {
-                throw new Error('Generated duplicate IDs');
-            }
-            if (typeof id1 !== 'string' || id1.length === 0) {
-                throw new Error('Invalid ID generated');
-            }
-        });
-
-        // Test 3: Process name generation
-        await runTest('Process name generation', () => {
-            const name1 = this._generateProcessName();
-            const name2 = this._generateProcessName();
-            if (name1 === name2) {
-                throw new Error('Generated duplicate names');
-            }
-            if (!name1.startsWith('process_')) {
-                throw new Error('Invalid name format');
-            }
-        });
-
-        // Test 4: System detection
-        await runTest('System detection', () => {
-            const systemInfo = this._detectSystem();
-            if (!systemInfo.platform) {
-                throw new Error('System detection failed');
-            }
-            console.log(`\n     Detected: ${systemInfo.platform}, ${systemInfo.initSystem}, ${systemInfo.shell}`);
-        });
-
-        // Test 5: Run file-based process
-        let simpleProcessId;
-        await runTest('Run file-based process', async () => {
-            const process = this.run(testScripts.simple.file, { 
-                name: 'test-simple-file' 
-            });
-            simpleProcessId = process.id;
-            
-            if (!process.id || !process.pid || !process.name) {
-                throw new Error('Invalid process object returned');
-            }
-            
-            // Wait for process to start properly
-            await waitFor(() => this.isAlive(process.id), 3000, 100);
-        });
-
-        // Test 6: Run code-based process
-        let codeProcessId;
-        await runTest('Run code-based process', async () => {
-            const process = this.run(testScripts.long.code, {
-                name: 'test-code-process'
-            });
-            codeProcessId = process.id;
-            
-            if (!process.isTempFile) {
-                throw new Error('Code process should be marked as temp file');
-            }
-            
-            // Wait for process to start properly
-            await waitFor(() => this.isAlive(process.id), 3000, 100);
-        });
-
-        // Test 7: Run process with working directory
-        await runTest('Run process with working directory', async () => {
-            const testWorkingDir = path.join(tmpdir(), 'sypm_test_dir');
-            if (!fs.existsSync(testWorkingDir)) {
-                fs.mkdirSync(testWorkingDir, { recursive: true });
-            }
-            
-            const process = this.run(testScripts.simple.code, {
-                name: 'test-working-dir',
-                workingDir: testWorkingDir
-            });
-            
-            if (!process.config.workingDir) {
-                throw new Error('Working directory not set in process config');
-            }
-            
-            // Wait for process to start properly
-            await waitFor(() => this.isAlive(process.id), 3000, 100);
-            
-            // Clean up
-            this.kill(process.id);
-            
-            // Wait for process to be killed
-            await waitFor(() => !this.isAlive(process.id), 3000, 100);
-            
-            try {
-                fs.rmdirSync(testWorkingDir);
-            } catch (error) {
-                // Ignore cleanup errors
-            }
-        });
-
-        // Test 8: List processes
-        await runTest('List processes functionality', () => {
-            const processes = this.list();
-            if (!Array.isArray(processes)) {
-                throw new Error('List should return an array');
-            }
-            
-            const ourProcesses = processes.filter(p => 
-                p.name === 'test-simple-file' || p.name === 'test-code-process'
-            );
-            
-            if (ourProcesses.length < 2) {
-                throw new Error('Not all test processes found in list');
-            }
-        });
-
-        // Test 9: Process alive check
-        await runTest('Process alive status check', () => {
-            if (!this.isAlive(simpleProcessId)) {
-                throw new Error('Process should be alive');
-            }
-        });
-
-        // Test 10: Kill process by ID
-        await runTest('Kill process by ID', async () => {
-            const killed = this.kill(simpleProcessId);
-            if (!killed) {
-                throw new Error('Failed to kill process by ID');
-            }
-            
-            // Wait for process to die
-            await waitFor(() => !this.isAlive(simpleProcessId), 3000, 100);
-        });
-
-        // Test 11: Kill process by PID
-        await runTest('Kill process by PID', async () => {
-            const processes = this.list();
-            const codeProcess = processes.find(p => p.name === 'test-code-process');
-            if (!codeProcess) {
-                throw new Error('Code process not found for PID test');
-            }
-            
-            const killed = this.kill(codeProcess.pid);
-            if (!killed) {
-                throw new Error('Failed to kill process by PID');
-            }
-            
-            // Wait for process to die
-            await waitFor(() => !this.isAlive(codeProcess.id), 3000, 100);
-        });
-
-        // Test 12: Run process with auto-restart
-        let autoRestartProcessId;
-        await runTest('Run process with auto-restart', async () => {
-            const process = this.run(testScripts.crash.file, {
-                name: 'test-auto-restart',
-                autoRestart: true,
-                restartTries: 2
-            });
-            autoRestartProcessId = process.id;
-            
-            if (!process.isAutoRestart) {
-                throw new Error('Auto-restart process not properly configured');
-            }
-            
-            if (!process.config.autoRestart) {
-                throw new Error('Auto-restart flag not set in config');
-            }
-            
-            // Wait for process to start
-            await waitFor(() => this.isAlive(process.id), 3000, 100);
-        });
-
-        // Test 13: Daemon mode functionality (test without actual system installation)
-        await runTest('Daemon mode configuration', async () => {
-            const systemInfo = this._detectSystem();
-            if (!systemInfo.isLinux) {
-                console.log('\n     Skipping daemon test on non-Linux system');
-                return;
-            }
-            
-            const process = this.run(testScripts.long.file, {
-                name: 'test-daemon-process',
-                daemon: true
-            });
-            
-            if (!process.config.daemon) {
-                throw new Error('Daemon flag not set in config');
-            }
-            
-            console.log(`\n     Daemon mode configured for ${systemInfo.initSystem}`);
-            
-            // Clean up
-            this.kill(process.id);
-        });
-
-        // Test 14: Cleanup functionality
-        await runTest('Cleanup dead processes', async () => {
-            // Kill the auto-restart process first
-            this.kill(autoRestartProcessId);
-            
-            // Wait for it to die
-            await waitFor(() => !this.isAlive(autoRestartProcessId), 3000, 100);
-            
-            this.cleanup();
-            const processes = this.list();
-            const found = processes.find(p => p.id === autoRestartProcessId);
-            if (found) {
-                throw new Error('Dead process not cleaned up');
-            }
-        });
-
-        // Test 15: Kill all processes
-        await runTest('Kill all processes', async () => {
-            // Start a few processes first
-            this.run(testScripts.simple.file, { name: 'test-kill-all-1' });
-            this.run(testScripts.simple.file, { name: 'test-kill-all-2' });
-            
-            // Wait for processes to start
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            const beforeCount = this.list().length;
-            const killedCount = this.killAll();
-            
-            // Wait for processes to be killed
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            const afterCount = this.list().length;
-            if (afterCount !== 0) {
-                throw new Error('Not all processes were killed');
-            }
-        });
-
-        // Test 16: Info functionality
-        await runTest('System info display', () => {
-            // This should not throw an error
-            this.info();
-        });
-
-        // Test 17: Process restart functionality
-        await runTest('Process restart functionality', async () => {
-            const process = this.run(testScripts.long.file, {
-                name: 'test-restart'
-            });
-            
-            const originalPid = process.pid;
-            
-            // Wait for process to start
-            await waitFor(() => this.isAlive(process.id), 3000, 100);
-            
-            const restartSuccess = this.restart(process.id);
-            
-            if (!restartSuccess) {
-                throw new Error('Restart failed');
-            }
-            
-            // Wait for restart to complete
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            const newProcesses = this.list();
-            const restartedProcess = newProcesses.find(p => p.name === 'test-restart');
-            
-            if (!restartedProcess) {
-                throw new Error('Restarted process not found');
-            }
-            
-            if (restartedProcess.pid === originalPid) {
-                throw new Error('Process PID did not change after restart');
-            }
-            
-            // Clean up
-            this.kill(restartedProcess.id);
-            
-            // Wait for process to be killed
-            await waitFor(() => !this.isAlive(restartedProcess.id), 3000, 100);
-        });
-
-        // Final cleanup
-        this.killAll();
-        cleanupTestScripts(testScripts);
-
-        // Test Results Summary
-        console.log('\n📊 Test Results Summary:');
-        console.log('=' .repeat(40));
-        console.log(`Total Tests: ${testCount}`);
-        console.log(`Passed: ${passedTests} ✓`);
-        console.log(`Failed: ${failedTests} ✗`);
-        console.log(`Success Rate: ${((passedTests / testCount) * 100).toFixed(1)}%`);
-        
-        if (failedTests === 0) {
-            console.log('\n🎉 ALL TESTS PASSED! SyPM is working correctly.');
-            return true;
-        } else {
-            console.log('\n⚠️  Some tests failed. Please check the implementation.');
-            return false;
-        }
-    }
 }
 
 // --------------------------- || -------------------
