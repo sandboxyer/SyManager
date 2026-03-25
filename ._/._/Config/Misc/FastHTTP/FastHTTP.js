@@ -4,6 +4,7 @@ import SyDB from '../../../../SyDB.js'
 import Route from './entities/Route.js'
 import Group from './entities/Group.js'
 import BodyKey from './entities/BodyKey.js'
+import Component from './entities/Component.js'
 
 function formatStatusWithColor(statusCode) {
     // Define color codes
@@ -300,8 +301,18 @@ class FastHTTP extends SyAPP.Func() {
 
                     } else {
 
+                        if(props.newroutechild){
+                            await Route.New({GroupID : props.newroutechild})
+                        }
+
                         if(props.newroute){
-                            await Route.New('New Route')
+                            await Route.New()
+                            CloseDropdown('mainlayernew')
+                        }
+                        
+                        if(props.newgroup){
+                            await Group.New()
+                            CloseDropdown('mainlayernew')
                         }
     
                         if(props.removeroute){
@@ -320,9 +331,9 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
                                 if(result.statusCode){
-                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
-                                        formatData(result.data,uid)
+                                        this.Storages.Set(uid,'request_data',result.data)
                                     }
                                     
                                 } else {
@@ -337,9 +348,9 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.get(route.Url).catch(e =>{return e})
                                 if(result.statusCode){
-                                    this.Text(uid,`Status : ${formatStatusWithColor(result.statusCode)}`)
+                                    this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
-                                        formatData(result.data,uid)
+                                        this.Storages.Set(uid,'request_data',result.data)
                                     }
                                 } else {
                                     this.Text(uid,this.TextColor.red(result))
@@ -350,21 +361,65 @@ class FastHTTP extends SyAPP.Func() {
                                 }
                             }
                         }
+
+                        if(props.resetreqdata){
+                            this.Storages.Delete(uid,'request_data')
+                            this.Storages.Delete(uid,'request_data_status')
+                        }
+
+                        if(this.Storages.Has(uid,'request_data') || this.Storages.Has(uid,'request_data_status')){
+                            this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
+                            formatData(this.Storages.Get(uid,'request_data'),uid)
+                            this.Buttons(uid,[
+                            {name : 'Save'},
+                            {name : 'Reset',props : {resetreqdata : true}},
+                            {name : 'Navigate'}
+                            ])
+                            this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
+
+                        }
     
-                        let routes = await Route.Model.find()
+                        let components = await Component.Model.find()
+
+                        components = components.filter(e => !e.GroupID)
     
-                        for (const [index, route] of routes.entries()) {
-                            await this.DropDown(uid,route._id,async () => {
-                                this.Buttons(uid,[
-                                    {name : 'Run',props : {runroute : route._id}},
-                                    {name : 'Edit',props : {editroute : route._id}},
-                                    {name : 'Remove',props : {removeroute : route._id}}
-                                ])
-                            },{up_buttontext : `${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`,down_buttontext : `${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`})
-                          }
+                        for (const [index, component] of components.entries()) {
+                            if(component.Type == 'route'){
+                                await this.DropDown(uid,component._id,async () => {
+                                    this.Buttons(uid,[
+                                        {name : 'Run',props : {runroute : component._id}},
+                                        {name : 'Edit',props : {editroute : component._id}},
+                                        {name : 'Remove',props : {removeroute : component._id}}
+                                    ])
+                                },{up_buttontext : `${component.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(component.Method)} | ${this.TextColor.cyan(component.Url)}`,down_buttontext : `${component.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(component.Method)} | ${this.TextColor.cyan(component.Url)}`})
+                             
+                            } else {
+                                let all = await Component.Model.find()
+                                let childs = []
+                                all.forEach(e => {if(e.GroupID == component._id){childs.push(e)}})
+                                await this.DropDown(uid,component._id,async () => {
+                                    for (const [index, child] of childs.entries()) {
+                                        await this.DropDown(uid,child._id,async () => {
+                                            this.Buttons(uid,[
+                                                {name : 'Run',props : {runroute : child._id}},
+                                                {name : 'Edit',props : {editroute : child._id}},
+                                                {name : 'Remove',props : {removeroute : child._id}}
+                                            ])
+                                        },{up_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`,down_buttontext : `${child.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(child.Method)} | ${this.TextColor.cyan(child.Url)}`})
+                                    }
+                                    this.Button(uid,'+ New',{props : {newroutechild : component._id}})
+                                },{up_buttontext : `${component.Name} (${childs.length})`,down_buttontext : `${component.Name} (${childs.length})`})
+                            }
+                            }
     
                        this.Button(uid,' ')
-                       this.Button(uid,'+ New',{props : {newroute : true}})
+                       await this.DropDown(uid,'mainlayernew',async () => {
+                        this.Buttons(uid,[
+                            {name : 'Route',props : {newroute : true}},
+                            {name : 'Group',props : {newgroup : true}}
+                        ])
+                       },{up_buttontext : this.TextColor.brightWhite('New'),down_buttontext : this.TextColor.brightWhite('New'),up_emoji : this.TextColor.green('+')})
+                      
 
 
                     }
@@ -374,20 +429,16 @@ class FastHTTP extends SyAPP.Func() {
                 })
 
 
-                await this.Page(uid,'env',async () => {
+                await this.Page(uid,'settings',async () => {
 
-                  this.Button(uid,'teste1')
-
-
-                })
-
-
-                await this.Page(uid,'globalvar',async () => {
-
-                    this.Button(uid,'teste2')
+                  this.Button(uid,'Auto save')
+                  this.Button(uid,'Variables')
+                  this.Button(uid,'Search APIs')
 
 
                 })
+
+
 
 
 
@@ -397,8 +448,7 @@ class FastHTTP extends SyAPP.Func() {
                 this.Button(uid,this.TextColor.blue('――――――――――――――――――――――――――――――――――――――――――――――'))
                 this.Buttons(uid,[
                     {name : (props.page == '' || !props.page) ? this.TextColor.yellow('Home') : 'Home' ,props : {page : ''}},
-                    {name : (props.page == 'env') ? this.TextColor.yellow('Env') : 'Env' ,props : {page : 'env'}},
-                    {name : (props.page == 'globalvar') ? this.TextColor.yellow('Global Variables') : 'Global Variables'  ,props : {page : 'globalvar'}},
+                    {name : (props.page == 'settings') ? this.TextColor.yellow('Settings') : 'Settings' ,props : {page : 'settings'}},
                     {name :'<- Return',path : this.Storages.Get(uid,'parentfunc')}
                 ])
             })
