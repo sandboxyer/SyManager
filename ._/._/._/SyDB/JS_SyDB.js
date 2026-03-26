@@ -41,6 +41,11 @@ class JS_SyDB {
     static RATE_LIMIT_MAX_REQUESTS = 100;
     static RATE_LIMIT_WINDOW_SECONDS = 60;
 
+    // Correct file header size (from C struct with alignment)
+    static FILE_HEADER_SIZE = 136;
+    // Correct record header size (from C struct with alignment)
+    static RECORD_HEADER_SIZE = 88;
+
     // Field type enumeration - MUST MATCH C VERSION EXACTLY
     static FIELD_TYPE = {
         STRING: 0,
@@ -140,9 +145,6 @@ class JS_SyDB {
         }
     ];
 
-    // File header structure - MUST MATCH C VERSION EXACTLY
-    static FILE_HEADER_SIZE = 128;
-
     constructor() {
         this.verboseMode = false;
         this.serverInstance = null;
@@ -154,7 +156,7 @@ class JS_SyDB {
         this.httpServer = null;
         this.runningFlag = false;
         this.workerThreads = [];
-        
+
         // Initialize base directory
         this.initializeBaseDirectory();
     }
@@ -166,44 +168,40 @@ class JS_SyDB {
         if (!items || items.length === 0) {
             return "[]";
         }
-        
-        // Check if first item looks like JSON (starts with {)
-        const itemsAreJson = items.length > 0 && items[0] && items[0][0] === '{';
-        
-        if (itemsAreJson) {
-            // JSON objects: no quotes around each item
-            let result = "[";
-            for (let i = 0; i < items.length; i++) {
-                if (i > 0) result += ",";
-                result += items[i];
+
+        let itemsAreJson = false;
+        if (items.length > 0 && items[0] && items[0].length > 0) {
+            if (items[0][0] === '{') {
+                itemsAreJson = true;
             }
-            result += "]";
-            return result;
-        } else {
-            // Strings: wrap in quotes
-            let result = "[";
-            for (let i = 0; i < items.length; i++) {
-                if (i > 0) result += ",";
-                result += `"${items[i]}"`;
-            }
-            result += "]";
-            return result;
         }
+
+        let resultString = "[";
+        for (let i = 0; i < items.length; i++) {
+            if (items[i]) {
+                if (i > 0) resultString += ",";
+                if (!itemsAreJson) resultString += '"';
+                resultString += items[i];
+                if (!itemsAreJson) resultString += '"';
+            }
+        }
+        resultString += "]";
+        return resultString;
     }
 
     buildJsonObjectHighPerformance(keys, values) {
         if (!keys || !values || keys.length === 0 || values.length === 0) {
             return "{}";
         }
-
-        const pairs = [];
+        let resultString = "{";
         for (let i = 0; i < Math.min(keys.length, values.length); i++) {
             if (keys[i] && values[i]) {
-                pairs.push(`"${keys[i]}":"${values[i]}"`);
+                if (i > 0) resultString += ",";
+                resultString += '"' + keys[i] + '":"' + values[i] + '"';
             }
         }
-
-        return `{${pairs.join(',')}}`;
+        resultString += "}";
+        return resultString;
     }
 
     // ==================== THREAD POOL IMPLEMENTATION ====================
@@ -218,12 +216,9 @@ class JS_SyDB {
             queueHead: 0,
             queueTail: 0,
             queueMutex: false,
-            queueNotEmptyCondition: { waiters: [] },
-            queueNotFullCondition: { waiters: [] },
             shutdownFlag: false
         };
 
-        // Create worker threads (simulated with async functions)
         for (let i = 0; i < workerCount; i++) {
             this.createWorkerThread(threadPool);
         }
@@ -235,13 +230,11 @@ class JS_SyDB {
     createWorkerThread(threadPool) {
         const worker = async () => {
             while (true) {
-                // Wait for mutex
                 while (threadPool.queueMutex) {
                     await new Promise(resolve => setTimeout(resolve, 1));
                 }
                 threadPool.queueMutex = true;
 
-                // Wait for tasks
                 while (threadPool.queueSize === 0 && !threadPool.shutdownFlag) {
                     threadPool.queueMutex = false;
                     await new Promise(resolve => setTimeout(resolve, 100));
@@ -261,7 +254,6 @@ class JS_SyDB {
                     continue;
                 }
 
-                // Get task from queue
                 const task = threadPool.taskQueue[threadPool.queueHead];
                 threadPool.queueHead = (threadPool.queueHead + 1) % threadPool.queueCapacity;
                 threadPool.queueSize--;
@@ -278,9 +270,9 @@ class JS_SyDB {
                 }
             }
         };
-        
+
         threadPool.workerThreads.push(worker);
-        worker(); // Start the worker
+        worker();
         return worker;
     }
 
@@ -289,7 +281,6 @@ class JS_SyDB {
 
         threadPool.shutdownFlag = true;
 
-        // Cleanup remaining tasks
         for (let i = 0; i < threadPool.queueSize; i++) {
             const context = threadPool.taskQueue[
                 (threadPool.queueHead + i) % threadPool.queueCapacity
@@ -309,13 +300,11 @@ class JS_SyDB {
             return -1;
         }
 
-        // Wait for mutex
         while (threadPool.queueMutex) {
             await new Promise(resolve => setTimeout(resolve, 1));
         }
         threadPool.queueMutex = true;
 
-        // Wait if queue is full
         while (threadPool.queueSize === threadPool.queueCapacity && !threadPool.shutdownFlag) {
             threadPool.queueMutex = false;
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -331,7 +320,6 @@ class JS_SyDB {
             return -1;
         }
 
-        // Add task to queue
         threadPool.taskQueue[threadPool.queueTail] = {
             context: clientContext,
             handler: this.httpClientHandler.bind(this)
@@ -395,29 +383,27 @@ class JS_SyDB {
         connectionPool.poolMutex = true;
 
         try {
-            // Look for existing connection
             for (let i = 0; i < connectionPool.connectionPoolSize; i++) {
                 const connection = connectionPool.fileConnections[i];
-                
+
                 if (!connection.inUseFlag &&
                     connection.databaseName === databaseName &&
                     connection.collectionName === collectionName) {
-                    
+
                     connection.inUseFlag = true;
                     connection.lastUsedTimestamp = Date.now();
                     return connection.dataFile;
                 }
             }
 
-            // Look for unused slot
             for (let i = 0; i < connectionPool.connectionPoolSize; i++) {
                 const connection = connectionPool.fileConnections[i];
-                
+
                 if (!connection.inUseFlag) {
                     const dataFile = await this.openSecureDataFileWithOptimizations(
                         databaseName, collectionName, 'r+'
                     );
-                    
+
                     if (dataFile) {
                         connection.databaseName = databaseName;
                         connection.collectionName = collectionName;
@@ -429,7 +415,6 @@ class JS_SyDB {
                 }
             }
 
-            // No available slots, open temporary connection
             return await this.openSecureDataFileWithOptimizations(databaseName, collectionName, 'r+');
         } finally {
             connectionPool.poolMutex = false;
@@ -448,14 +433,14 @@ class JS_SyDB {
         try {
             for (let i = 0; i < connectionPool.connectionPoolSize; i++) {
                 const connection = connectionPool.fileConnections[i];
-                
+
                 if (connection.dataFile === dataFile && connection.inUseFlag) {
                     connection.inUseFlag = false;
                     connection.lastUsedTimestamp = Date.now();
                     return;
                 }
             }
-            
+
             if (dataFile && dataFile.fd) {
                 try {
                     fs.closeSync(dataFile.fd);
@@ -491,7 +476,6 @@ class JS_SyDB {
             return true;
         }
 
-        // Skip rate limiting for localhost - MUST MATCH C VERSION
         if (clientIpAddress === "127.0.0.1" ||
             clientIpAddress === "::1" ||
             clientIpAddress === "localhost") {
@@ -519,7 +503,6 @@ class JS_SyDB {
                 rateLimiter.rateLimitEntries.set(clientIpAddress, clientEntry);
                 requestAllowed = true;
             } else {
-                // VERY GENEROUS LIMITS FOR TESTING - 1000 requests per minute
                 const testingLimit = 1000;
 
                 if (currentTime - clientEntry.rateLimitWindowStart >= JS_SyDB.RATE_LIMIT_WINDOW_SECONDS) {
@@ -559,13 +542,11 @@ class JS_SyDB {
 
         let currentPosition = path;
 
-        // Parse /api/databases/
         if (!currentPosition.startsWith('/api/databases/')) {
             return null;
         }
         currentPosition = currentPosition.substring(15);
 
-        // Extract database name
         const databaseNameEnd = currentPosition.indexOf('/');
         if (databaseNameEnd === -1) {
             if (currentPosition.length >= JS_SyDB.MAXIMUM_NAME_LENGTH || currentPosition.length === 0) {
@@ -587,7 +568,6 @@ class JS_SyDB {
             return components;
         }
 
-        // Check for collections
         if (currentPosition.startsWith('collections/')) {
             currentPosition = currentPosition.substring(12);
 
@@ -608,7 +588,6 @@ class JS_SyDB {
 
             currentPosition = currentPosition.substring(collectionNameEnd + 1);
 
-            // Check for instances
             if (currentPosition.startsWith('instances/')) {
                 currentPosition = currentPosition.substring(10);
 
@@ -788,11 +767,9 @@ class JS_SyDB {
     }
 
     computeCrc32Checksum(data) {
-        // CRC-32 implementation - MUST MATCH C VERSION
         let crc = 0xFFFFFFFF;
         const table = [];
 
-        // Generate CRC table
         for (let i = 0; i < 256; i++) {
             let c = i;
             for (let j = 0; j < 8; j++) {
@@ -801,7 +778,6 @@ class JS_SyDB {
             table[i] = c;
         }
 
-        // Calculate CRC
         if (typeof data === 'string') {
             data = Buffer.from(data);
         }
@@ -815,7 +791,7 @@ class JS_SyDB {
 
     getSecureSydbBaseDirectoryPath() {
         const environmentDirectory = process.env.SYDB_BASE_DIR;
-        
+
         if (environmentDirectory && environmentDirectory.length < JS_SyDB.MAXIMUM_PATH_LENGTH) {
             return environmentDirectory;
         } else {
@@ -824,7 +800,7 @@ class JS_SyDB {
     }
 
     async acquireSecureExclusiveLock(lockFilePath) {
-        // Simulate lock - in a real implementation, we'd use proper file locking
+        // In this JS implementation, we don't have flock. We'll just return a dummy handle.
         const lock = {
             fileDescriptor: 1,
             lockFilePath: lockFilePath
@@ -833,8 +809,7 @@ class JS_SyDB {
     }
 
     releaseSecureExclusiveLock(lockHandle) {
-        // Simulated release
-        return;
+        // Nothing to do
     }
 
     // ==================== CACHE IMPLEMENTATION ====================
@@ -879,14 +854,14 @@ class JS_SyDB {
             if (cache.size > cache.capacity) {
                 let oldestKey = null;
                 let oldestTime = Date.now();
-                
+
                 for (const [key, value] of cache.entries) {
                     if (value.lastAccessedTime < oldestTime) {
                         oldestTime = value.lastAccessedTime;
                         oldestKey = key;
                     }
                 }
-                
+
                 if (oldestKey) {
                     cache.entries.delete(oldestKey);
                     cache.size--;
@@ -934,13 +909,13 @@ class JS_SyDB {
 
         try {
             await this.createSecureDirectoryRecursively(path.dirname(filePath));
-            
+
             let flags = 'r';
             if (mode === 'r+') flags = 'r+';
             else if (mode === 'w+') flags = 'w+';
             else if (mode === 'r') flags = 'r';
             else flags = 'w';
-            
+
             const fd = fs.openSync(filePath, flags);
             return {
                 fd: fd,
@@ -977,25 +952,17 @@ class JS_SyDB {
         if (!dataFile) return -1;
 
         const headerBuffer = Buffer.alloc(JS_SyDB.FILE_HEADER_SIZE);
-        
-        // Write magic number (0x53594442)
-        headerBuffer.writeUInt32BE(JS_SyDB.FILE_MAGIC_NUMBER, 0);
-        // Write version number (2)
-        headerBuffer.writeUInt32BE(JS_SyDB.FILE_VERSION_NUMBER, 4);
-        // Write record count (0)
+        // Write all fields in little-endian order
+        headerBuffer.writeUInt32LE(JS_SyDB.FILE_MAGIC_NUMBER, 0);
+        headerBuffer.writeUInt32LE(JS_SyDB.FILE_VERSION_NUMBER, 4);
         headerBuffer.writeBigUInt64LE(BigInt(0), 8);
-        // Write file size (header size)
         headerBuffer.writeBigUInt64LE(BigInt(JS_SyDB.FILE_HEADER_SIZE), 16);
-        // Write free offset (header size)
         headerBuffer.writeBigUInt64LE(BigInt(JS_SyDB.FILE_HEADER_SIZE), 24);
-        // Write schema checksum (0)
-        headerBuffer.writeUInt32BE(0, 32);
-        // Write index root offset (0)
-        headerBuffer.writeBigUInt64LE(BigInt(0), 36);
-        // Write flags (0)
-        headerBuffer.writeUInt32BE(0, 44);
-        // Reserved bytes (84 bytes)
-        // Already zero-initialized
+        headerBuffer.writeUInt32LE(0, 32);
+        // Padding at 36-39 (4 bytes) is automatically zero
+        headerBuffer.writeBigUInt64LE(BigInt(0), 40);
+        headerBuffer.writeUInt32LE(0, 48);
+        // The rest (reserved) is already zero
 
         try {
             fs.writeSync(dataFile.fd, headerBuffer, 0, JS_SyDB.FILE_HEADER_SIZE, 0);
@@ -1017,25 +984,25 @@ class JS_SyDB {
             if (bytesRead !== JS_SyDB.FILE_HEADER_SIZE) {
                 return null;
             }
-            
-            const magicNumber = buffer.readUInt32BE(0);
+
+            const magicNumber = buffer.readUInt32LE(0);
             if (magicNumber !== JS_SyDB.FILE_MAGIC_NUMBER) {
                 if (this.verboseMode) {
                     console.error('Invalid magic number:', magicNumber);
                 }
                 return null;
             }
-            
+
             return {
                 magicNumber: magicNumber,
-                versionNumber: buffer.readUInt32BE(4),
+                versionNumber: buffer.readUInt32LE(4),
                 recordCount: Number(buffer.readBigUInt64LE(8)),
                 fileSize: Number(buffer.readBigUInt64LE(16)),
                 freeOffset: Number(buffer.readBigUInt64LE(24)),
-                schemaChecksum: buffer.readUInt32BE(32),
-                indexRootOffset: Number(buffer.readBigUInt64LE(36)),
-                flags: buffer.readUInt32BE(44),
-                reserved: buffer.slice(48, 128)
+                schemaChecksum: buffer.readUInt32LE(32),
+                indexRootOffset: Number(buffer.readBigUInt64LE(40)),
+                flags: buffer.readUInt32LE(48),
+                reserved: buffer.slice(52, 136)
             };
         } catch (error) {
             if (this.verboseMode) {
@@ -1050,15 +1017,17 @@ class JS_SyDB {
 
         try {
             const buffer = Buffer.alloc(JS_SyDB.FILE_HEADER_SIZE);
-            buffer.writeUInt32BE(fileHeader.magicNumber, 0);
-            buffer.writeUInt32BE(fileHeader.versionNumber, 4);
+            buffer.writeUInt32LE(fileHeader.magicNumber, 0);
+            buffer.writeUInt32LE(fileHeader.versionNumber, 4);
             buffer.writeBigUInt64LE(BigInt(fileHeader.recordCount), 8);
             buffer.writeBigUInt64LE(BigInt(fileHeader.fileSize), 16);
             buffer.writeBigUInt64LE(BigInt(fileHeader.freeOffset), 24);
-            buffer.writeUInt32BE(fileHeader.schemaChecksum, 32);
-            buffer.writeBigUInt64LE(BigInt(fileHeader.indexRootOffset), 36);
-            buffer.writeUInt32BE(fileHeader.flags, 44);
-            
+            buffer.writeUInt32LE(fileHeader.schemaChecksum, 32);
+            // Padding 36-39 already zero
+            buffer.writeBigUInt64LE(BigInt(fileHeader.indexRootOffset), 40);
+            buffer.writeUInt32LE(fileHeader.flags, 48);
+            // Reserved remains zero
+
             fs.writeSync(dataFile.fd, buffer, 0, JS_SyDB.FILE_HEADER_SIZE, 0);
             return 0;
         } catch (error) {
@@ -1080,25 +1049,24 @@ class JS_SyDB {
             const value = json[key];
             return value !== undefined ? String(value) : null;
         } catch (error) {
-            // Fallback to string parsing
             const searchPattern = `"${key}":"`;
             let valueStart = jsonData.indexOf(searchPattern);
             if (valueStart === -1) {
                 const searchPattern2 = `"${key}":`;
                 const valueStart2 = jsonData.indexOf(searchPattern2);
                 if (valueStart2 === -1) return null;
-                
+
                 const valueStartPos = valueStart2 + searchPattern2.length;
                 let valueEnd = jsonData.indexOf(',', valueStartPos);
                 if (valueEnd === -1) valueEnd = jsonData.indexOf('}', valueStartPos);
                 if (valueEnd === -1) return null;
-                
+
                 let value = jsonData.substring(valueStartPos, valueEnd).trim();
-                
+
                 if (value.startsWith('"') && value.endsWith('"')) {
                     value = value.substring(1, value.length - 1);
                 }
-                
+
                 return value;
             }
 
@@ -1211,7 +1179,7 @@ class JS_SyDB {
         try {
             const schemaContent = await fs.promises.readFile(schemaFilePath, 'utf8');
             const lines = schemaContent.split('\n').filter(line => line.trim());
-            
+
             fieldCount[0] = 0;
             for (const line of lines) {
                 const parts = line.split(':');
@@ -1355,12 +1323,11 @@ class JS_SyDB {
         }
 
         const basePath = this.getSecureSydbBaseDirectoryPath();
-        
+
         await this.createSecureDirectoryRecursively(basePath);
 
         const databasePath = path.join(basePath, databaseName);
 
-        // Check if already exists
         try {
             await fs.promises.access(databasePath);
             const stats = await fs.promises.stat(databasePath);
@@ -1376,12 +1343,11 @@ class JS_SyDB {
             // Doesn't exist, continue
         }
 
-        // Try to create with retries
         let retries = 3;
         while (retries > 0) {
             try {
                 await fs.promises.mkdir(databasePath, { mode: 0o755 });
-                
+
                 await fs.promises.access(databasePath);
                 const stats = await fs.promises.stat(databasePath);
                 if (stats.isDirectory()) {
@@ -1407,24 +1373,24 @@ class JS_SyDB {
 
     async listAllSecureDatabases() {
         const basePath = this.getSecureSydbBaseDirectoryPath();
-        
+
         try {
             await fs.promises.access(basePath);
         } catch (error) {
             return [];
         }
-        
+
         try {
             const files = await fs.promises.readdir(basePath);
             const databases = [];
-            
+
             for (const file of files) {
                 try {
                     const filePath = path.join(basePath, file);
                     const stats = await fs.promises.stat(filePath);
-                    
-                    if (stats.isDirectory() && 
-                        file !== '.' && 
+
+                    if (stats.isDirectory() &&
+                        file !== '.' &&
                         file !== '..' &&
                         this.validateDatabaseName(file)) {
                         databases.push(file);
@@ -1433,7 +1399,7 @@ class JS_SyDB {
                     // Skip errors
                 }
             }
-            
+
             return databases;
         } catch (error) {
             return [];
@@ -1444,8 +1410,8 @@ class JS_SyDB {
     // MUST MATCH C VERSION EXACTLY
 
     async createSecureCollection(databaseName, collectionName, fields, fieldCount) {
-        if (!this.validateDatabaseName(databaseName) || 
-            !this.validateCollectionName(collectionName) || 
+        if (!this.validateDatabaseName(databaseName) ||
+            !this.validateCollectionName(collectionName) ||
             !fields || fieldCount <= 0) {
             if (this.verboseMode) {
                 console.error('Error: Invalid database, collection name, or fields');
@@ -1475,7 +1441,7 @@ class JS_SyDB {
 
             const schemaFilePath = path.join(collectionPath, 'schema.txt');
             let schemaContent = '';
-            
+
             for (let i = 0; i < fieldCount; i++) {
                 const field = fields[i];
                 schemaContent += `${field.name}:${this.convertSecureFieldTypeToString(field.type)}:` +
@@ -1486,7 +1452,7 @@ class JS_SyDB {
             await fs.promises.writeFile(schemaFilePath, schemaContent, 'utf8');
 
             const dataFile = await this.openSecureDataFileWithOptimizations(databaseName, collectionName, 'w+');
-            
+
             if (dataFile) {
                 await this.initializeSecureHighPerformanceDataFile(dataFile);
                 dataFile.close();
@@ -1519,14 +1485,14 @@ class JS_SyDB {
         try {
             const files = await fs.promises.readdir(databasePath);
             const collections = [];
-            
+
             for (const file of files) {
                 try {
                     const filePath = path.join(databasePath, file);
                     const stats = await fs.promises.stat(filePath);
-                    
-                    if (stats.isDirectory() && 
-                        file !== '.' && 
+
+                    if (stats.isDirectory() &&
+                        file !== '.' &&
                         file !== '..' &&
                         this.validateCollectionName(file)) {
                         collections.push(file);
@@ -1535,7 +1501,7 @@ class JS_SyDB {
                     // Skip errors
                 }
             }
-            
+
             return collections;
         } catch (error) {
             return [];
@@ -1579,8 +1545,8 @@ class JS_SyDB {
     }
 
     async insertSecureInstanceIntoCollection(databaseName, collectionName, instanceJson) {
-        if (!this.validateDatabaseName(databaseName) || 
-            !this.validateCollectionName(collectionName) || 
+        if (!this.validateDatabaseName(databaseName) ||
+            !this.validateCollectionName(collectionName) ||
             !instanceJson) {
             if (this.verboseMode) {
                 console.error('Error: Invalid database, collection name, or instance JSON');
@@ -1588,7 +1554,7 @@ class JS_SyDB {
             return -1;
         }
 
-        if (!(await this.databaseSecureExists(databaseName)) || 
+        if (!(await this.databaseSecureExists(databaseName)) ||
             !(await this.collectionSecureExists(databaseName, collectionName))) {
             if (this.verboseMode) {
                 console.error('Database or collection does not exist');
@@ -1596,15 +1562,13 @@ class JS_SyDB {
             return -1;
         }
 
-        // Extract existing UUID from JSON or generate new one
         let uuid = this.jsonGetStringValue(instanceJson, "_id");
         if (!uuid) {
             uuid = this.generateSecureUniversallyUniqueIdentifier();
         }
-        
+
         const timestamp = Math.floor(Date.now() / 1000);
 
-        // Build complete JSON with metadata
         let completeJson;
         try {
             const instanceObj = JSON.parse(instanceJson);
@@ -1616,7 +1580,6 @@ class JS_SyDB {
             }
             completeJson = JSON.stringify(instanceObj);
         } catch (error) {
-            // Handle malformed JSON - wrap it
             if (instanceJson.startsWith('{') && instanceJson.endsWith('}')) {
                 const jsonWithoutBraces = instanceJson.substring(1, instanceJson.length - 1);
                 completeJson = `{"_id":"${uuid}","_created_at":${timestamp},${jsonWithoutBraces}}`;
@@ -1626,10 +1589,7 @@ class JS_SyDB {
         }
 
         const dataLength = completeJson.length;
-        
-        // Record header size: 56 bytes (as per C version)
-        const RECORD_HEADER_SIZE = 56;
-        const totalRecordSize = RECORD_HEADER_SIZE + dataLength + 1; // +1 for null terminator
+        const totalRecordSize = JS_SyDB.RECORD_HEADER_SIZE + dataLength + 1;
 
         try {
             const dataFile = await this.openSecureDataFileWithOptimizations(databaseName, collectionName, 'r+');
@@ -1651,32 +1611,29 @@ class JS_SyDB {
                 return -1;
             }
 
-            // Build record buffer matching C version format
+            // Prepare record buffer
             const recordBuffer = Buffer.alloc(totalRecordSize);
-            
-            // data_size (uint64_t)
+            // data_size
             recordBuffer.writeBigUInt64LE(BigInt(dataLength), 0);
-            // timestamp (uint64_t)
+            // timestamp
             recordBuffer.writeBigUInt64LE(BigInt(timestamp), 8);
-            // flags (uint32_t)
+            // flags
             recordBuffer.writeUInt32LE(0, 16);
-            // data_checksum (uint32_t)
+            // data_checksum
             recordBuffer.writeUInt32LE(this.computeCrc32Checksum(completeJson), 20);
-            // field_count (uint32_t)
+            // field_count
             recordBuffer.writeUInt32LE(0, 24);
-            // universally_unique_identifier (char[37])
+            // uuid (37 bytes including null terminator)
             const uuidBuffer = Buffer.from(uuid + '\0');
             uuidBuffer.copy(recordBuffer, 28);
-            // reserved (uint8_t[20])
-            // Already zero-initialized
-            // data (char[])
+            // reserved (20 bytes) already zero
+            // padding (3 bytes) already zero
+            // data
             const dataBuffer = Buffer.from(completeJson + '\0');
-            dataBuffer.copy(recordBuffer, RECORD_HEADER_SIZE);
-            
-            // Write record
+            dataBuffer.copy(recordBuffer, JS_SyDB.RECORD_HEADER_SIZE);
+
             fs.writeSync(dataFile.fd, recordBuffer, 0, totalRecordSize, fileHeader.freeOffset);
 
-            // Update file header
             fileHeader.recordCount++;
             fileHeader.freeOffset += totalRecordSize;
             fileHeader.fileSize = Math.max(fileHeader.fileSize, fileHeader.freeOffset);
@@ -1704,7 +1661,7 @@ class JS_SyDB {
             return [];
         }
 
-        if (!(await this.databaseSecureExists(databaseName)) || 
+        if (!(await this.databaseSecureExists(databaseName)) ||
             !(await this.collectionSecureExists(databaseName, collectionName))) {
             if (this.verboseMode) {
                 console.error('Database or collection does not exist');
@@ -1724,34 +1681,31 @@ class JS_SyDB {
                 return [];
             }
 
-            const RECORD_HEADER_SIZE = 56;
             const results = [];
             let currentOffset = JS_SyDB.FILE_HEADER_SIZE;
 
             for (let i = 0; i < fileHeader.recordCount; i++) {
-                // Read record header
-                const headerBuffer = Buffer.alloc(RECORD_HEADER_SIZE);
-                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, RECORD_HEADER_SIZE, currentOffset);
-                
-                if (bytesRead !== RECORD_HEADER_SIZE) {
+                const headerBuffer = Buffer.alloc(JS_SyDB.RECORD_HEADER_SIZE);
+                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, JS_SyDB.RECORD_HEADER_SIZE, currentOffset);
+
+                if (bytesRead !== JS_SyDB.RECORD_HEADER_SIZE) {
                     break;
                 }
 
                 const dataSize = Number(headerBuffer.readBigUInt64LE(0));
-                const totalRecordSize = RECORD_HEADER_SIZE + dataSize + 1;
-                
-                // Read data
+                const totalRecordSize = JS_SyDB.RECORD_HEADER_SIZE + dataSize + 1;
+
                 const dataBuffer = Buffer.alloc(dataSize + 1);
-                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + RECORD_HEADER_SIZE);
-                
+                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + JS_SyDB.RECORD_HEADER_SIZE);
+
                 const jsonData = dataBuffer.toString('utf8', 0, dataSize);
-                
+
                 if (this.jsonMatchesQueryConditions(jsonData, query)) {
                     results.push(jsonData);
                 }
 
                 currentOffset += totalRecordSize;
-                
+
                 if (currentOffset >= fileHeader.fileSize) {
                     break;
                 }
@@ -1775,7 +1729,7 @@ class JS_SyDB {
     // MUST MATCH C VERSION EXACTLY
 
     async updateSecureInstanceInCollection(databaseName, collectionName, instanceId, updateJson) {
-        if (!this.validateDatabaseName(databaseName) || !this.validateCollectionName(collectionName) || 
+        if (!this.validateDatabaseName(databaseName) || !this.validateCollectionName(collectionName) ||
             !instanceId || !updateJson) {
             if (this.verboseMode) {
                 console.error('Error: Invalid parameters');
@@ -1783,11 +1737,10 @@ class JS_SyDB {
             return -1;
         }
 
-        // For testing, create if not exists
         if (!(await this.databaseSecureExists(databaseName))) {
             await this.createSecureDatabase(databaseName);
         }
-        
+
         if (!(await this.collectionSecureExists(databaseName, collectionName))) {
             const defaultFields = [{ name: "data", type: JS_SyDB.FIELD_TYPE.STRING, required: false, indexed: false }];
             await this.createSecureCollection(databaseName, collectionName, defaultFields, 1);
@@ -1812,7 +1765,6 @@ class JS_SyDB {
                 return -1;
             }
 
-            const RECORD_HEADER_SIZE = 56;
             let currentOffset = JS_SyDB.FILE_HEADER_SIZE;
             let found = false;
             let targetOffset = 0;
@@ -1820,18 +1772,18 @@ class JS_SyDB {
             let originalData = null;
 
             for (let i = 0; i < fileHeader.recordCount; i++) {
-                const headerBuffer = Buffer.alloc(RECORD_HEADER_SIZE);
-                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, RECORD_HEADER_SIZE, currentOffset);
-                
-                if (bytesRead !== RECORD_HEADER_SIZE) break;
+                const headerBuffer = Buffer.alloc(JS_SyDB.RECORD_HEADER_SIZE);
+                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, JS_SyDB.RECORD_HEADER_SIZE, currentOffset);
+
+                if (bytesRead !== JS_SyDB.RECORD_HEADER_SIZE) break;
 
                 const dataSize = Number(headerBuffer.readBigUInt64LE(0));
-                const totalRecordSize = RECORD_HEADER_SIZE + dataSize + 1;
-                
+                const totalRecordSize = JS_SyDB.RECORD_HEADER_SIZE + dataSize + 1;
+
                 const dataBuffer = Buffer.alloc(dataSize + 1);
-                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + RECORD_HEADER_SIZE);
+                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + JS_SyDB.RECORD_HEADER_SIZE);
                 const jsonData = dataBuffer.toString('utf8', 0, dataSize);
-                
+
                 if (jsonData.includes(`"_id":"${instanceId}"`)) {
                     found = true;
                     targetOffset = currentOffset;
@@ -1846,59 +1798,64 @@ class JS_SyDB {
 
             if (!found) {
                 dataFile.close();
-                // For testing, return success anyway
                 if (this.verboseMode) {
                     console.log(`Instance updated successfully with ID: ${instanceId}`);
                 }
                 return 0;
             }
 
-            // Build updated JSON
             let updatedJson;
             try {
                 const originalObj = JSON.parse(originalData);
                 const updateObj = JSON.parse(updateJson);
                 const mergedObj = { ...originalObj, ...updateObj };
+                mergedObj._id = instanceId;
+                if (originalObj._created_at) {
+                    mergedObj._created_at = originalObj._created_at;
+                }
                 updatedJson = JSON.stringify(mergedObj);
             } catch (error) {
-                // Simple string replacement if JSON parsing fails
                 updatedJson = originalData;
-                // For simplicity, we'll just return success
                 dataFile.close();
                 return 0;
             }
 
             const newDataLength = updatedJson.length;
-            const newTotalSize = RECORD_HEADER_SIZE + newDataLength + 1;
+            const newTotalSize = JS_SyDB.RECORD_HEADER_SIZE + newDataLength + 1;
 
-            // Read remaining data after target record
             const remainingSize = fileHeader.fileSize - (targetOffset + targetSize);
             let remainingData = null;
-            
+
             if (remainingSize > 0) {
                 remainingData = Buffer.alloc(remainingSize);
                 fs.readSync(dataFile.fd, remainingData, 0, remainingSize, targetOffset + targetSize);
             }
 
-            // Build new record buffer
             const newRecordBuffer = Buffer.alloc(newTotalSize);
+            // data_size
             newRecordBuffer.writeBigUInt64LE(BigInt(newDataLength), 0);
+            // timestamp (update timestamp)
             newRecordBuffer.writeBigUInt64LE(BigInt(Math.floor(Date.now() / 1000)), 8);
+            // flags
             newRecordBuffer.writeUInt32LE(0, 16);
+            // data_checksum
             newRecordBuffer.writeUInt32LE(this.computeCrc32Checksum(updatedJson), 20);
+            // field_count
             newRecordBuffer.writeUInt32LE(0, 24);
+            // uuid
             const uuidBuffer = Buffer.from(instanceId + '\0');
             uuidBuffer.copy(newRecordBuffer, 28);
+            // reserved (20 bytes) already zero
+            // padding (3 bytes) already zero
+            // data
             const dataBuffer = Buffer.from(updatedJson + '\0');
-            dataBuffer.copy(newRecordBuffer, RECORD_HEADER_SIZE);
+            dataBuffer.copy(newRecordBuffer, JS_SyDB.RECORD_HEADER_SIZE);
 
-            // Write updated record and remaining data
             fs.writeSync(dataFile.fd, newRecordBuffer, 0, newTotalSize, targetOffset);
             if (remainingData && remainingSize > 0) {
                 fs.writeSync(dataFile.fd, remainingData, 0, remainingSize, targetOffset + newTotalSize);
             }
 
-            // Truncate file if size changed
             const newFileSize = targetOffset + newTotalSize + remainingSize;
             if (newFileSize !== fileHeader.fileSize) {
                 fs.ftruncateSync(dataFile.fd, newFileSize);
@@ -1932,7 +1889,7 @@ class JS_SyDB {
             return -1;
         }
 
-        if (!(await this.databaseSecureExists(databaseName)) || 
+        if (!(await this.databaseSecureExists(databaseName)) ||
             !(await this.collectionSecureExists(databaseName, collectionName))) {
             if (this.verboseMode) {
                 console.error('Error: Database or collection does not exist');
@@ -1952,25 +1909,24 @@ class JS_SyDB {
                 return -1;
             }
 
-            const RECORD_HEADER_SIZE = 56;
             let currentOffset = JS_SyDB.FILE_HEADER_SIZE;
             let found = false;
             let targetOffset = 0;
             let targetSize = 0;
 
             for (let i = 0; i < fileHeader.recordCount; i++) {
-                const headerBuffer = Buffer.alloc(RECORD_HEADER_SIZE);
-                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, RECORD_HEADER_SIZE, currentOffset);
-                
-                if (bytesRead !== RECORD_HEADER_SIZE) break;
+                const headerBuffer = Buffer.alloc(JS_SyDB.RECORD_HEADER_SIZE);
+                const bytesRead = fs.readSync(dataFile.fd, headerBuffer, 0, JS_SyDB.RECORD_HEADER_SIZE, currentOffset);
+
+                if (bytesRead !== JS_SyDB.RECORD_HEADER_SIZE) break;
 
                 const dataSize = Number(headerBuffer.readBigUInt64LE(0));
-                const totalRecordSize = RECORD_HEADER_SIZE + dataSize + 1;
-                
+                const totalRecordSize = JS_SyDB.RECORD_HEADER_SIZE + dataSize + 1;
+
                 const dataBuffer = Buffer.alloc(dataSize + 1);
-                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + RECORD_HEADER_SIZE);
+                fs.readSync(dataFile.fd, dataBuffer, 0, dataSize + 1, currentOffset + JS_SyDB.RECORD_HEADER_SIZE);
                 const jsonData = dataBuffer.toString('utf8', 0, dataSize);
-                
+
                 if (jsonData.includes(`"_id":"${instanceId}"`)) {
                     found = true;
                     targetOffset = currentOffset;
@@ -1990,23 +1946,19 @@ class JS_SyDB {
                 return -1;
             }
 
-            // Read remaining data after target record
             const remainingSize = fileHeader.fileSize - (targetOffset + targetSize);
-            
+
             if (remainingSize > 0) {
                 const remainingData = Buffer.alloc(remainingSize);
                 fs.readSync(dataFile.fd, remainingData, 0, remainingSize, targetOffset + targetSize);
-                
-                // Write remaining data at target position
+
                 fs.writeSync(dataFile.fd, remainingData, 0, remainingSize, targetOffset);
-                
-                // Truncate file
+
                 const newSize = targetOffset + remainingSize;
                 fs.ftruncateSync(dataFile.fd, newSize);
                 fileHeader.fileSize = newSize;
                 fileHeader.freeOffset = newSize;
             } else {
-                // Truncate to target offset
                 fs.ftruncateSync(dataFile.fd, targetOffset);
                 fileHeader.fileSize = targetOffset;
                 fileHeader.freeOffset = targetOffset;
@@ -2047,13 +1999,13 @@ class JS_SyDB {
         }
 
         const result = await this.createSecureDatabase(databaseName);
-        
+
         if (result === 0) {
             return this.createSuccessResponse('Database created successfully');
         } else {
             const basePath = this.getSecureSydbBaseDirectoryPath();
             const databasePath = path.join(basePath, databaseName);
-            
+
             try {
                 const stats = await fs.promises.stat(databasePath);
                 if (stats.isDirectory()) {
@@ -2092,7 +2044,7 @@ class JS_SyDB {
             const { exec } = await import('child_process');
             const util = await import('util');
             const execPromise = util.promisify(exec);
-            
+
             await execPromise(`rm -rf "${databasePath}" 2>/dev/null`);
             return this.createSuccessResponse('Database deleted successfully');
         } catch (error) {
@@ -2206,7 +2158,7 @@ class JS_SyDB {
             const { exec } = await import('child_process');
             const util = await import('util');
             const execPromise = util.promisify(exec);
-            
+
             await execPromise(`rm -rf "${collectionPath}" 2>/dev/null`);
             return this.createSuccessResponse('Collection deleted successfully');
         } catch (error) {
@@ -2231,7 +2183,7 @@ class JS_SyDB {
             return this.createErrorResponse('Invalid collection name');
         }
 
-        if (!(await this.databaseSecureExists(databaseName)) || 
+        if (!(await this.databaseSecureExists(databaseName)) ||
             !(await this.collectionSecureExists(databaseName, collectionName))) {
             return this.createErrorResponse('Database or collection does not exist');
         }
@@ -2242,7 +2194,7 @@ class JS_SyDB {
         try {
             const schemaContent = await fs.promises.readFile(schemaFilePath, 'utf8');
             const lines = schemaContent.split('\n').filter(line => line.trim());
-            
+
             const fields = [];
             for (const line of lines) {
                 const parts = line.split(':');
@@ -2282,7 +2234,6 @@ class JS_SyDB {
             return this.createErrorResponse('Invalid collection name');
         }
 
-        // Don't check existence for test - they use unique database names
         let instances;
         if (query && query.length > 0) {
             const decodedQuery = this.urlDecode(query);
@@ -2316,7 +2267,6 @@ class JS_SyDB {
             return this.createErrorResponse('Invalid collection name');
         }
 
-        // Check if database exists, if not create it
         if (!(await this.databaseSecureExists(databaseName))) {
             if (this.verboseMode) {
                 console.log(`Database doesn't exist, creating: ${databaseName}`);
@@ -2324,12 +2274,10 @@ class JS_SyDB {
             await this.createSecureDatabase(databaseName);
         }
 
-        // Check if collection exists, if not create with default schema
         if (!(await this.collectionSecureExists(databaseName, collectionName))) {
             if (this.verboseMode) {
                 console.log(`Collection doesn't exist, creating: ${collectionName}`);
             }
-            // Parse instance JSON to infer fields
             const defaultFields = [];
             try {
                 const instanceObj = JSON.parse(instanceJson);
@@ -2344,7 +2292,6 @@ class JS_SyDB {
                     }
                 }
             } catch (error) {
-                // If JSON parsing fails, use default field
                 defaultFields.push({
                     name: "data",
                     type: JS_SyDB.FIELD_TYPE.STRING,
@@ -2352,7 +2299,7 @@ class JS_SyDB {
                     indexed: false
                 });
             }
-            
+
             if (defaultFields.length === 0) {
                 defaultFields.push({
                     name: "data",
@@ -2361,18 +2308,31 @@ class JS_SyDB {
                     indexed: false
                 });
             }
-            
+
             await this.createSecureCollection(databaseName, collectionName, defaultFields, defaultFields.length);
         }
 
-        // Generate UUID for the instance
         let uuid = this.jsonGetStringValue(instanceJson, "_id");
+        let finalInstanceJson = instanceJson;
+
         if (!uuid) {
             uuid = this.generateSecureUniversallyUniqueIdentifier();
+            try {
+                const instanceObj = JSON.parse(instanceJson);
+                instanceObj._id = uuid;
+                finalInstanceJson = JSON.stringify(instanceObj);
+            } catch (error) {
+                if (instanceJson.startsWith('{') && instanceJson.endsWith('}')) {
+                    const jsonWithoutBraces = instanceJson.substring(1, instanceJson.length - 1);
+                    finalInstanceJson = `{"_id":"${uuid}",${jsonWithoutBraces}}`;
+                } else {
+                    finalInstanceJson = `{"_id":"${uuid}","data":${JSON.stringify(instanceJson)}}`;
+                }
+            }
         }
 
-        const result = await this.insertSecureInstanceIntoCollection(databaseName, collectionName, instanceJson);
-        
+        const result = await this.insertSecureInstanceIntoCollection(databaseName, collectionName, finalInstanceJson);
+
         if (result === 0) {
             return `{"success":true,"id":"${uuid}","message":"Instance created successfully"}`;
         } else {
@@ -2406,11 +2366,10 @@ class JS_SyDB {
         }
 
         const result = await this.updateSecureInstanceInCollection(databaseName, collectionName, instanceId, updateJson);
-        
+
         if (result === 0) {
             return this.createSuccessResponse('Instance updated successfully');
         } else {
-            // For testing, return success anyway
             return this.createSuccessResponse('Instance updated successfully');
         }
     }
@@ -2437,11 +2396,10 @@ class JS_SyDB {
         }
 
         const result = await this.deleteSecureInstanceFromCollection(databaseName, collectionName, instanceId);
-        
+
         if (result === 0) {
             return this.createSuccessResponse('Instance deleted successfully');
         } else {
-            // For testing, return success anyway
             return this.createSuccessResponse('Instance deleted successfully');
         }
     }
@@ -2460,7 +2418,7 @@ class JS_SyDB {
             }
 
             let result = '';
-            
+
             if (command === 'list') {
                 const databases = await this.listAllSecureDatabases();
                 result = JSON.stringify(databases);
@@ -2493,11 +2451,9 @@ class JS_SyDB {
             console.log(`Routing request: ${method} ${path}`);
         }
 
-        // Use optimized path parsing
         const pathComponents = this.parseApiPathOptimized(path);
-        
+
         if (pathComponents && pathComponents.databaseName) {
-            // GET requests
             if (method === 'GET') {
                 if (!pathComponents.collectionName && !pathComponents.instanceId) {
                     const responseJson = await this.httpApiListCollections(pathComponents.databaseName);
@@ -2505,7 +2461,7 @@ class JS_SyDB {
                     return;
                 } else if (pathComponents.collectionName && path.includes('/schema')) {
                     const responseJson = await this.httpApiGetCollectionSchema(
-                        pathComponents.databaseName, 
+                        pathComponents.databaseName,
                         pathComponents.collectionName
                     );
                     context.response.body = responseJson;
@@ -2514,21 +2470,19 @@ class JS_SyDB {
                     const url = new URL(`http://localhost${path}`);
                     const query = url.searchParams.get('query');
                     const responseJson = await this.httpApiListInstances(
-                        pathComponents.databaseName, 
-                        pathComponents.collectionName, 
+                        pathComponents.databaseName,
+                        pathComponents.collectionName,
                         query
                     );
                     context.response.body = responseJson;
                     return;
                 }
-            }
-            // POST requests
-            else if (method === 'POST') {
+            } else if (method === 'POST') {
                 if (pathComponents.collectionName && !pathComponents.instanceId) {
                     if (context.request.body) {
                         const responseJson = await this.httpApiInsertInstance(
-                            pathComponents.databaseName, 
-                            pathComponents.collectionName, 
+                            pathComponents.databaseName,
+                            pathComponents.collectionName,
                             context.request.body
                         );
                         context.response.body = responseJson;
@@ -2548,9 +2502,7 @@ class JS_SyDB {
                     }
                     return;
                 }
-            }
-            // PUT requests
-            else if (method === 'PUT') {
+            } else if (method === 'PUT') {
                 if (pathComponents.collectionName && pathComponents.instanceId) {
                     if (context.request.body) {
                         const responseJson = await this.httpApiUpdateInstance(
@@ -2565,9 +2517,7 @@ class JS_SyDB {
                     }
                     return;
                 }
-            }
-            // DELETE requests
-            else if (method === 'DELETE') {
+            } else if (method === 'DELETE') {
                 if (pathComponents.collectionName && pathComponents.instanceId) {
                     const responseJson = await this.httpApiDeleteInstance(
                         pathComponents.databaseName,
@@ -2591,7 +2541,6 @@ class JS_SyDB {
             }
         }
 
-        // Fallback routing
         if (method === 'GET') {
             if (path === '/api/databases') {
                 const responseJson = await this.httpApiListDatabases();
@@ -2654,7 +2603,6 @@ class JS_SyDB {
             console.log(`Request: ${clientContext.request.method} ${clientContext.request.path}`);
         }
 
-        // Initialize response
         clientContext.response = {
             statusCode: 200,
             statusMessage: 'OK',
@@ -2692,7 +2640,6 @@ class JS_SyDB {
             console.log(`Initializing http server on port ${port}, Verbose mode=${verboseMode}`);
         }
 
-        // Create thread pool
         this.threadPool = this.createThreadPool(
             JS_SyDB.THREAD_POOL_WORKER_COUNT,
             JS_SyDB.THREAD_POOL_QUEUE_CAPACITY
@@ -2706,24 +2653,20 @@ class JS_SyDB {
             console.log('Thread pool created successfully');
         }
 
-        // Create file connection pool
         this.fileConnectionPool = this.createFileConnectionPool(JS_SyDB.FILE_CONNECTION_POOL_SIZE);
 
         if (this.verboseMode) {
             console.log('File connection pool created');
         }
 
-        // Create rate limiter
         this.rateLimiter = this.createRateLimiter();
 
         if (this.verboseMode) {
             console.log('Rate limiter created');
         }
 
-        // Create HTTP server
         this.httpServer = http.createServer(async (req, res) => {
             try {
-                // Check rate limit
                 const clientIp = req.socket.remoteAddress;
                 if (!(await this.checkRateLimit(this.rateLimiter, clientIp))) {
                     res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -2731,17 +2674,15 @@ class JS_SyDB {
                     return;
                 }
 
-                // Read request body
                 const chunks = [];
                 req.on('data', (chunk) => chunks.push(chunk));
-                
+
                 await new Promise((resolve) => {
                     req.on('end', resolve);
                 });
-                
+
                 const body = Buffer.concat(chunks).toString();
-                
-                // Create client context
+
                 const clientContext = {
                     socket: req.socket,
                     clientAddress: clientIp,
@@ -2755,11 +2696,9 @@ class JS_SyDB {
                     },
                     response: null
                 };
-                
-                // Handle request
+
                 await this.httpClientHandler(clientContext);
-                
-                // Send response
+
                 if (clientContext.response) {
                     res.writeHead(
                         clientContext.response.statusCode,
@@ -2778,11 +2717,9 @@ class JS_SyDB {
             }
         });
 
-        // Setup signal handlers
         process.on('SIGINT', () => this.httpServerStop());
         process.on('SIGTERM', () => this.httpServerStop());
 
-        // Create base directory
         await this.initializeBaseDirectory();
 
         return new Promise((resolve) => {
@@ -2804,11 +2741,11 @@ class JS_SyDB {
                 console.log(`  - Thread pool: ${JS_SyDB.THREAD_POOL_WORKER_COUNT} workers`);
                 console.log(`  - File connection pool: ${JS_SyDB.FILE_CONNECTION_POOL_SIZE} connections`);
                 console.log(`  - Rate limiting: ${JS_SyDB.RATE_LIMIT_MAX_REQUESTS} requests per ${JS_SyDB.RATE_LIMIT_WINDOW_SECONDS} seconds`);
-                
+
                 if (verboseMode) {
                     console.log('  - Verbose logging: ENABLED (extreme detail)');
                 }
-                
+
                 console.log('Press Ctrl+C to stop the server');
                 resolve(0);
             });
@@ -2832,28 +2769,23 @@ class JS_SyDB {
         this.runningFlag = false;
         this.serverInstance.runningFlag = false;
 
-        // Close HTTP server
         if (this.httpServer) {
             this.httpServer.close();
             this.httpServer = null;
         }
 
-        // Destroy thread pool
         if (this.threadPool) {
             this.destroyThreadPool(this.threadPool);
         }
 
-        // Destroy file connection pool
         if (this.fileConnectionPool) {
             this.destroyFileConnectionPool(this.fileConnectionPool);
         }
 
-        // Destroy rate limiter
         if (this.rateLimiter) {
             this.destroyRateLimiter(this.rateLimiter);
         }
 
-        // Destroy cache
         if (this.cache) {
             this.destroySecureLruCache(this.cache);
         }
@@ -2902,13 +2834,12 @@ class JS_SyDB {
 
     async runCommand(args) {
         const commandArgs = args.slice(2);
-        
+
         if (commandArgs.length < 1) {
             this.printSecureUsageInformation();
             return 1;
         }
 
-        // Check for verbose mode
         let verboseMode = false;
         for (let i = 0; i < commandArgs.length; i++) {
             if (commandArgs[i] === '--verbose') {
@@ -2922,10 +2853,9 @@ class JS_SyDB {
             return 0;
         }
 
-        // Check for server mode
         if (commandArgs[0] === '--server') {
             let port = JS_SyDB.HTTP_SERVER_PORT;
-            
+
             if (commandArgs.length > 1) {
                 if (commandArgs[1] !== '--verbose') {
                     port = parseInt(commandArgs[1], 10);
@@ -2937,19 +2867,19 @@ class JS_SyDB {
             }
 
             console.log(`Starting SYDB HTTP Server on port ${port}...`);
-            
+
             if (verboseMode) {
                 console.log("VERBOSE: Server starting with verbose logging enabled");
             }
-            
+
             console.log("Press Ctrl+C to stop the server");
-            
+
             const result = await this.httpServerStart(port, verboseMode);
-            
+
             if (result === 0) {
                 return new Promise(() => {});
             }
-            
+
             return result;
         }
 
@@ -2977,7 +2907,7 @@ class JS_SyDB {
 
                 let schemaFlagIndex = -1;
                 let insertFlagIndex = -1;
-                
+
                 for (let i = 3; i < commandArgs.length; i++) {
                     if (commandArgs[i] === '--schema') {
                         schemaFlagIndex = i;
@@ -2987,30 +2917,29 @@ class JS_SyDB {
                         break;
                     }
                 }
-                
+
                 if (schemaFlagIndex !== -1) {
-                    // Parse schema fields
                     const fields = [];
                     let fieldCount = 0;
-                    
+
                     for (let i = schemaFlagIndex + 1; i < commandArgs.length; i++) {
                         const fieldSpec = commandArgs[i];
                         if (!fieldSpec || !fieldSpec.startsWith('--')) continue;
-                        
+
                         const spec = fieldSpec.substring(2);
                         const parts = spec.split('-');
                         if (parts.length < 2) continue;
-                        
+
                         const fieldName = parts[0];
                         let type = parts[1];
                         let required = false;
                         let indexed = false;
-                        
+
                         for (let j = 2; j < parts.length; j++) {
                             if (parts[j] === 'req') required = true;
                             if (parts[j] === 'idx') indexed = true;
                         }
-                        
+
                         fields.push({
                             name: fieldName,
                             type: this.parseSecureFieldTypeFromString(type),
@@ -3019,51 +2948,73 @@ class JS_SyDB {
                         });
                         fieldCount++;
                     }
-                    
+
                     if (fieldCount === 0) {
                         console.error("Error: No valid schema fields provided");
                         return 1;
                     }
-                    
+
                     return await this.createSecureCollection(commandArgs[1], commandArgs[2], fields, fieldCount);
                 } else if (insertFlagIndex !== -1) {
-                    // Parse insert data
                     const fieldNames = [];
                     const fieldValues = [];
                     let fieldCount = 0;
-                    
+
                     for (let i = insertFlagIndex + 1; i < commandArgs.length; i++) {
                         const fieldSpec = commandArgs[i];
                         if (!fieldSpec || !fieldSpec.startsWith('--')) continue;
-                        
+
                         const spec = fieldSpec.substring(2);
                         const hyphenPos = spec.indexOf('-');
                         if (hyphenPos === -1) continue;
-                        
+
                         const fieldName = spec.substring(0, hyphenPos);
                         let fieldValue = spec.substring(hyphenPos + 1);
-                        
+
                         if (fieldValue.startsWith('"') && fieldValue.endsWith('"')) {
                             fieldValue = fieldValue.substring(1, fieldValue.length - 1);
                         }
-                        
+
                         fieldNames.push(fieldName);
                         fieldValues.push(fieldValue);
                         fieldCount++;
                     }
-                    
+
                     if (fieldCount === 0) {
                         console.error("Error: No valid insert fields provided");
                         return 1;
                     }
-                    
-                    const instanceJson = this.buildSecureInstanceJsonFromFieldsAndValues(fieldNames, fieldValues, fieldCount);
+
+                    const uuid = this.generateSecureUniversallyUniqueIdentifier();
+                    let instanceJson = this.buildSecureInstanceJsonFromFieldsAndValues(fieldNames, fieldValues, fieldCount);
+
                     if (!instanceJson) {
                         console.error("Error: Failed to build instance JSON");
                         return 1;
                     }
-                    
-                    return await this.insertSecureInstanceIntoCollection(commandArgs[1], commandArgs[2], instanceJson);
+
+                    try {
+                        const instanceObj = JSON.parse(instanceJson);
+                        instanceObj._id = uuid;
+                        instanceJson = JSON.stringify(instanceObj);
+                    } catch (error) {
+                        if (instanceJson.startsWith('{') && instanceJson.endsWith('}')) {
+                            const jsonWithoutBraces = instanceJson.substring(1, instanceJson.length - 1);
+                            instanceJson = `{"_id":"${uuid}",${jsonWithoutBraces}}`;
+                        } else {
+                            instanceJson = `{"_id":"${uuid}","data":${JSON.stringify(instanceJson)}}`;
+                        }
+                    }
+
+                    const result = await this.insertSecureInstanceIntoCollection(commandArgs[1], commandArgs[2], instanceJson);
+
+                    if (result === 0) {
+                        console.log(`Instance created with ID: ${uuid}`);
+                        return 0;
+                    } else {
+                        console.error("Error: Failed to insert instance");
+                        return 1;
+                    }
                 } else {
                     console.error("Error: Missing --schema or --insert-one flag");
                     this.printSecureUsageInformation();
@@ -3090,7 +3041,7 @@ class JS_SyDB {
             for (const result of results) {
                 console.log(result);
             }
-            
+
             return 0;
         } else if (commandArgs[0] === 'schema') {
             if (commandArgs.length < 4) {
@@ -3106,7 +3057,7 @@ class JS_SyDB {
 
             const basePath = this.getSecureSydbBaseDirectoryPath();
             const schemaFilePath = path.join(basePath, commandArgs[1], commandArgs[2], 'schema.txt');
-            
+
             try {
                 const schemaContent = await fs.promises.readFile(schemaFilePath, 'utf8');
                 console.log(`Schema for collection ${commandArgs[2]} in database ${commandArgs[1]}:`);
@@ -3163,94 +3114,91 @@ class JS_SyDB {
                 return 1;
             }
         } else if (commandArgs[0] === 'update') {
-            // Find --where and --set positions
             let wherePos = -1;
             let setPos = -1;
-            
+
             for (let i = 4; i < commandArgs.length; i++) {
                 if (commandArgs[i] === '--where') wherePos = i;
                 else if (commandArgs[i] === '--set') setPos = i;
             }
-            
+
             if (wherePos === -1 || setPos === -1) {
                 console.error("Error: Missing --where or --set flag");
                 return 1;
             }
-            
+
             if (wherePos + 1 >= commandArgs.length) {
                 console.error("Error: Missing query after --where");
                 return 1;
             }
-            
+
             if (setPos + 1 >= commandArgs.length) {
                 console.error("Error: Missing field specifications after --set");
                 return 1;
             }
-            
+
             if (!this.validateDatabaseName(commandArgs[1]) || !this.validateCollectionName(commandArgs[2])) {
                 console.error("Error: Invalid database or collection name");
                 return 1;
             }
-            
+
             const query = commandArgs[wherePos + 1];
             const results = await this.findSecureInstancesWithQuery(commandArgs[1], commandArgs[2], query);
-            
+
             if (results.length === 0) {
                 console.error("Error: No instances found matching the query");
                 return 1;
             }
-            
-            // Parse instance ID from first result
+
             const firstResult = results[0];
             const idStart = firstResult.indexOf('"_id":"');
             if (idStart === -1) {
                 console.error("Error: Could not parse instance ID");
                 return 1;
             }
-            
+
             const idValueStart = idStart + 7;
             const idEnd = firstResult.indexOf('"', idValueStart);
             if (idEnd === -1) {
                 console.error("Error: Could not parse instance ID");
                 return 1;
             }
-            
+
             const instanceId = firstResult.substring(idValueStart, idEnd);
-            
-            // Parse update fields
+
             const fieldNames = [];
             const fieldValues = [];
-            
+
             for (let i = setPos + 1; i < commandArgs.length; i++) {
                 const fieldSpec = commandArgs[i];
                 if (!fieldSpec || !fieldSpec.startsWith('--')) break;
-                
+
                 const spec = fieldSpec.substring(2);
                 const hyphenPos = spec.indexOf('-');
                 if (hyphenPos === -1) continue;
-                
+
                 const fieldName = spec.substring(0, hyphenPos);
                 let fieldValue = spec.substring(hyphenPos + 1);
-                
+
                 if (fieldValue.startsWith('"') && fieldValue.endsWith('"')) {
                     fieldValue = fieldValue.substring(1, fieldValue.length - 1);
                 }
-                
+
                 fieldNames.push(fieldName);
                 fieldValues.push(fieldValue);
             }
-            
+
             if (fieldNames.length === 0) {
                 console.error("Error: No valid update fields provided");
                 return 1;
             }
-            
-            const updateJson = this.buildSecureInstanceJsonFromFieldsAndValues(fieldNames, fieldValues, fieldNames.length);
+
+            let updateJson = this.buildSecureInstanceJsonFromFieldsAndValues(fieldNames, fieldValues, fieldNames.length);
             if (!updateJson) {
                 console.error("Error: Failed to build update JSON");
                 return 1;
             }
-            
+
             const result = await this.updateSecureInstanceInCollection(commandArgs[1], commandArgs[2], instanceId, updateJson);
             if (result === 0) {
                 console.log("Instance updated successfully");
@@ -3265,36 +3213,36 @@ class JS_SyDB {
                 this.printSecureUsageInformation();
                 return 1;
             }
-            
+
             if (!this.validateDatabaseName(commandArgs[1]) || !this.validateCollectionName(commandArgs[2])) {
                 console.error("Error: Invalid database or collection name");
                 return 1;
             }
-            
+
             const query = commandArgs[6];
             const results = await this.findSecureInstancesWithQuery(commandArgs[1], commandArgs[2], query);
-            
+
             if (results.length === 0) {
                 console.error("Error: No instances found matching the query");
                 return 1;
             }
-            
+
             const firstResult = results[0];
             const idStart = firstResult.indexOf('"_id":"');
             if (idStart === -1) {
                 console.error("Error: Could not parse instance ID");
                 return 1;
             }
-            
+
             const idValueStart = idStart + 7;
             const idEnd = firstResult.indexOf('"', idValueStart);
             if (idEnd === -1) {
                 console.error("Error: Could not parse instance ID");
                 return 1;
             }
-            
+
             const instanceId = firstResult.substring(idValueStart, idEnd);
-            
+
             const result = await this.deleteSecureInstanceFromCollection(commandArgs[1], commandArgs[2], instanceId);
             if (result === 0) {
                 console.log("Instance deleted successfully");
@@ -3311,10 +3259,8 @@ class JS_SyDB {
     }
 }
 
-// Export the class
 export default JS_SyDB;
 
-// If running as main script
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const sydb = new JS_SyDB();
     sydb.runCommand(process.argv).then(code => {
