@@ -421,7 +421,7 @@ class FastHTTP extends SyAPP.Func() {
                         }
 
                         if(props.deletegroup){
-                            Component.Model.delete(props.deletegroup)
+                            await Component.Model.delete(props.deletegroup)
                         }
 
                         if(props.runroute){
