@@ -7,7 +7,11 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
-import http from 'http'
+import http from 'http';
+import url from 'url';
+import querystring from 'querystring';
+import os from 'os'
+
 
 class ConfigManager {
     static configPath = path.join(process.cwd(), 'config.json');
@@ -1182,7 +1186,7 @@ function getMachineID() {
 
     // Final fallback: Generate hash from hostname + timestamp
     const hostname = typeof window === 'undefined' 
-        ? require('os').hostname() 
+        ? os.hostname() 
         : 'browser';
     
     const hash = createHash('sha256')
@@ -2853,873 +2857,1760 @@ getOptionDataForEvent(option) {
 
 // --------------------------- Util interfaces --------------------------------------------
 
+// --------------------------- Core Classes ---------------------------
 
+/**
+ * Represents a session in the application
+ * @class
+ */
 class Session {
-  constructor(config = {uniqueid : undefined,machine_id : undefined,process_id : undefined,userid : undefined,external : false}){
+  /**
+   * @param {Object} config - Session configuration
+   * @param {string} [config.uniqueid] - Unique session identifier
+   * @param {string} [config.machine_id] - Machine identifier
+   * @param {number} [config.process_id] - Process identifier
+   * @param {string} [config.userid] - User identifier
+   * @param {boolean} [config.external=false] - Whether session is external
+   */
+  constructor(config = { uniqueid: undefined, machine_id: undefined, process_id: undefined, userid: undefined, external: false }) {
+    /** @type {string} */
     this.MachineID = config.machine_id || ''
+    /** @type {number|undefined} */
     this.ProcessID = config.process_id || undefined
+    /** @type {string|undefined} */
     this.UserID = config.userid || undefined
+    /** @type {boolean} */
     this.External = config.external || false
+    /** @type {string} */
     this.UniqueID = config.uniqueid || `${this.MachineID}-P${this.ProcessID}`
+    /** @type {string|undefined} */
     this.ActualPath = undefined
+    /** @type {string|undefined} */
     this.PreviousPath = undefined
+    /** @type {Object|undefined} */
     this.ActualProps = undefined
+    /** @type {Object|undefined} */
     this.PreviousProps = undefined
   }
 }
 
+/**
+ * Represents a user build state
+ * @class
+ */
 class userBuild {
-  constructor(data = {session : new Session}){
+  /**
+   * @param {Object} data - Build data
+   * @param {Session} [data.session] - Session instance
+   */
+  constructor(data = { session: new Session }) {
+    /** @type {Session} */
     this.Session = data.session || new Session()
+    /** @type {string} */
     this.UniqueID = this.Session.UniqueID
+    /** @type {string} */
     this.MachineID = this.Session.MachineID
+    /** @type {number|undefined} */
     this.ProcessID = this.Session.ProcessID || undefined
+    /** @type {string|undefined} */
     this.UserID = this.Session.UserID || undefined
+    /** @type {string} */
     this.Text = ''
+    /** @type {Array<Object>} */
     this.Buttons = []
+    /** @type {boolean} */
     this.WaitInput = false
+    /** @type {string} */
     this.InputPath = ''
+    /** @type {Object} */
     this.InputProps = ''
+    /** @type {string} */
     this.InputQuestion = ''
-    this.InputPassword = false // Add password flag
-    
-    // Dropdown state properties
+    /** @type {boolean} */
+    this.InputPassword = false
+
+    /**
+     * Route collection for HTTP mode
+     * @type {Object}
+     * @property {Array} GET - GET routes
+     * @property {Array} POST - POST routes
+     * @property {Array} PUT - PUT routes
+     * @property {Array} DELETE - DELETE routes
+     */
+    this.Routes = {
+      GET: [],
+      POST: [],
+      PUT: [],
+      DELETE: []
+    }
+
+    /** @type {number} */
     this.droplevel = 0
+    /** @type {boolean|undefined} */
     this.dropdown_color = undefined
+    /** @type {boolean|undefined} */
     this.dropdown_spacement = undefined
+    /** @type {boolean|undefined} */
     this.dropdown_horizontal = undefined
+    /** @type {number|undefined} */
     this.last_dropdown_button = undefined
+    /** @type {Object|undefined} */
+    this.GotoNow = undefined
   }
 }
 
-//--------------------------- SyAPP Structure start below ----------------------------------
 
+
+// --------------------------- HTTP Model Validator ---------------------------
+
+/**
+ * HTTP Model Validator class
+ * @class
+ */
+class HTTPModelValidator {
+  /**
+   * Validate data against a model
+   * @param {Object} data - Data to validate
+   * @param {Object} model - Model definition
+   * @param {Object} options - Validation options
+   * @param {boolean} [options.includeMissingKeys=true] - Include missing keys in validation response
+   * @returns {Object} Validation result { valid: boolean, errors: Array, sanitized: Object, missingKeys: Array }
+   */
+  static validate(data, model, options = { includeMissingKeys: true }) {
+    if (!model || Object.keys(model).length === 0) {
+      return { valid: true, errors: [], sanitized: data, missingKeys: [] }
+    }
+    
+    const errors = []
+    const sanitized = {}
+    const missingKeys = []
+    
+    for (const [field, definition] of Object.entries(model)) {
+      let fieldType, required = false
+      
+      if (typeof definition === 'string') {
+        fieldType = definition
+      } else {
+        fieldType = definition.type
+        required = definition.required || false
+      }
+      
+      const value = data[field]
+      
+      if (required && (value === undefined || value === null || value === '')) {
+        errors.push(`Field '${field}' is required`)
+        missingKeys.push(field)
+        continue
+      }
+      
+      if (value !== undefined && value !== null && value !== '') {
+        switch (fieldType.toLowerCase()) {
+          case 'string':
+            sanitized[field] = String(value)
+            break
+          case 'number':
+            const num = Number(value)
+            if (isNaN(num)) {
+              errors.push(`Field '${field}' must be a number`)
+            } else {
+              sanitized[field] = num
+            }
+            break
+          case 'boolean':
+            if (typeof value === 'string') {
+              sanitized[field] = value.toLowerCase() === 'true' || value === '1'
+            } else {
+              sanitized[field] = Boolean(value)
+            }
+            break
+          case 'object':
+            if (typeof value !== 'object' || value === null) {
+              errors.push(`Field '${field}' must be an object`)
+            } else {
+              sanitized[field] = value
+            }
+            break
+          case 'array':
+            if (!Array.isArray(value)) {
+              errors.push(`Field '${field}' must be an array`)
+            } else {
+              sanitized[field] = value
+            }
+            break
+          case 'date':
+            const date = new Date(value)
+            if (isNaN(date.getTime())) {
+              errors.push(`Field '${field}' must be a valid date`)
+            } else {
+              sanitized[field] = date
+            }
+            break
+          default:
+            sanitized[field] = value
+        }
+      } else if (!required && value === undefined) {
+        // Optional field not provided, skip
+        continue
+      } else if (!required && value === null) {
+        sanitized[field] = null
+      } else if (!required && value === '') {
+        sanitized[field] = ''
+      }
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors,
+      sanitized,
+      missingKeys: options.includeMissingKeys ? missingKeys : []
+    }
+  }
+  
+  /**
+   * Get readable model description
+   * @param {Object} model - Model definition
+   * @returns {Object} Model description
+   */
+  static describe(model) {
+    const description = {}
+    
+    for (const [field, definition] of Object.entries(model)) {
+      if (typeof definition === 'string') {
+        description[field] = { type: definition, required: false }
+      } else {
+        description[field] = { 
+          type: definition.type,
+          required: definition.required || false
+        }
+      }
+    }
+    
+    return description
+  }
+}
+
+// --------------------------- SyAPP_Func Class ---------------------------
+
+/**
+ * Base class for all application functions
+ * @class
+ */
 class SyAPP_Func {
-    constructor(name,build = async (props = {session : new Session}) => {},config = {routes : [{name : '',stream: false,method : '',input_model : [],output_model : []}],userid_only : false,log : false,linked : []}){
-        this.Name = name
-        this.Linked = config.linked || []
-        this.Log = config.log || false
-        this.UserID_Only = config.userid_only || false
+  /**
+   * @param {string} name - Function name
+   * @param {Function} build - Build function
+   * @param {Object} config - Configuration
+   * @param {Array<{name: string, stream: boolean, method: string, input_model: Object, output_model: Object, input_validate: any}>} [config.routes] - Route configurations
+   * @param {boolean} [config.userid_only=false] - Whether function is user ID only
+   * @param {boolean} [config.log=false] - Enable logging
+   * @param {Array<Function>} [config.linked=[]] - Linked functions
+   * @param {string} [config.group=''] - Group name for routes
+   */
+  constructor(name, build = async (props = { session: new Session }) => { }, config = {
+    routes: [{ name: '', stream: false, method: '', input_model: {}, output_model: {}, input_validate: {} }],
+    userid_only: false,
+    log: false,
+    linked: [],
+    group: ''
+  }) {
+    /** @type {string} */
+    this.Name = name
+    /** @type {Array<Function>} */
+    this.Linked = config.linked || []
+    /** @type {boolean} */
+    this.Log = config.log || false
+    /** @type {boolean} */
+    this.UserID_Only = config.userid_only || false
+    /** @type {Array} */
+    this.Routes = config.routes || []
+    /** @type {string} */
+    this.Group = config.group || ''
 
     /** @type {Map<string, userBuild>} */
     this.Builds = new Map()
 
+    /** @type {Map<string, Object>} */
     this.UserStorage = new Map()
+
+    /**
+     * Storage utilities for user data
+     * @namespace
+     */
     this.Storages = {
-    Set: (id, key, value) => {
-    if (!this.UserStorage.has(id)) {
-      this.UserStorage.set(id, {})
-    }
-    this.UserStorage.get(id)[key] = value
-    return true
-    },
-  
-    Get: (id, key) => {
-    const user = this.UserStorage.get(id)
-    return user ? user[key] : undefined
-    },
-  
-    Has: (id, key) => {
-    const user = this.UserStorage.get(id)
-    return user ? key in user : false
-    },
-  
-    Delete: (id, key) => {
-    const user = this.UserStorage.get(id)
-    if (!user) return false
-    const existed = key in user
-    if (existed) delete user[key]
-    return existed
-    },
-  
-    DeleteUser: (id) => {
-    return this.UserStorage.delete(id)
-    },
-  
-    GetAll: (id) => {
-    const user = this.UserStorage.get(id)
-    return user ? { ...user } : null
-    },
-  
-    Update: (id, updateFn) => {
-    if (!this.UserStorage.has(id)) {
-      this.UserStorage.set(id, {})
-    }
-    const user = this.UserStorage.get(id)
-    return updateFn(user)
-    },
-  
-    SetMany: (id, data) => {
-    if (!this.UserStorage.has(id)) {
-      this.UserStorage.set(id, {})
-    }
-    const user = this.UserStorage.get(id)
-    Object.assign(user, data)
-    return Object.keys(data).length
-   },
-  
-    ClearUser: (id) => {
-    const user = this.UserStorage.get(id)
-    if (!user) return false
-    for (const key in user) {
-      delete user[key]
-    }
-    return true
-    },
-  
-    Count: () => {
-    return this.UserStorage.size
-    },
-  
-    GetUsers: () => {
-    return Array.from(this.UserStorage.keys())
-    },
-  
-    GetAllData: () => {
-    const result = {}
-    for (const [id, user] of this.UserStorage) {
-      result[id] = { ...user }
-    }
-    return result
-    },
-  
-  Clear: () => {
-    this.UserStorage.clear()
-    }
-  }
+      /**
+       * Set a value in user storage
+       * @param {string} id - User ID
+       * @param {string} key - Storage key
+       * @param {*} value - Value to store
+       * @returns {boolean} Success
+       */
+      Set: (id, key, value) => {
+        if (!this.UserStorage.has(id)) {
+          this.UserStorage.set(id, {})
+        }
+        this.UserStorage.get(id)[key] = value
+        return true
+      },
 
-      this.TextColor = ColorText
+      /**
+       * Get a value from user storage
+       * @param {string} id - User ID
+       * @param {string} key - Storage key
+       * @returns {*} Stored value
+       */
+      Get: (id, key) => {
+        const user = this.UserStorage.get(id)
+        return user ? user[key] : undefined
+      },
 
-      this.WaitLog = async (message,ms = 5000) => {
-        console.log(message)
-        await new Promise(resolve => setTimeout(resolve, ms));
+      /**
+       * Check if key exists in user storage
+       * @param {string} id - User ID
+       * @param {string} key - Storage key
+       * @returns {boolean} Whether key exists
+       */
+      Has: (id, key) => {
+        const user = this.UserStorage.get(id)
+        return user ? key in user : false
+      },
+
+      /**
+       * Delete a key from user storage
+       * @param {string} id - User ID
+       * @param {string} key - Storage key
+       * @returns {boolean} Whether key was deleted
+       */
+      Delete: (id, key) => {
+        const user = this.UserStorage.get(id)
+        if (!user) return false
+        const existed = key in user
+        if (existed) delete user[key]
+        return existed
+      },
+
+      /**
+       * Delete entire user storage
+       * @param {string} id - User ID
+       * @returns {boolean} Whether user was deleted
+       */
+      DeleteUser: (id) => {
+        return this.UserStorage.delete(id)
+      },
+
+      /**
+       * Get all user data
+       * @param {string} id - User ID
+       * @returns {Object|null} All user data
+       */
+      GetAll: (id) => {
+        const user = this.UserStorage.get(id)
+        return user ? { ...user } : null
+      },
+
+      /**
+       * Update user data with a function
+       * @param {string} id - User ID
+       * @param {Function} updateFn - Update function
+       * @returns {*} Result of update function
+       */
+      Update: (id, updateFn) => {
+        if (!this.UserStorage.has(id)) {
+          this.UserStorage.set(id, {})
+        }
+        const user = this.UserStorage.get(id)
+        return updateFn(user)
+      },
+
+      /**
+       * Set multiple values at once
+       * @param {string} id - User ID
+       * @param {Object} data - Key-value pairs to set
+       * @returns {number} Number of keys set
+       */
+      SetMany: (id, data) => {
+        if (!this.UserStorage.has(id)) {
+          this.UserStorage.set(id, {})
+        }
+        const user = this.UserStorage.get(id)
+        Object.assign(user, data)
+        return Object.keys(data).length
+      },
+
+      /**
+       * Clear all user data (set to empty object)
+       * @param {string} id - User ID
+       * @returns {boolean} Success
+       */
+      ClearUser: (id) => {
+        const user = this.UserStorage.get(id)
+        if (!user) return false
+        for (const key in user) {
+          delete user[key]
+        }
+        return true
+      },
+
+      /**
+       * Count total users
+       * @returns {number} User count
+       */
+      Count: () => {
+        return this.UserStorage.size
+      },
+
+      /**
+       * Get all user IDs
+       * @returns {Array<string>} Array of user IDs
+       */
+      GetUsers: () => {
+        return Array.from(this.UserStorage.keys())
+      },
+
+      /**
+       * Get all user data
+       * @returns {Object} All user data keyed by user ID
+       */
+      GetAllData: () => {
+        const result = {}
+        for (const [id, user] of this.UserStorage) {
+          result[id] = { ...user }
+        }
+        return result
+      },
+
+      /**
+       * Clear all storage
+       */
+      Clear: () => {
+        this.UserStorage.clear()
       }
+    }
 
-      // Add this method to the SyAPP_Func class, after the DropDown method
+    /** @type {Object} */
+    this.TextColor = ColorText
 
-      this.Page = async (id, name = '', code = async () => {}, config = {
-        pagelabel: undefined,
-        jumpTo: 1,
-        lock: false,
-        lockKey: undefined
-      }) => {
-        if (this.Builds.has(id)) {
-          const userBuild = this.Builds.get(id);
-          const currentProps = userBuild.Session.ActualProps || {};
-          const currentPage = currentProps.page || '';
-          
-          if (config.lock) {
-            const lockKey = config.lockKey || `page-lock-${name}`;
-            const isLocked = this.Storages.Get(id, lockKey);
-            
-            if (isLocked && !currentProps._unlock) {
-              return;
-            }
-            
-            if (!isLocked && name === currentPage) {
-              this.Storages.Set(id, lockKey, true);
-            }
-            
-            if (currentProps._unlock === lockKey) {
-              this.Storages.Clear(id, lockKey);
-              delete userBuild.Session.ActualProps._unlock;
-            }
+    /**
+     * Wait and log message
+     * @param {string} message - Message to log
+     * @param {number} ms - Milliseconds to wait
+     * @returns {Promise<void>}
+     */
+    this.WaitLog = async (message, ms = 5000) => {
+      console.log(message)
+      await new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // --------------------------- HTTP Route Methods ---------------------------
+
+    /**
+ * Register a GET route
+ * @param {string} id - User/build ID
+ * @param {string} path - Route path
+ * @param {Function} handler - Route handler (req, res) => {}
+ * @param {Object} config - Route configuration
+ * @param {boolean} [config.stream=false] - Whether route streams data
+ * @param {Object} [config.input_model={}] - Input model definition
+ * @param {Object} [config.output_model={}] - Output model definition
+ * @param {any} [config.input_validate={}] - Response to send on validation failure
+ * @param {Object} [config.validation_options] - Validation options
+ * @param {boolean} [config.validation_options.includeMissingKeys=true] - Include missing keys in validation error response
+ * @param {boolean} [config.baseRoute] - Override global baseRoute for this specific route
+ * @param {boolean} [config.includeFuncName] - Override global includeFuncName for this specific route
+ */
+this.Get = (id, path, handler, config = { 
+  stream: false, 
+  input_model: {}, 
+  output_model: {}, 
+  input_validate: {}, 
+  validation_options: { includeMissingKeys: true },
+  baseRoute: undefined, 
+  includeFuncName: undefined 
+}) => {
+  if (this.Builds.has(id)) {
+    const normalizedPath = path === '' ? '/' : (path.startsWith('/') ? path : `/${path}`)
+    
+    const routeConfig = {
+      method: 'GET',
+      path: normalizedPath,
+      originalPath: path,
+      handler,
+      stream: config.stream || false,
+      input_model: config.input_model || {},
+      output_model: config.output_model || {},
+      input_validate: config.input_validate || {},
+      validation_options: config.validation_options || { includeMissingKeys: true },
+      baseRoute: config.baseRoute,
+      includeFuncName: config.includeFuncName
+    }
+    this.Builds.get(id).Routes.GET.push(routeConfig)
+  }
+}
+
+// Similar updates for Post, Put, Delete methods
+this.Post = (id, path, handler, config = { 
+  stream: false, 
+  input_model: {}, 
+  output_model: {}, 
+  input_validate: {}, 
+  validation_options: { includeMissingKeys: true },
+  baseRoute: undefined, 
+  includeFuncName: undefined 
+}) => {
+  if (this.Builds.has(id)) {
+    const normalizedPath = path === '' ? '/' : (path.startsWith('/') ? path : `/${path}`)
+    
+    const routeConfig = {
+      method: 'POST',
+      path: normalizedPath,
+      originalPath: path,
+      handler,
+      stream: config.stream || false,
+      input_model: config.input_model || {},
+      output_model: config.output_model || {},
+      input_validate: config.input_validate || {},
+      validation_options: config.validation_options || { includeMissingKeys: true },
+      baseRoute: config.baseRoute,
+      includeFuncName: config.includeFuncName
+    }
+    this.Builds.get(id).Routes.POST.push(routeConfig)
+  }
+}
+
+this.Put = (id, path, handler, config = { 
+  stream: false, 
+  input_model: {}, 
+  output_model: {}, 
+  input_validate: {}, 
+  validation_options: { includeMissingKeys: true },
+  baseRoute: undefined, 
+  includeFuncName: undefined 
+}) => {
+  if (this.Builds.has(id)) {
+    const normalizedPath = path === '' ? '/' : (path.startsWith('/') ? path : `/${path}`)
+    
+    const routeConfig = {
+      method: 'PUT',
+      path: normalizedPath,
+      originalPath: path,
+      handler,
+      stream: config.stream || false,
+      input_model: config.input_model || {},
+      output_model: config.output_model || {},
+      input_validate: config.input_validate || {},
+      validation_options: config.validation_options || { includeMissingKeys: true },
+      baseRoute: config.baseRoute,
+      includeFuncName: config.includeFuncName
+    }
+    this.Builds.get(id).Routes.PUT.push(routeConfig)
+  }
+}
+
+this.Delete = (id, path, handler, config = { 
+  stream: false, 
+  input_model: {}, 
+  output_model: {}, 
+  input_validate: {}, 
+  validation_options: { includeMissingKeys: true },
+  baseRoute: undefined, 
+  includeFuncName: undefined 
+}) => {
+  if (this.Builds.has(id)) {
+    const normalizedPath = path === '' ? '/' : (path.startsWith('/') ? path : `/${path}`)
+    
+    const routeConfig = {
+      method: 'DELETE',
+      path: normalizedPath,
+      originalPath: path,
+      handler,
+      stream: config.stream || false,
+      input_model: config.input_model || {},
+      output_model: config.output_model || {},
+      input_validate: config.input_validate || {},
+      validation_options: config.validation_options || { includeMissingKeys: true },
+      baseRoute: config.baseRoute,
+      includeFuncName: config.includeFuncName
+    }
+    this.Builds.get(id).Routes.DELETE.push(routeConfig)
+  }
+}
+
+    // --------------------------- Page Methods ---------------------------
+
+    /**
+     * Define a page in the UI
+     * @param {string} id - User/build ID
+     * @param {string} name - Page name
+     * @param {Function} code - Page code to execute
+     * @param {Object} config - Page configuration
+     * @param {string} [config.pagelabel] - Page label to display
+     * @param {number} [config.jumpTo=1] - Jump to index
+     * @param {boolean} [config.lock=false] - Whether page is locked
+     * @param {string} [config.lockKey] - Lock key
+     * @returns {Promise<void>}
+     */
+    this.Page = async (id, name = '', code = async () => { }, config = {
+      pagelabel: undefined,
+      jumpTo: 1,
+      lock: false,
+      lockKey: undefined
+    }) => {
+      if (this.Builds.has(id)) {
+        const userBuild = this.Builds.get(id);
+        const currentProps = userBuild.Session.ActualProps || {};
+        const currentPage = currentProps.page || '';
+
+        if (config.lock) {
+          const lockKey = config.lockKey || `page-lock-${name}`;
+          const isLocked = this.Storages.Get(id, lockKey);
+
+          if (isLocked && !currentProps._unlock) {
+            return;
           }
-          
-          const shouldExecute = (name === currentPage) || (name === '' && !currentPage);
-          
-          if (shouldExecute) {
-            if (config.pagelabel) {
-              this.Text(id, `• ${config.pagelabel}`);
-            }
-            
-            await code();
+
+          if (!isLocked && name === currentPage) {
+            this.Storages.Set(id, lockKey, true);
           }
-        } else {
-          if (this.Log) {
-            console.log(`this.Page() Error - userBuild not found | BuildID: ${id} | Page: ${name}`);
+
+          if (currentProps._unlock === lockKey) {
+            this.Storages.Delete(id, lockKey);
+            delete userBuild.Session.ActualProps._unlock;
           }
         }
-      };
-      
-      this.LockPage = (id, pageName, lockKey = null) => {
-        if (this.Builds.has(id)) {
-          const key = lockKey || `page-lock-${pageName}`;
-          this.Storages.Set(id, key, true);
+
+        const shouldExecute = (name === currentPage) || (name === '' && !currentPage);
+
+        if (shouldExecute) {
+          if (config.pagelabel) {
+            this.Text(id, `• ${config.pagelabel}`);
+          }
+
+          await code();
         }
-      };
-      
-      this.UnlockPage = (id, pageName, lockKey = null) => {
-        if (this.Builds.has(id)) {
-          const key = lockKey || `page-lock-${pageName}`;
-          this.Storages.Clear(id, key);
+      } else {
+        if (this.Log) {
+          console.log(`this.Page() Error - userBuild not found | BuildID: ${id} | Page: ${name}`);
         }
-      };
-      
-      this.IsPageLocked = (id, pageName, lockKey = null) => {
-        if (this.Builds.has(id)) {
-          const key = lockKey || `page-lock-${pageName}`;
-          return !!this.Storages.Get(id, key);
+      }
+    };
+
+    /**
+     * Lock a page
+     * @param {string} id - User/build ID
+     * @param {string} pageName - Page name
+     * @param {string|null} [lockKey=null] - Lock key
+     */
+    this.LockPage = (id, pageName, lockKey = null) => {
+      if (this.Builds.has(id)) {
+        const key = lockKey || `page-lock-${pageName}`;
+        this.Storages.Set(id, key, true);
+      }
+    };
+
+    /**
+     * Unlock a page
+     * @param {string} id - User/build ID
+     * @param {string} pageName - Page name
+     * @param {string|null} [lockKey=null] - Lock key
+     */
+    this.UnlockPage = (id, pageName, lockKey = null) => {
+      if (this.Builds.has(id)) {
+        const key = lockKey || `page-lock-${pageName}`;
+        this.Storages.Delete(id, key);
+      }
+    };
+
+    /**
+     * Check if a page is locked
+     * @param {string} id - User/build ID
+     * @param {string} pageName - Page name
+     * @param {string|null} [lockKey=null] - Lock key
+     * @returns {boolean} Whether page is locked
+     */
+    this.IsPageLocked = (id, pageName, lockKey = null) => {
+      if (this.Builds.has(id)) {
+        const key = lockKey || `page-lock-${pageName}`;
+        return !!this.Storages.Get(id, key);
+      }
+      return false;
+    };
+
+    // --------------------------- GotoNow Method ---------------------------
+
+    /**
+     * Navigate to another function immediately
+     * @param {string} id - User/build ID
+     * @param {string} path - Target function path
+     * @param {Object} config - Navigation config
+     * @param {Object} [config.props={}] - Props to pass
+     * @param {boolean} [config.breakbuild=false] - Whether to break current build
+     * @returns {boolean} Success
+     * @throws {Error} Throws GOTO_NOW_BREAK if breakbuild is true
+     */
+    this.GotoNow = (id, path, config = { props: {}, breakbuild: false }) => {
+      if (!this.Builds.has(id)) {
+        if (this.Log) {
+          console.log(`this.GotoNow() Error - userBuild not found | BuildID: ${id} | Target Path: ${path}`);
         }
         return false;
+      }
+
+      const userBuild = this.Builds.get(id);
+
+      userBuild.GotoNow = {
+        path: path,
+        props: config.props || {},
+        breakbuild: config.breakbuild || false
       };
 
+      if (config.breakbuild) {
+        const gotoError = new Error('GOTO_NOW_BREAK');
+        gotoError.gotoInfo = {
+          path: path,
+          props: config.props || {}
+        };
+        throw gotoError;
+      }
 
+      return true;
+    };
 
-// Enhanced SetPage with unlock option
-this.SetPage = (id, page, unlock = false) => {
-  if (this.Builds.has(id)) {
-    const userBuild = this.Builds.get(id);
-    if (!userBuild.Session.ActualProps) {
-      userBuild.Session.ActualProps = {};
-    }
-    userBuild.Session.ActualProps.page = page;
-    
-    // Add unlock flag if needed
-    if (unlock && page) {
-      userBuild.Session.ActualProps._unlock = `page-lock-${page}`;
-    }
-  } else {
-    if (this.Log) {
-      console.log(`this.SetPage() Error - userBuild not found | BuildID: ${id}`);
-    }
-  }
-};
+    // --------------------------- SetPage Method ---------------------------
 
-      this.Pagination = {
-        Button: (id, name = '', data = [], config = {
-          actual_page: 1,
-          items_per_page: 5,
-          button: {
-            text: [{ type: 'text', value: 'text1' }, { type: 'key', value: 'ID' }],
-            path: { type: 'text', value: 'path1' },
-            props: [{ props_key: 'id', type: 'text', value: 'ID' }]
-          },
-          template_config: true
-        }) => {
-          if (data.length) {
-            // Initialize return object
-            let obj_return = {
+    /**
+     * Set current page
+     * @param {string} id - User/build ID
+     * @param {string} page - Page name
+     * @param {boolean} [unlock=false] - Whether to unlock the page
+     */
+    this.SetPage = (id, page, unlock = false) => {
+      if (this.Builds.has(id)) {
+        const userBuild = this.Builds.get(id);
+        if (!userBuild.Session.ActualProps) {
+          userBuild.Session.ActualProps = {};
+        }
+        userBuild.Session.ActualProps.page = page;
+
+        if (unlock && page) {
+          userBuild.Session.ActualProps._unlock = `page-lock-${page}`;
+        }
+      } else {
+        if (this.Log) {
+          console.log(`this.SetPage() Error - userBuild not found | BuildID: ${id}`);
+        }
+      }
+    };
+
+    // --------------------------- Pagination Methods ---------------------------
+
+    /**
+     * Pagination utilities
+     * @namespace
+     */
+    this.Pagination = {
+      /**
+       * Create paginated buttons
+       * @param {string} id - User/build ID
+       * @param {string} name - Pagination name
+       * @param {Array} data - Data to paginate
+       * @param {Object} config - Pagination config
+       * @param {number} [config.actual_page=1] - Current page
+       * @param {number} [config.items_per_page=5] - Items per page
+       * @param {Object} [config.button] - Button configuration
+       * @param {Array} [config.button.text] - Button text configuration
+       * @param {Object} [config.button.path] - Button path configuration
+       * @param {Array} [config.button.props] - Button props configuration
+       * @param {boolean} [config.template_config=true] - Use template config
+       * @returns {{actual_page: number, total_pages: number}} Pagination info
+       */
+      Button: (id, name = '', data = [], config = {
+        actual_page: 1,
+        items_per_page: 5,
+        button: {
+          text: [{ type: 'text', value: 'text1' }, { type: 'key', value: 'ID' }],
+          path: { type: 'text', value: 'path1' },
+          props: [{ props_key: 'id', type: 'text', value: 'ID' }]
+        },
+        template_config: true
+      }) => {
+        if (data.length) {
+          let obj_return = {
+            actual_page: config.actual_page || 1,
+            total_pages: undefined
+          }
+
+          let paginated_data = BuildPagination(data, config.items_per_page || 5)
+
+          if (!this.Storages.Has(id, name)) {
+            this.Storages.Set(id, name, {
               actual_page: config.actual_page || 1,
-              total_pages: undefined
+              total_pages: paginated_data.length
+            })
+          }
+
+          let storaged = this.Storages.Get(id, name)
+          let actual_page = storaged.actual_page
+
+          const currentProps = this.Builds.get(id).Session.ActualProps
+
+          if (currentProps.pagination_next === name) {
+            if (actual_page < storaged.total_pages) {
+              actual_page++
             }
-      
-            // Paginate the data
-            let paginated_data = BuildPagination(data, config.items_per_page || 5)
-      
-            // Initialize storage for this pagination
-            if (!this.Storages.Has(id, name)) {
-              this.Storages.Set(id, name, {
-                actual_page: config.actual_page || 1,
-                total_pages: paginated_data.length
-              })
+            delete this.Builds.get(id).Session.ActualProps.pagination_next
+          }
+
+          if (currentProps.pagination_prev === name) {
+            if (actual_page > 1) {
+              actual_page--
             }
-      
-            // Get stored pagination state
-            let storaged = this.Storages.Get(id, name)
-            let actual_page = storaged.actual_page
-      
-            // Handle page navigation via props
-            const currentProps = this.Builds.get(id).Session.ActualProps
-            
-            // Check for next page navigation
-            if (currentProps.pagination_next === name) {
-              if (actual_page < storaged.total_pages) {
-                actual_page++
-              }
-              // Clear the prop after processing
-              delete this.Builds.get(id).Session.ActualProps.pagination_next
-            }
-            
-            // Check for previous page navigation
-            if (currentProps.pagination_prev === name) {
-              if (actual_page > 1) {
-                actual_page--
-              }
-              // Clear the prop after processing
-              delete this.Builds.get(id).Session.ActualProps.pagination_prev
-            }
-      
-            // Update storage with new page
-            storaged.actual_page = actual_page
-            this.Storages.Set(id, name, storaged)
-      
-            // Display page info
-            this.Text(id, `Page ${actual_page} of ${storaged.total_pages}`)
-      
-            // Get current page items
-            const currentPageItems = paginated_data[actual_page - 1]?.list || []
-      
-            // Display items as buttons
-            if (config.button && !config.template_config) {
-              // Custom button configuration
-              currentPageItems.forEach(item => {
-                let buttonText = ''
-                let buttonPath = this.Name // Default to current function
-                let buttonProps = {}
-      
-                // Build button text
-                if (config.button.text) {
-                  config.button.text.forEach(textConfig => {
-                    switch (textConfig.type) {
-                      case 'text':
-                        buttonText += textConfig.value
-                        break
-                      case 'key':
-                        if (typeof item === 'object' && item[textConfig.value]) {
-                          buttonText += item[textConfig.value]
-                        }
-                        break
-                    }
-                  })
-                }
-      
-                // Build button path
-                if (config.button.path) {
-                  switch (config.button.path.type) {
+            delete this.Builds.get(id).Session.ActualProps.pagination_prev
+          }
+
+          storaged.actual_page = actual_page
+          this.Storages.Set(id, name, storaged)
+
+          this.Text(id, `Page ${actual_page} of ${storaged.total_pages}`)
+
+          const currentPageItems = paginated_data[actual_page - 1]?.list || []
+
+          if (config.button && !config.template_config) {
+            currentPageItems.forEach(item => {
+              let buttonText = ''
+              let buttonPath = this.Name
+              let buttonProps = {}
+
+              if (config.button.text) {
+                config.button.text.forEach(textConfig => {
+                  switch (textConfig.type) {
                     case 'text':
-                      buttonPath = config.button.path.value
+                      buttonText += textConfig.value
                       break
                     case 'key':
-                      if (typeof item === 'object' && item[config.button.path.value]) {
-                        buttonPath = item[config.button.path.value]
+                      if (typeof item === 'object' && item[textConfig.value]) {
+                        buttonText += item[textConfig.value]
                       }
                       break
                   }
-                }
-      
-                // Build button props
-                if (config.button.props) {
-                  config.button.props.forEach(propConfig => {
-                    switch (propConfig.type) {
-                      case 'text':
-                        buttonProps[propConfig.props_key] = propConfig.value
-                        break
-                      case 'key':
-                        if (typeof item === 'object' && item[propConfig.value]) {
-                          buttonProps[propConfig.props_key] = item[propConfig.value]
-                        }
-                        break
+                })
+              }
+
+              if (config.button.path) {
+                switch (config.button.path.type) {
+                  case 'text':
+                    buttonPath = config.button.path.value
+                    break
+                  case 'key':
+                    if (typeof item === 'object' && item[config.button.path.value]) {
+                      buttonPath = item[config.button.path.value]
                     }
-                  })
+                    break
                 }
-      
-                // Create button
-                this.Button(id, {
-                  name: buttonText || JSON.stringify(item),
-                  path: buttonPath,
-                  props: buttonProps
+              }
+
+              if (config.button.props) {
+                config.button.props.forEach(propConfig => {
+                  switch (propConfig.type) {
+                    case 'text':
+                      buttonProps[propConfig.props_key] = propConfig.value
+                      break
+                    case 'key':
+                      if (typeof item === 'object' && item[propConfig.value]) {
+                        buttonProps[propConfig.props_key] = item[propConfig.value]
+                      }
+                      break
+                  }
                 })
+              }
+
+              this.Button(id, {
+                name: buttonText || JSON.stringify(item),
+                path: buttonPath,
+                props: buttonProps
               })
-            } else {
-              // Default template configuration
-              currentPageItems.forEach(item => {
-                let buttonName
-                let buttonProps = {}
-                
-                if (typeof item === 'object') {
-                  // Use first key-value pair for display
-                  const firstKey = Object.keys(item)[0]
-                  buttonName = `${firstKey}: ${item[firstKey]}`
-                  
-                  // Pass the entire object as props
-                  buttonProps = { ...item }
-                } else {
-                  buttonName = item.toString()
-                  buttonProps = { value: item }
-                }
-      
-                this.Button(id, {
-                  name: buttonName,
-                  path: this.Name, // Stay in current function by default
-                  props: buttonProps
-                })
-              })
-            }
-      
-            // Add spacing between items and navigation
-            this.Button(id, { name: ' ' })
-      
-            // Add navigation buttons
-            if (actual_page > 1) {
-              this.SideButton(id, {
-                name: '<- Prev',
-                props: { pagination_prev: name }
-              })
-            }
-      
-            if (actual_page < storaged.total_pages) {
-              this.SideButton(id, {
-                name: 'Next ->',
-                props: { pagination_next: name }
-              })
-            }
-      
-            // Return pagination info
-            return {
-              actual_page: actual_page,
-              total_pages: storaged.total_pages
-            }
-      
+            })
           } else {
-            if (this.Log) {
-              console.log(`This.Pagination.Button() Error - Empty Data Array | BuildID: ${id}`)
-            }
-            return {
-              actual_page: 0,
-              total_pages: 0
-            }
+            currentPageItems.forEach(item => {
+              let buttonName
+              let buttonProps = {}
+
+              if (typeof item === 'object') {
+                const firstKey = Object.keys(item)[0]
+                buttonName = `${firstKey}: ${item[firstKey]}`
+
+                buttonProps = { ...item }
+              } else {
+                buttonName = item.toString()
+                buttonProps = { value: item }
+              }
+
+              this.Button(id, {
+                name: buttonName,
+                path: this.Name,
+                props: buttonProps
+              })
+            })
+          }
+
+          this.Button(id, { name: ' ' })
+
+          if (actual_page > 1) {
+            this.SideButton(id, {
+              name: '<- Prev',
+              props: { pagination_prev: name }
+            })
+          }
+
+          if (actual_page < storaged.total_pages) {
+            this.SideButton(id, {
+              name: 'Next ->',
+              props: { pagination_next: name }
+            })
+          }
+
+          return {
+            actual_page: actual_page,
+            total_pages: storaged.total_pages
+          }
+
+        } else {
+          if (this.Log) {
+            console.log(`This.Pagination.Button() Error - Empty Data Array | BuildID: ${id}`)
+          }
+          return {
+            actual_page: 0,
+            total_pages: 0
           }
         }
       }
-      
-      this.DropDown = async (id, name, code = async () => {}, config = {
+    }
+
+    // --------------------------- DropDown Method ---------------------------
+
+    /**
+     * Create a dropdown menu
+     * @param {string} id - User/build ID
+     * @param {string} name - Dropdown name
+     * @param {Function} code - Dropdown content code
+     * @param {Object} config - Dropdown configuration
+     * @param {string} [config.up_buttontext='Show More'] - Button text when closed
+     * @param {string} [config.down_buttontext='Hide'] - Button text when open
+     * @param {string} [config.down_emoji='▼'] - Emoji for open state
+     * @param {string} [config.up_emoji='▶'] - Emoji for closed state
+     * @param {boolean} [config.open_colors=true] - Enable colors when open
+     * @param {boolean} [config.open_spacement=true] - Enable spacing when open
+     * @param {boolean} [config.horizontal=false] - Open horizontally
+     * @param {number} [config.jumpTo=1] - Jump to index
+     * @returns {Promise<void>}
+     */
+    this.DropDown = async (id, name, code = async () => { }, config = {
+      up_buttontext: 'Show More',
+      down_buttontext: 'Hide',
+      down_emoji: '▼',
+      up_emoji: '▶',
+      open_colors: true,
+      open_spacement: true,
+      horizontal: false,
+      jumpTo: 1
+    }) => {
+      const storageKey = `dropdown-${name}`;
+
+      config = {
         up_buttontext: 'Show More',
         down_buttontext: 'Hide',
         down_emoji: '▼',
         up_emoji: '▶',
         open_colors: true,
         open_spacement: true,
-        horizontal: false, // NEW: Open to the right instead of down
-        jumpTo : 1
-      }) => {
-        const storageKey = `dropdown-${name}`;
-      
-        // Set defaults for all config options
-        config = {
-          up_buttontext: 'Show More',
-          down_buttontext: 'Hide',
-          down_emoji: '▼',
-          up_emoji: '▶',
-          open_colors: true,
-          open_spacement: true,
-          horizontal: false,
-          ...config
-        };
-      
-        // Adjust emojis for horizontal mode if using defaults
+        horizontal: false,
+        ...config
+      };
+
+      if (config.horizontal) {
+        if (config.down_emoji === '▼') config.down_emoji = '▶';
+        if (config.up_emoji === '▶') config.up_emoji = '⧾';
+      }
+
+      if (!this.Storages.Has(id, storageKey)) {
+        this.Storages.Set(id, storageKey, { dropped: false });
+      }
+
+      const state = this.Storages.Get(id, storageKey);
+      const wasClicked = this.Builds.get(id).Session.ActualProps.droprun === storageKey;
+
+      if (wasClicked) {
+        state.dropped = !state.dropped;
+        this.Storages.Set(id, storageKey, state);
+      }
+
+      const wasHorizontal = this.Builds.get(id).dropdown_horizontal;
+      const wasSpacement = this.Builds.get(id).dropdown_spacement;
+      const wasColors = this.Builds.get(id).dropdown_color;
+      const wasDroplevel = this.Builds.get(id).droplevel || 0;
+
+      if (state.dropped) {
         if (config.horizontal) {
-          if (config.down_emoji === '▼') config.down_emoji = '▶';
-          if (config.up_emoji === '▶') config.up_emoji = '⧾';
-        }
-      
-        // Initialize or get state
-        if (!this.Storages.Has(id, storageKey)) {
-          this.Storages.Set(id, storageKey, { dropped: false });
-        }
-      
-        const state = this.Storages.Get(id, storageKey);
-        const wasClicked = this.Builds.get(id).Session.ActualProps.droprun === storageKey;
-      
-        // Toggle if clicked
-        if (wasClicked) {
-          state.dropped = !state.dropped;
-          this.Storages.Set(id, storageKey, state);
-        }
-      
-        // Store current dropdown state for nested dropdowns
-        const wasHorizontal = this.Builds.get(id).dropdown_horizontal;
-        const wasSpacement = this.Builds.get(id).dropdown_spacement;
-        const wasColors = this.Builds.get(id).dropdown_color;
-        const wasDroplevel = this.Builds.get(id).droplevel || 0;
-      
-        // Render button and content
-        if (state.dropped) {
-          if (config.horizontal) {
-            // In horizontal mode, we need to handle rendering differently
-            this.Button(id, {
-              name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
-              props: { droprun: storageKey }
-            });
-      
-            // Store current button index for horizontal layout
-            const currentButtonCount = this.Builds.get(id).Buttons.length;
-            this.Builds.get(id).last_dropdown_button = currentButtonCount - 1;
-      
-            // Apply horizontal configuration
-            this.Builds.get(id).dropdown_horizontal = true;
-            if (config.open_colors) this.Builds.get(id).dropdown_color = true;
-            if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
-            this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
-      
-            // Execute the dropdown content code
-            await code();
-      
-            // Reset to previous state
-            this.Builds.get(id).dropdown_horizontal = wasHorizontal;
-            if (config.open_colors && this.Builds.get(id).droplevel === 1) {
-              this.Builds.get(id).dropdown_color = undefined;
-            }
-            if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
-              this.Builds.get(id).dropdown_spacement = undefined;
-            }
-            this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
-            this.Builds.get(id).last_dropdown_button = undefined;
-          } else {
-            // Original vertical dropdown behavior
-            this.Button(id, {
-              name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
-              props: { droprun: storageKey }
-            });
-      
-            // Apply vertical configuration
-            if (config.open_colors) this.Builds.get(id).dropdown_color = true;
-            if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
-            this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
-      
-            await code();
-      
-            // Reset to previous state
-            if (config.open_colors && this.Builds.get(id).droplevel === 1) {
-              this.Builds.get(id).dropdown_color = undefined;
-            }
-            if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
-              this.Builds.get(id).dropdown_spacement = undefined;
-            }
-            this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
-          }
-        } else {
-          // Closed state - show "Show More" button
-          const emoji = config.horizontal ? config.up_emoji : config.up_emoji;
           this.Button(id, {
-            name: this.TextColor.gold(`${emoji} ${config.up_buttontext}`),
-            props: { droprun: storageKey },
-            jumpTo: config.jumpTo !== undefined ? config.jumpTo : 1  // Fixed: allow 0 as valid value
+            name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
+            props: { droprun: storageKey }
           });
-        }
-      
-        // Restore previous state if we're exiting a nested dropdown
-        if (wasDroplevel === 0 && this.Builds.get(id).droplevel === 0) {
+
+          const currentButtonCount = this.Builds.get(id).Buttons.length;
+          this.Builds.get(id).last_dropdown_button = currentButtonCount - 1;
+
+          this.Builds.get(id).dropdown_horizontal = true;
+          if (config.open_colors) this.Builds.get(id).dropdown_color = true;
+          if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
+          this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
+
+          await code();
+
           this.Builds.get(id).dropdown_horizontal = wasHorizontal;
-          this.Builds.get(id).dropdown_color = wasColors;
-          this.Builds.get(id).dropdown_spacement = wasSpacement;
-        }
-      };
-
-      this.Button = (id, nameOrConfig, config = {}, ...rest) => {
-        if (this.Builds.has(id)) {
-          let finalConfig;
-          
-          // Check if second parameter is a string (new syntax)
-          if (typeof nameOrConfig === 'string') {
-            finalConfig = {
-              name: nameOrConfig,
-              ...config
-            };
-            
-            // If there are additional arguments, merge them
-            if (rest.length > 0) {
-              Object.assign(finalConfig, ...rest);
-            }
-          } else {
-            // Original syntax: second parameter is the config object
-            finalConfig = nameOrConfig || {};
+          if (config.open_colors && this.Builds.get(id).droplevel === 1) {
+            this.Builds.get(id).dropdown_color = undefined;
           }
-          
-          // Ensure required properties exist
-          if (!finalConfig.path) { finalConfig.path = this.Name; }
-          
-          let button_obj = {
-            name: finalConfig.name || '',
-            metadata: { 
-              props: finalConfig.props || {}, 
-              path: finalConfig.path || this.Name, 
-              resetSelection: finalConfig.resetSelection || false,
-              jumpTo: finalConfig.jumpTo || false 
-            },
-            action: (finalConfig.action) ? finalConfig.action : () => {},
-          };
-          
-          // Apply dropdown styling (rest of the method remains the same)
-          if (this.Builds.get(id).dropdown_color) {
-            button_obj.name = this.TextColor.rgb(
-              button_obj.name,
-              (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.7) * 128)),
-              (127 + Math.floor(Math.cos(this.Builds.get(id).droplevel * 2.3) * 128)),
-              (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.3 + 1.5) * 128))
-            );
+          if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
+            this.Builds.get(id).dropdown_spacement = undefined;
           }
-          
-          if (this.Builds.get(id).dropdown_spacement) {
-            let space = '';
-            for (let i = 0; i < this.Builds.get(id).droplevel; i++) {
-              space = ` ${space}`;
-            }
-            button_obj.name = `${space}${button_obj.name}`;
-          }
-          
-          // Handle horizontal dropdown layout (rest remains the same)
-          if (this.Builds.get(id).dropdown_horizontal && 
-              this.Builds.get(id).last_dropdown_button !== undefined) {
-            
-            const buttonsArray = this.Builds.get(id).Buttons;
-            const lastDropdownIndex = this.Builds.get(id).last_dropdown_button;
-            
-            // Find the position to insert (right after the dropdown button)
-            let insertIndex = lastDropdownIndex + 1;
-            let foundGroup = false;
-            
-            // Look for an existing options group to add to
-            for (let i = lastDropdownIndex + 1; i < buttonsArray.length; i++) {
-              if (buttonsArray[i].type === 'options') {
-                // Add to existing group for horizontal layout
-                buttonsArray[i].value.push(button_obj);
-                foundGroup = true;
-                break;
-              }
-            }
-            
-            if (!foundGroup) {
-              // Create new group starting from the dropdown button
-              // Move existing dropdown button into a group if it's not already
-              if (lastDropdownIndex >= 0 && lastDropdownIndex < buttonsArray.length) {
-                const dropdownButton = buttonsArray[lastDropdownIndex];
-                
-                // If the dropdown button is standalone, convert it to a group
-                if (!dropdownButton.type) {
-                  const newGroup = {
-                    type: 'options',
-                    value: [dropdownButton, button_obj]
-                  };
-                  buttonsArray[lastDropdownIndex] = newGroup;
-                } else if (dropdownButton.type === 'options') {
-                  // Add to existing dropdown button's group
-                  dropdownButton.value.push(button_obj);
-                }
-              }
-            }
-            
-          } else if (finalConfig.buttons) {
-            // Original grouped buttons behavior (for vertical layout)
-            const buttonsArray = this.Builds.get(id).Buttons;
-            if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
-              buttonsArray.push({ type: 'options', value: [button_obj] });
-            } else if (buttonsArray[buttonsArray.length - 1].type === 'options') {
-              buttonsArray[buttonsArray.length - 1].value.push(button_obj);
-            } else {
-              buttonsArray.push({ type: 'options', value: [button_obj] });
-            }
-          } else {
-            // Single button
-            this.Builds.get(id).Buttons.push(button_obj);
-          }
+          this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
+          this.Builds.get(id).last_dropdown_button = undefined;
         } else {
-          if (this.Log) {
-            console.log(`This.Button() Error - userBuild not founded | BuildID: ${id}`);
-          }
-        }
-      };
+          this.Button(id, {
+            name: this.TextColor.orange(`${config.down_emoji} ${config.down_buttontext}`),
+            props: { droprun: storageKey }
+          });
 
-      this.Buttons = (id, configs = []) => {
-        if (!Array.isArray(configs)) {
-            configs = [configs];
+          if (config.open_colors) this.Builds.get(id).dropdown_color = true;
+          if (config.open_spacement) this.Builds.get(id).dropdown_spacement = true;
+          this.Builds.get(id).droplevel = (wasDroplevel > 0) ? wasDroplevel + 1 : 1;
+
+          await code();
+
+          if (config.open_colors && this.Builds.get(id).droplevel === 1) {
+            this.Builds.get(id).dropdown_color = undefined;
+          }
+          if (config.open_spacement && this.Builds.get(id).droplevel === 1) {
+            this.Builds.get(id).dropdown_spacement = undefined;
+          }
+          this.Builds.get(id).droplevel = this.Builds.get(id).droplevel - 1;
         }
-        configs.forEach(config => {
-           
-            this.Button(id, {
-                ...config,
-                buttons: true  
-            });
+      } else {
+        const emoji = config.horizontal ? config.up_emoji : config.up_emoji;
+        this.Button(id, {
+          name: this.TextColor.gold(`${emoji} ${config.up_buttontext}`),
+          props: { droprun: storageKey },
+          jumpTo: config.jumpTo !== undefined ? config.jumpTo : 1
         });
+      }
+
+      if (wasDroplevel === 0 && this.Builds.get(id).droplevel === 0) {
+        this.Builds.get(id).dropdown_horizontal = wasHorizontal;
+        this.Builds.get(id).dropdown_color = wasColors;
+        this.Builds.get(id).dropdown_spacement = wasSpacement;
+      }
     };
 
+    // --------------------------- Button Methods ---------------------------
+
+    /**
+     * Create a button
+     * @param {string} id - User/build ID
+     * @param {string|Object} nameOrConfig - Button name or configuration object
+     * @param {Object} [config] - Button configuration (when name is string)
+     * @param {string} [config.name] - Button name
+     * @param {string} [config.path] - Navigation path
+     * @param {Object} [config.props] - Button props
+     * @param {boolean} [config.resetSelection] - Reset selection
+     * @param {number|boolean} [config.jumpTo] - Jump to index
+     * @param {Function} [config.action] - Button action
+     * @param {...*} rest - Additional arguments
+     */
+    this.Button = (id, nameOrConfig, config = {}, ...rest) => {
+      if (this.Builds.has(id)) {
+        let finalConfig;
+
+        if (typeof nameOrConfig === 'string') {
+          finalConfig = {
+            name: nameOrConfig,
+            ...config
+          };
+
+          if (rest.length > 0) {
+            Object.assign(finalConfig, ...rest);
+          }
+        } else {
+          finalConfig = nameOrConfig || {};
+        }
+
+        if (!finalConfig.path) { finalConfig.path = this.Name; }
+
+        let button_obj = {
+          name: finalConfig.name || '',
+          metadata: {
+            props: finalConfig.props || {},
+            path: finalConfig.path || this.Name,
+            resetSelection: finalConfig.resetSelection || false,
+            jumpTo: finalConfig.jumpTo || false
+          },
+          action: (finalConfig.action) ? finalConfig.action : () => { },
+        };
+
+        if (this.Builds.get(id).dropdown_color) {
+          button_obj.name = this.TextColor.rgb(
+            button_obj.name,
+            (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.7) * 128)),
+            (127 + Math.floor(Math.cos(this.Builds.get(id).droplevel * 2.3) * 128)),
+            (127 + Math.floor(Math.sin(this.Builds.get(id).droplevel * 1.3 + 1.5) * 128))
+          );
+        }
+
+        if (this.Builds.get(id).dropdown_spacement) {
+          let space = '';
+          for (let i = 0; i < this.Builds.get(id).droplevel; i++) {
+            space = ` ${space}`;
+          }
+          button_obj.name = `${space}${button_obj.name}`;
+        }
+
+        if (this.Builds.get(id).dropdown_horizontal &&
+          this.Builds.get(id).last_dropdown_button !== undefined) {
+
+          const buttonsArray = this.Builds.get(id).Buttons;
+          const lastDropdownIndex = this.Builds.get(id).last_dropdown_button;
+
+          let foundGroup = false;
+
+          for (let i = lastDropdownIndex + 1; i < buttonsArray.length; i++) {
+            if (buttonsArray[i].type === 'options') {
+              buttonsArray[i].value.push(button_obj);
+              foundGroup = true;
+              break;
+            }
+          }
+
+          if (!foundGroup) {
+            if (lastDropdownIndex >= 0 && lastDropdownIndex < buttonsArray.length) {
+              const dropdownButton = buttonsArray[lastDropdownIndex];
+
+              if (!dropdownButton.type) {
+                const newGroup = {
+                  type: 'options',
+                  value: [dropdownButton, button_obj]
+                };
+                buttonsArray[lastDropdownIndex] = newGroup;
+              } else if (dropdownButton.type === 'options') {
+                dropdownButton.value.push(button_obj);
+              }
+            }
+          }
+
+        } else if (finalConfig.buttons) {
+          const buttonsArray = this.Builds.get(id).Buttons;
+          if (buttonsArray.length === 0 || !buttonsArray[buttonsArray.length - 1].type) {
+            buttonsArray.push({ type: 'options', value: [button_obj] });
+          } else if (buttonsArray[buttonsArray.length - 1].type === 'options') {
+            buttonsArray[buttonsArray.length - 1].value.push(button_obj);
+          } else {
+            buttonsArray.push({ type: 'options', value: [button_obj] });
+          }
+        } else {
+          this.Builds.get(id).Buttons.push(button_obj);
+        }
+      } else {
+        if (this.Log) {
+          console.log(`This.Button() Error - userBuild not founded | BuildID: ${id}`);
+        }
+      }
+    };
+
+    /**
+     * Create multiple buttons
+     * @param {string} id - User/build ID
+     * @param {Array<Object>|Object} configs - Button configurations
+     */
+    this.Buttons = (id, configs = []) => {
+      if (!Array.isArray(configs)) {
+        configs = [configs];
+      }
+      configs.forEach(config => {
+        this.Button(id, {
+          ...config,
+          buttons: true
+        });
+      });
+    };
+
+    /**
+     * Create a side button
+     * @param {string} id - User/build ID
+     * @param {Object} config - Button configuration
+     */
     this.SideButton = (id, config = {}) => {
       this.Button(id, {
-          ...config,
-          buttons: true 
+        ...config,
+        buttons: true
       });
-  };
-    
-      this.Text = (id,text,config = {}) => {
-        if(this.Builds.has(id)){
-          if(this.Builds.get(id).Text != ''){
-            this.Builds.get(id).Text = `${this.Builds.get(id).Text}\n${text}`
-          } else {
-            this.Builds.get(id).Text = text
-          }
-            
+    };
+
+    // --------------------------- Text Method ---------------------------
+
+    /**
+     * Add text to the display
+     * @param {string} id - User/build ID
+     * @param {string} text - Text to display
+     * @param {Object} [config] - Text configuration
+     */
+    this.Text = (id, text, config = {}) => {
+      if (this.Builds.has(id)) {
+        if (this.Builds.get(id).Text != '') {
+          this.Builds.get(id).Text = `${this.Builds.get(id).Text}\n${text}`
         } else {
-            if(this.Log){console.log(`This.Text() Error - userBuild not founded | Text : ${text} | BuildID : ${id} | Path : ${path}`)}
+          this.Builds.get(id).Text = text
         }
 
+      } else {
+        if (this.Log) { console.log(`This.Text() Error - userBuild not founded | Text : ${text} | BuildID : ${id}`) }
       }
 
-      this.WaitInput = (id, config = { path: this.Name, props: {}, question: '', password: false }) => {
-        this.Builds.get(id).WaitInput = true
-        this.Builds.get(id).InputPath = config.path || this.Name
-        this.Builds.get(id).InputProps = config.props || {}
-        this.Builds.get(id).InputQuestion = config.question || ''
-        this.Builds.get(id).InputPassword = config.password || false // Add password flag
-      }
+    }
 
+    // --------------------------- WaitInput Method ---------------------------
 
-      this.Build = async (props = {session : new Session}) => {
-        this.Builds.set(props.session.UniqueID, new userBuild({session : props.session}))
-        await build(props) //handle .catch aqui
-        let obj_return = {
-          hud_obj : {
-            title : this.Builds.get(props.session.UniqueID).Text,
-            options : this.Builds.get(props.session.UniqueID).Buttons
-          },
-          wait_input : this.Builds.get(props.session.UniqueID).WaitInput,
-          input_obj : {
-            path : this.Builds.get(props.session.UniqueID).InputPath,
-            props : this.Builds.get(props.session.UniqueID).InputProps,
-            question : this.Builds.get(props.session.UniqueID).InputQuestion,
-            password : this.Builds.get(props.session.UniqueID).InputPassword // Add password flag
+    /**
+     * Wait for user input
+     * @param {string} id - User/build ID
+     * @param {Object} config - Input configuration
+     * @param {string} [config.path] - Path after input
+     * @param {Object} [config.props] - Props to pass
+     * @param {string} [config.question] - Input question
+     * @param {boolean} [config.password=false] - Whether input is password
+     */
+    this.WaitInput = (id, config = { path: this.Name, props: {}, question: '', password: false }) => {
+      this.Builds.get(id).WaitInput = true
+      this.Builds.get(id).InputPath = config.path || this.Name
+      this.Builds.get(id).InputProps = config.props || {}
+      this.Builds.get(id).InputQuestion = config.question || ''
+      this.Builds.get(id).InputPassword = config.password || false
+    }
+
+    // --------------------------- Build Method ---------------------------
+
+    /**
+     * Build the function output
+     * @param {Object} props - Build properties
+     * @param {Session} props.session - Session object
+     * @returns {Promise<Object>} Build result
+     */
+    this.Build = async (props = { session: new Session }) => {
+      this.Builds.set(props.session.UniqueID, new userBuild({ session: props.session }))
+
+      try {
+        await build(props)
+
+        const userBuild = this.Builds.get(props.session.UniqueID)
+
+        if (userBuild && userBuild.GotoNow) {
+          const gotoInfo = userBuild.GotoNow
+
+          let obj_return = {
+            hud_obj: {
+              title: '',
+              options: []
+            },
+            wait_input: false,
+            input_obj: {},
+            goto_now: {
+              path: gotoInfo.path,
+              props: gotoInfo.props
+            },
+            routes: userBuild.Routes
           }
+
+          this.Builds.delete(props.session.UniqueID)
+          return obj_return
         }
+
+        let obj_return = {
+          hud_obj: {
+            title: this.Builds.get(props.session.UniqueID).Text,
+            options: this.Builds.get(props.session.UniqueID).Buttons
+          },
+          wait_input: this.Builds.get(props.session.UniqueID).WaitInput,
+          input_obj: {
+            path: this.Builds.get(props.session.UniqueID).InputPath,
+            props: this.Builds.get(props.session.UniqueID).InputProps,
+            question: this.Builds.get(props.session.UniqueID).InputQuestion,
+            password: this.Builds.get(props.session.UniqueID).InputPassword
+          },
+          goto_now: undefined,
+          routes: this.Builds.get(props.session.UniqueID).Routes
+        }
+
         this.Builds.delete(props.session.UniqueID)
         return obj_return
+
+      } catch (error) {
+        if (error.message === 'GOTO_NOW_BREAK' && error.gotoInfo) {
+          this.Builds.delete(props.session.UniqueID)
+
+          return {
+            hud_obj: {
+              title: '',
+              options: []
+            },
+            wait_input: false,
+            input_obj: {},
+            goto_now: {
+              path: error.gotoInfo.path,
+              props: error.gotoInfo.props
+            },
+            routes: {}
+          }
+        }
+
+        throw error
+      }
+    }
+
+    // --------------------------- Route Discovery Method ---------------------------
+
+    /**
+     * Discover HTTP routes from this function
+     * @param {Object} [discoveryProps] - Discovery properties
+     * @returns {Promise<{GET: Array, POST: Array, PUT: Array, DELETE: Array}>} Discovered routes
+     * @private
+     */
+    this.DiscoverRoutes = async (discoveryProps = {}) => {
+      const discoveryId = `route-discovery-${this.Name}-${Date.now()}`
+      const discoverySession = new Session({
+        uniqueid: discoveryId,
+        machine_id: 'route-discovery',
+        process_id: process.pid,
+        external: true
+      })
+
+      const props = {
+        session: discoverySession,
+        ...discoveryProps
       }
 
+      try {
+        const result = await this.Build(props)
+        return result.routes || { GET: [], POST: [], PUT: [], DELETE: [] }
+      } catch (error) {
+        console.error(`Error discovering routes for ${this.Name}:`, error)
+        return { GET: [], POST: [], PUT: [], DELETE: [] }
       }
+    }
+  }
 }
 
+// --------------------------- NotFounded Class ---------------------------
+
+/**
+ * Not found error handler
+ * @extends SyAPP_Func
+ */
 class NotFounded extends SyAPP_Func {
-  constructor(){
+  constructor() {
     super(
       'notfounded',
       async (props) => {
-      let uid = props.session.UniqueID
-      this.Text(uid,`Func ${this.TextColor.brightRed(props.notfounded_func)} not founded !`)
-      this.Button(uid,{name : '← Return',path : props.session.PreviousPath,props : props.session.PreviousProps})
-
+        let uid = props.session.UniqueID
+        this.Text(uid, `Func ${this.TextColor.brightRed(props.notfounded_func)} not founded !`)
+        this.Button(uid, { name: '← Return', path: props.session.PreviousPath, props: props.session.PreviousProps })
       }
     )
   }
 }
 
+// --------------------------- Error Class ---------------------------
+
+/**
+ * Error handler
+ * @extends SyAPP_Func
+ */
 class Error extends SyAPP_Func {
-  constructor(){
+  constructor() {
     super(
       'error',
       async (props) => {
-      let uid = props.session.UniqueID
-      this.Text(uid,`Internal error loading ${this.TextColor.brightRed(props.error_func)}\n`)
-      //await this.WaitLog(props.error_message,5000)
-      if(props.error_message){this.Text(uid,props.error_message.toString())}
-      this.SideButton(uid,{name : '← Return',path : props.session.PreviousPath})
-      this.SideButton(uid,{name : '⌂ Main Func',path : props.mainfunc})
+        let uid = props.session.UniqueID
+        this.Text(uid, `Internal error loading ${this.TextColor.brightRed(props.error_func)}\n`)
+        if (props.error_message) { this.Text(uid, props.error_message.toString()) }
+        this.SideButton(uid, { name: '← Return', path: props.session.PreviousPath })
+        this.SideButton(uid, { name: '⌂ Main Func', path: props.mainfunc })
       }
     )
   }
 }
 
+// --------------------------- TemplateFunc Class ---------------------------
+
+/**
+ * Template function for examples
+ * @extends SyAPP_Func
+ */
 class TemplateFunc extends SyAPP_Func {
-  constructor(){
+  constructor() {
     super(
       'templatefunc',
       async (props) => {
-      let uid = props.session.UniqueID
-      
-      //await this.WaitLog(props,2000)
-      
-      if(props.errorforce){
-        this.Text(d)
-      }
+        let uid = props.session.UniqueID
 
-      if(props.inputnumero){
-        this.WaitInput(uid)
-      }
-
-      if(props.inputValue){
-        this.Text(uid,`Numero digitado : ${props.inputValue}`)
-      }
-
-      this.Text(uid,'Hello World')
-      this.Button(uid,{name : 'Button 1'})
-      this.Buttons(uid,[
-        {name : 'Error',props : {errorforce : true}},
-        {name : 'Inexistent Func',path : 'dasded'}
-      ])
-      await this.DropDown(uid,'drop1',async () =>{
-        this.Button(uid,{name : 'opa'})
-        await this.DropDown(uid,'drop2',async () => {
-          this.Button(uid,{name : 'testing1'})
-          await this.DropDown(uid,'drop3',() => {
-            this.Button(uid,{name : 'maisum1'})
-            this.Button(uid,{name : 'outro'})
+        // Example HTTP routes with models
+        this.Get(uid, '/test', async (req, res) => {
+          res.json({ 
+            message: 'Test route working!', 
+            query: req.query,
+            path: '/test'
           })
-          this.Button(uid,{name : 'testing2'})
+        }, {
+          output_model: {
+            message: 'string',
+            query: 'object',
+            path: 'string'
+          }
         })
-        this.Button(uid,{name : 'opa 2'})
-      })
-      await this.DropDown(uid,'drop55',async () =>{
 
-        this.Button(uid,{name : 'dsdsdasd'})
-        this.Button(uid,{name : 'dsddfsdd'})
-        this.Button(uid,{name : 'dsdfsddasd'})
-      })
+        this.Get(uid, '/api/users', async (req, res) => {
+          res.json({ users: ['user1', 'user2', 'user3'] })
+        }, {
+          output_model: {
+            users: { type: 'array', required: true }
+          }
+        })
 
-      this.Button(uid,{name : 'Button 4',resetSelection : true})
-      await this.DropDown(uid,'lateral',async () =>{
+        this.Post(uid, '/api/users', async (req, res) => {
+          // Input is already validated and sanitized by the HTTP handler
+          res.json({ 
+            created: req.body, 
+            message: 'User created successfully' 
+          })
+        }, {
+          input_model: {
+            name: { type: 'string', required: true },
+            age: { type: 'number', required: true },
+            email: { type: 'string', required: true },
+            phone: 'string'
+          },
+          output_model: {
+            created: 'object',
+            message: 'string'
+          },
+          input_validate: { 
+            error: 'Validation failed',
+            status: 400
+          }
+        })
 
-        this.Button(uid,{name : 'dsdsdasd'})
-        this.Button(uid,{name : 'dsdfsddasd'})
-      },{horizontal : true})
-      this.Button(uid,{name : 'Button 5',props : {testando : true}})
-      if(props.testando){
-        this.Button(uid,{name : 'Button 6'})
-      }
+        this.Put(uid, '/api/users/:id', async (req, res) => {
+          res.json({ 
+            updated: req.params.id, 
+            data: req.body,
+            message: 'User updated' 
+          })
+        }, {
+          input_model: {
+            name: 'string',
+            age: 'number',
+            email: 'string'
+          },
+          output_model: {
+            updated: 'string',
+            data: 'object',
+            message: 'string'
+          }
+        })
 
-      this.Button(uid,{name : 'Inserir numero',props : {inputnumero : true}})
-      
+        if (props.errorforce) {
+          this.Text(uid, 'Error forced')
+        }
 
+        if (props.inputnumero) {
+          this.WaitInput(uid)
+        }
+
+        if (props.inputValue) {
+          this.Text(uid, `Numero digitado : ${props.inputValue}`)
+        }
+
+        this.Text(uid, 'Hello World')
+        this.Button(uid, { name: 'Button 1' })
+        this.Buttons(uid, [
+          { name: 'Error', props: { errorforce: true } },
+          { name: 'Inexistent Func', path: 'dasded' }
+        ])
+        await this.DropDown(uid, 'drop1', async () => {
+          this.Button(uid, { name: 'opa' })
+          await this.DropDown(uid, 'drop2', async () => {
+            this.Button(uid, { name: 'testing1' })
+            await this.DropDown(uid, 'drop3', () => {
+              this.Button(uid, { name: 'maisum1' })
+              this.Button(uid, { name: 'outro' })
+            })
+            this.Button(uid, { name: 'testing2' })
+          })
+          this.Button(uid, { name: 'opa 2' })
+        })
+        await this.DropDown(uid, 'drop55', async () => {
+
+          this.Button(uid, { name: 'dsdsdasd' })
+          this.Button(uid, { name: 'dsddfsdd' })
+          this.Button(uid, { name: 'dsdfsddasd' })
+        })
+
+        this.Button(uid, { name: 'Button 4', resetSelection: true })
+        await this.DropDown(uid, 'lateral', async () => {
+
+          this.Button(uid, { name: 'dsdsdasd' })
+          this.Button(uid, { name: 'dsdfsddasd' })
+        }, { horizontal: true })
+        this.Button(uid, { name: 'Button 5', props: { testando: true } })
+        if (props.testando) {
+          this.Button(uid, { name: 'Button 6' })
+        }
+
+        this.Button(uid, { name: 'Inserir numero', props: { inputnumero: true } })
       }
     )
   }
 }
 
+// --------------------------- SyAPP Class ---------------------------
 
-class SyAPP {
-  constructor(mainFuncOrConfig, config = {}) {
-    this.HUD = new TerminalHUD();
+class HTTPRoutesStorage {
+  constructor() {
+    this.routes = new Map() // key: method:path, value: routeInfo
+    this.routeMap = new Map() // key: path, value: array of {method, routeInfo}
+    this.models = new Map() // key: method:path, value: {input, output}
+    this.validationResponses = new Map() // key: method:path, value: validation response
+    this.validationOptions = new Map() // key: method:path, value: validation options
+  }
+  
+  addRoute(method, path, routeInfo) {
+    const key = `${method}:${path}`
+    this.routes.set(key, routeInfo)
     
+    if (!this.routeMap.has(path)) {
+      this.routeMap.set(path, [])
+    }
+    this.routeMap.get(path).push({ method, routeInfo })
+    
+    // Store models
+    this.models.set(key, {
+      input: routeInfo.input_model || {},
+      output: routeInfo.output_model || {}
+    })
+    
+    // Store validation response
+    if (routeInfo.input_validate) {
+      this.validationResponses.set(key, routeInfo.input_validate)
+    }
+    
+    // Store validation options
+    this.validationOptions.set(key, routeInfo.validation_options || { includeMissingKeys: true })
+  }
+  
+  getRoute(method, path) {
+    return this.routes.get(`${method}:${path}`)
+  }
+  
+  getModels(method, path) {
+    return this.models.get(`${method}:${path}`) || { input: {}, output: {} }
+  }
+  
+  getValidationResponse(method, path) {
+    return this.validationResponses.get(`${method}:${path}`)
+  }
+  
+  getValidationOptions(method, path) {
+    return this.validationOptions.get(`${method}:${path}`) || { includeMissingKeys: true }
+  }
+  
+  getAllRoutes() {
+    return Array.from(this.routes.entries()).map(([key, value]) => ({
+      key,
+      method: key.split(':')[0],
+      path: key.split(':')[1],
+      func: value.funcName,
+      group: value.group,
+      models: this.models.get(key),
+      hasValidation: this.validationResponses.has(key),
+      validationOptions: this.validationOptions.get(key)
+    }))
+  }
+  
+  getStats() {
+    const stats = {
+      total: this.routes.size,
+      byMethod: { GET: 0, POST: 0, PUT: 0, DELETE: 0 },
+      byFunc: {},
+      withModels: 0,
+      withValidation: 0
+    }
+    
+    for (const [key, route] of this.routes) {
+      const method = key.split(':')[0]
+      stats.byMethod[method] = (stats.byMethod[method] || 0) + 1
+      
+      stats.byFunc[route.funcName] = (stats.byFunc[route.funcName] || 0) + 1
+      
+      const models = this.models.get(key)
+      if (models && (Object.keys(models.input).length > 0 || Object.keys(models.output).length > 0)) {
+        stats.withModels++
+      }
+      
+      if (this.validationResponses.has(key)) {
+        stats.withValidation++
+      }
+    }
+    
+    return stats
+  }
+  
+  exportData() {
+    return {
+      routes: this.getAllRoutes(),
+      stats: this.getStats(),
+      timestamp: new Date().toISOString()
+    }
+  }
+}
+
+/**
+ * Main SyAPP application class
+ * @class
+ */
+class SyAPP {
+  /**
+   * @param {Function|Object} mainFuncOrConfig - Main function or configuration
+   * @param {Object} [config] - Configuration (when first param is function)
+   * @param {Function} [config.mainfunc] - Main function (when first param is config)
+   * @param {number} [config.port=3000] - HTTP server port
+   * @param {string} [config.host='localhost'] - HTTP server host
+   * @param {boolean} [config.enableHTTP=false] - Enable HTTP server
+   * @param {Object} [config.httpConfig={}] - HTTP configuration object passed to build functions
+   * @param {string} [config.mainFuncName] - Custom name for the main function
+   * @param {boolean} [config.baseRoute=false] - Use base routes (no function name prefix)
+   * @param {boolean} [config.includeFuncName=true] - Include function name in routes
+   */
+  constructor(mainFuncOrConfig, config = {}) {
+    /** @type {TerminalHUD} */
+    this.HUD = new TerminalHUD();
+    /** @type {http.Server|null} */
+    this.httpServer = null;
+    /** @type {HTTPRoutesStorage} */
+    this.routeStorage = new HTTPRoutesStorage();
+
     // Handle the new dual-parameter signature
     let mainFunc;
     let userConfig;
-    
+
     if (typeof mainFuncOrConfig === 'function' || (mainFuncOrConfig && mainFuncOrConfig.prototype instanceof SyAPP_Func)) {
-      // First parameter is the main function
       mainFunc = mainFuncOrConfig;
       userConfig = config;
     } else {
-      // First parameter is the config object (original behavior)
       mainFunc = mainFuncOrConfig?.mainfunc || TemplateFunc;
       userConfig = mainFuncOrConfig || {};
     }
+
+    /** @type {{Func: Function, Name: string, OriginalName: string}} */
+    this.MainFunc = { Func: mainFunc, Name: undefined, OriginalName: undefined };
     
-    this.MainFunc = { Func: mainFunc, Name: undefined };
-    this.MainFunc.Name = new this.MainFunc.Func().Name;
+    // Store original name
+    const tempInstance = new this.MainFunc.Func();
+    this.MainFunc.OriginalName = tempInstance.Name;
     
+    // Set custom name if provided, otherwise use original
+    this.MainFunc.Name = userConfig.mainFuncName || this.MainFunc.OriginalName;
+
     /** @type {Map<string, SyAPP_Func>} */
     this.Funcs = new Map();
-    
+
+    /** @type {string} */
     this.MainSessionID = `${getMachineID()}-P${process.pid}`;
-    
+
     /** @type {Map<string, Session>} */
     this.Sessions = new Map([[this.MainSessionID, new Session({
       machine_id: getMachineID(),
       process_id: process.pid
     })]]);
-    
+
+    /**
+     * Wait and log message
+     * @param {string} message - Message to log
+     * @param {number} ms - Milliseconds to wait
+     * @returns {Promise<void>}
+     */
     this.WaitLog = async (message, ms = 5000) => {
       console.log(message);
       await new Promise(resolve => setTimeout(resolve, ms));
     };
-    
+
+    // Server configuration with new options
+    /** @type {Object} */
+    this.serverConfig = {
+      port: userConfig.port || 3000,
+      host: userConfig.host || 'localhost',
+      enableHTTP: userConfig.enableHTTP || false,
+      httpConfig: userConfig.httpConfig || {},
+      mainFuncName: userConfig.mainFuncName,
+      baseRoute: userConfig.baseRoute || false,
+      includeFuncName: userConfig.includeFuncName !== false
+    };
+
+    /**
+     * Process and register a function class
+     * @param {Function} FuncClass - Function class to process
+     * @private
+     */
     this.ProcessFuncs = (FuncClass) => {
       const tempInstance = new FuncClass();
-      const funcName = tempInstance.Name;
-      
+      let funcName = tempInstance.Name;
+
+      // If this is the main function and has a custom name, register with both names
+      if (FuncClass === this.MainFunc.Func && this.serverConfig.mainFuncName) {
+        // Register with original name for backward compatibility
+        if (!this.Funcs.has(funcName)) {
+          const originalInstance = new FuncClass();
+          originalInstance.IsMainFunc = true;
+          originalInstance.CustomName = this.serverConfig.mainFuncName;
+          this.Funcs.set(funcName, originalInstance);
+        }
+        
+        // Register with custom name - IMPORTANT: We need to override the Name property
+        if (!this.Funcs.has(this.serverConfig.mainFuncName)) {
+          const customInstance = new FuncClass();
+          customInstance.IsMainFunc = true;
+          customInstance.OriginalName = funcName;
+          // Override the Name property that comes from the class
+          Object.defineProperty(customInstance, 'Name', {
+            value: this.serverConfig.mainFuncName,
+            writable: false,
+            configurable: true
+          });
+          this.Funcs.set(this.serverConfig.mainFuncName, customInstance);
+        }
+        
+        // Process linked functions
+        tempInstance.Linked.forEach(linkedFunc => {
+          const linkedTemp = new linkedFunc();
+          if (!this.Funcs.has(linkedTemp.Name)) {
+            this.ProcessFuncs(linkedFunc);
+          }
+        });
+        
+        return;
+      }
+
+      // Normal processing for non-main functions
       if (this.Funcs.has(funcName)) {
         return;
       }
-      
+
       const instance = new FuncClass();
       this.Funcs.set(funcName, instance);
-      
+
       instance.Linked.forEach(linkedFunc => {
         const linkedTemp = new linkedFunc();
         if (!this.Funcs.has(linkedTemp.Name)) {
@@ -3727,102 +4618,155 @@ class SyAPP {
         }
       });
     };
-    
+
     this.ProcessFuncs(this.MainFunc.Func);
     this.ProcessFuncs(NotFounded);
     this.ProcessFuncs(Error);
-    
+
+    // Discover routes from all functions (only if HTTP is enabled)
+    if (this.serverConfig.enableHTTP) {
+      this.discoverAllRoutes();
+      this.startHTTPServer();
+    }
+
+    // --------------------------- LoadScreen Method ---------------------------
+
+    /**
+     * Load a screen/function
+     * @param {string} [funcname] - Function name to load
+     * @param {Object} [config] - Load configuration
+     * @param {boolean|number} [config.jumpTo=false] - Jump to index
+     * @param {boolean} [config.resetSelection=false] - Reset selection
+     * @param {Object} [config.props={}] - Props to pass
+     * @returns {Promise<void>}
+     */
     this.LoadScreen = async (funcname = this.MainFunc.Name, config = { jumpTo: false, resetSelection: false, props: {} }) => {
       if (!config.props) { config.props = {}; }
+
+      // Handle main function name aliasing
+      let targetFuncName = funcname;
       
-      if (!this.Funcs.has(funcname)) {
+      // If trying to access main function by original name but we have a custom name
+      if (this.serverConfig.mainFuncName && 
+          funcname === this.MainFunc.OriginalName && 
+          this.Funcs.has(this.serverConfig.mainFuncName)) {
+        targetFuncName = this.serverConfig.mainFuncName;
+      }
+
+      if (!this.Funcs.has(targetFuncName)) {
         config.props.notfounded_func = funcname;
-        funcname = 'notfounded';
+        targetFuncName = 'notfounded';
       }
       config.props.mainfunc = this.MainFunc.Name;
-      
+
+      // Pass HTTP config to the build function if available
+      if (this.serverConfig.enableHTTP && this.serverConfig.httpConfig) {
+        config.props._httpConfig = this.serverConfig.httpConfig;
+      }
+
       this.Sessions.get(this.MainSessionID).PreviousPath = this.Sessions.get(this.MainSessionID).ActualPath;
-      this.Sessions.get(this.MainSessionID).ActualPath = funcname;
+      this.Sessions.get(this.MainSessionID).ActualPath = targetFuncName;
       this.Sessions.get(this.MainSessionID).PreviousProps = this.Sessions.get(this.MainSessionID).ActualProps;
       config.props.session = this.Sessions.get(this.MainSessionID);
       this.Sessions.get(this.MainSessionID).ActualProps = config.props;
-      
-      await this.Funcs.get(funcname).Build(config.props)
-        .then(async return_obj => {
-          
-          //after let it more robust and with func optional config to force inverse of it check
-          if (config.props) {
-            if (config.props.session) {
-              if (config.props.session.ActualPath && config.props.session.PreviousPath) {
-                if (config.props.session.ActualPath != config.props.session.PreviousPath) {
-                  config.resetSelection = true;
-                }
+
+      try {
+        const return_obj = await this.Funcs.get(targetFuncName).Build(config.props);
+
+        if (config.props) {
+          if (config.props.session) {
+            if (config.props.session.ActualPath && config.props.session.PreviousPath) {
+              if (config.props.session.ActualPath != config.props.session.PreviousPath) {
+                config.resetSelection = true;
               }
             }
           }
-          
-          this.HUD.displayMenu(return_obj.hud_obj, { remember: (!config.resetSelection) ? true : false, jumpToIndex: (!config.jumpTo) ? undefined : config.jumpTo })
-            .catch(e => {
-              this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+        }
+
+        if (return_obj && return_obj.goto_now) {
+          this.LoadScreen(return_obj.goto_now.path, {
+            props: return_obj.goto_now.props || {},
+            jumpTo: false,
+            resetSelection: true
+          }).catch(er => {
+            this.LoadScreen('error', {
+              props: {
+                error_message: er,
+                error_func: return_obj.goto_now.path,
+                mainfunc: this.MainFunc.Name
+              }
             });
-          
-          if (return_obj.wait_input) {
-            let response;
-            
-            try {
-              if (return_obj.input_obj.password) {
-                // Use password mode with masked input
-                response = await this.HUD.ask(return_obj.input_obj.question || 'Password: ', {
-                  password: true,
-                  mask: return_obj.input_obj.mask || '*'
-                });
-              } else {
-                // Regular input mode
-                response = await this.HUD.ask(return_obj.input_obj.question || 'Type: ');
-              }
-              
-              // Navigate to next screen with the input value
-              this.LoadScreen(return_obj.input_obj.path, { 
-                props: { 
-                  inputValue: response, 
-                  ...return_obj.input_obj.props 
-                } 
-              });
-              
-            } catch (e) {
-              // Handle any errors during input
-              this.LoadScreen('error', { 
-                props: { 
-                  error_message: e, 
-                  error_func: funcname, 
-                  mainfunc: this.MainFunc.Name 
-                } 
-              });
-            }
-          }
+          });
+          return;
+        }
+
+        this.HUD.displayMenu(return_obj.hud_obj, {
+          remember: (!config.resetSelection) ? true : false,
+          jumpToIndex: (!config.jumpTo) ? undefined : config.jumpTo
         })
-        .catch(e => {
-          this.LoadScreen('error', { props: { error_message: e, error_func: funcname, mainfunc: this.MainFunc.Name } });
+          .catch(e => {
+            this.LoadScreen('error', {
+              props: {
+                error_message: e,
+                error_func: targetFuncName,
+                mainfunc: this.MainFunc.Name
+              }
+            });
+          });
+
+        if (return_obj.wait_input) {
+          let response;
+
+          try {
+            if (return_obj.input_obj.password) {
+              response = await this.HUD.ask(return_obj.input_obj.question || 'Password: ', {
+                password: true,
+                mask: return_obj.input_obj.mask || '*'
+              });
+            } else {
+              response = await this.HUD.ask(return_obj.input_obj.question || 'Type: ');
+            }
+
+            this.LoadScreen(return_obj.input_obj.path, {
+              props: {
+                inputValue: response,
+                ...return_obj.input_obj.props
+              }
+            });
+
+          } catch (e) {
+            this.LoadScreen('error', {
+              props: {
+                error_message: e,
+                error_func: targetFuncName,
+                mainfunc: this.MainFunc.Name
+              }
+            });
+          }
+        }
+
+      } catch (buildError) {
+        this.LoadScreen('error', {
+          props: {
+            error_message: buildError,
+            error_func: targetFuncName,
+            mainfunc: this.MainFunc.Name
+          }
         });
-      
+      }
     };
-    
-    // In the SyAPP constructor, replace the HUD.on menu selection handler:
-    
+
     this.HUD.on(this.HUD.eventTypes.MENU_SELECTION, (e) => {
-      // Get current session props before navigation
       const currentSession = this.Sessions.get(this.MainSessionID);
       const currentProps = currentSession.ActualProps || {};
       const currentPage = currentProps.page || '';
-      
-      // Merge current page with new props if not explicitly overridden
+
       const newProps = e.metadata.props || {};
-      
-      // If the new props don't have a 'page' property, preserve the current page
+
       if (!('page' in newProps) && currentPage) {
         newProps.page = currentPage;
       }
-      
+
       this.LoadScreen(e.metadata.path, {
         jumpTo: e.metadata.jumpTo || false,
         resetSelection: e.metadata.resetSelection || false,
@@ -3837,16 +4781,456 @@ class SyAPP {
         });
       });
     });
-    
-    this.LoadScreen();
+
+    if (!this.serverConfig.enableHTTP) {
+      this.LoadScreen();
+    }
   }
+
+  // --------------------------- Route Discovery ---------------------------
+
+  async discoverAllRoutes() {
+    console.log('\n' + ColorText.brightCyan('🔍 Discovering HTTP routes...'));
+    
+    if (this.serverConfig.enableHTTP) {
+      if (this.serverConfig.httpConfig && Object.keys(this.serverConfig.httpConfig).length > 0) {
+        console.log(ColorText.yellow('📋 Using HTTP config:'), this.serverConfig.httpConfig);
+      }
+    }
   
+    for (const [funcName, funcInstance] of this.Funcs) {
+      // Skip the original name version of main function if we have a custom name
+      if (this.serverConfig.mainFuncName && 
+          funcName === this.MainFunc.OriginalName && 
+          this.Funcs.has(this.serverConfig.mainFuncName)) {
+        continue;
+      }
+  
+      // Create discovery props with HTTP config
+      const discoveryProps = {
+        _routeDiscovery: true,
+        _httpConfig: this.serverConfig.httpConfig || {}
+      };
+  
+      const routes = await funcInstance.DiscoverRoutes(discoveryProps);
+  
+      ['GET', 'POST', 'PUT', 'DELETE'].forEach(method => {
+        (routes[method] || []).forEach(route => {
+          const basePath = route.path;
+          
+          // Determine routing behavior for this specific route
+          const useBaseRoute = route.baseRoute !== undefined ? route.baseRoute : this.serverConfig.baseRoute;
+          const useIncludeFuncName = route.includeFuncName !== undefined ? route.includeFuncName : this.serverConfig.includeFuncName;
+          
+          const pathVariations = [];
+          
+          if (useBaseRoute) {
+            pathVariations.push(basePath);
+          } else {
+            if (useIncludeFuncName) {
+              if (funcInstance.Group) {
+                const groupPath = funcInstance.Group.startsWith('/') ? funcInstance.Group : `/${funcInstance.Group}`;
+                if (basePath === '/') {
+                  pathVariations.push(`/${funcName}${groupPath}`);
+                  pathVariations.push(`/${funcName}${groupPath}/`);
+                } else {
+                  pathVariations.push(`/${funcName}${groupPath}${basePath}`);
+                }
+              } else {
+                if (basePath === '/') {
+                  pathVariations.push(`/${funcName}`);
+                  pathVariations.push(`/${funcName}/`);
+                } else {
+                  pathVariations.push(`/${funcName}${basePath}`);
+                }
+              }
+            } else {
+              if (funcInstance.Group) {
+                const groupPath = funcInstance.Group.startsWith('/') ? funcInstance.Group : `/${funcInstance.Group}`;
+                if (basePath === '/') {
+                  pathVariations.push(groupPath);
+                  pathVariations.push(`${groupPath}/`);
+                } else {
+                  pathVariations.push(`${groupPath}${basePath}`);
+                }
+              } else {
+                pathVariations.push(basePath);
+              }
+            }
+          }
+  
+          const uniquePathVariations = [...new Set(pathVariations)];
+  
+          const routeInfo = {
+            func: funcInstance,
+            handler: route.handler,
+            method: route.method,
+            path: basePath,
+            originalPath: route.originalPath,
+            fullPath: uniquePathVariations[0],
+            allPaths: uniquePathVariations,
+            stream: route.stream,
+            input_model: route.input_model || {},
+            output_model: route.output_model || {},
+            input_validate: route.input_validate || null,
+            validation_options: route.validation_options || { includeMissingKeys: true },
+            funcName: funcName,
+            group: funcInstance.Group,
+            baseRoute: useBaseRoute,
+            includeFuncName: useIncludeFuncName
+          };
+  
+          uniquePathVariations.forEach(variation => {
+            const finalPath = variation === '' ? '/' : variation;
+            this.routeStorage.addRoute(method, finalPath, routeInfo);
+          });
+        });
+      });
+    }
+  
+    // Log discovered routes with colors
+    console.log('\n' + ColorText.brightGreen('✅ Route discovery complete!'));
+    console.log(ColorText.brightCyan('📊 Route Statistics:'));
+    
+    const stats = this.routeStorage.getStats();
+    console.log(`   Total Routes: ${ColorText.brightWhite(stats.total)}`);
+    console.log(`   By Method: ${ColorText.yellow(`GET: ${stats.byMethod.GET}`)}, ${ColorText.green(`POST: ${stats.byMethod.POST}`)}, ${ColorText.blue(`PUT: ${stats.byMethod.PUT}`)}, ${ColorText.red(`DELETE: ${stats.byMethod.DELETE}`)}`);
+    console.log(`   With Models: ${ColorText.magenta(stats.withModels)}`);
+    console.log(`   With Validation: ${ColorText.cyan(stats.withValidation)}`);
+    
+    console.log('\n' + ColorText.brightCyan('📋 Detailed Routes:'));
+    
+    const routesByFunc = {};
+    this.routeStorage.getAllRoutes().forEach(route => {
+      if (!routesByFunc[route.func]) {
+        routesByFunc[route.func] = [];
+      }
+      routesByFunc[route.func].push(route);
+    });
+    
+    for (const [funcName, routes] of Object.entries(routesByFunc)) {
+      console.log(`\n  ${ColorText.brightYellow(funcName)}:`);
+      routes.forEach(route => {
+        const methodColor = {
+          'GET': ColorText.yellow,
+          'POST': ColorText.green,
+          'PUT': ColorText.blue,
+          'DELETE': ColorText.red
+        }[route.method] || ColorText.white;
+        
+        let modelInfo = '';
+        if (Object.keys(route.models.input).length > 0 || Object.keys(route.models.output).length > 0) {
+          modelInfo = ColorText.magenta(' 📦');
+        }
+        
+        let validationInfo = '';
+        if (route.hasValidation) {
+          validationInfo = ColorText.cyan(' 🔒');
+          
+          // Show validation options
+          if (route.validationOptions && route.validationOptions.includeMissingKeys === false) {
+            validationInfo += ColorText.dim(' (no missingKeys)');
+          }
+        }
+        
+        console.log(`    ${methodColor(route.method.padEnd(6))} ${route.path}${modelInfo}${validationInfo}`);
+        
+        // Show model details if present
+        if (Object.keys(route.models.input).length > 0) {
+          console.log(`      ${ColorText.dim('Input: ' + JSON.stringify(HTTPModelValidator.describe(route.models.input)))}`);
+        }
+        if (Object.keys(route.models.output).length > 0) {
+          console.log(`      ${ColorText.dim('Output: ' + JSON.stringify(HTTPModelValidator.describe(route.models.output)))}`);
+        }
+      });
+    }
+    
+    console.log('\n' + ColorText.brightGreen('🚀 Server ready to start!') + '\n');
+  }
+
+  /**
+   * Export route data
+   * @returns {Object} Route data
+   */
+  exportRouteData() {
+    return this.routeStorage.exportData();
+  }
+
+  /**
+   * Get route statistics
+   * @returns {Object} Route statistics
+   */
+  getRouteStats() {
+    return this.routeStorage.getStats();
+  }
+
+
+
+// --------------------------- HTTP Server Methods ---------------------------
+
+/**
+ * Start the HTTP server
+ * @private
+ */
+startHTTPServer() {
+  this.httpServer = http.createServer((req, res) => {
+    this.handleRequest(req, res);
+  });
+
+  this.httpServer.listen(this.serverConfig.port, this.serverConfig.host, () => {
+    console.log('\n' + ColorText.brightGreen('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    console.log(ColorText.brightCyan('                              🚀 SyAPP HTTP Server'));
+    console.log(ColorText.brightGreen('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━') + '\n');
+    
+    console.log(`   ${ColorText.brightWhite('URL:')} http://${this.serverConfig.host}:${this.serverConfig.port}/`);
+    console.log(`   ${ColorText.brightWhite('Mode:')} ${this.serverConfig.baseRoute ? 'Root level' : 'With function names'}${this.serverConfig.includeFuncName ? '' : ' (no func name)'}`);
+    console.log(`   ${ColorText.brightWhite('Routes:')} ${this.routeStorage.getStats().total} total\n`);
+    
+    console.log(ColorText.brightGreen('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━') + '\n');
+  });
+
+  this.httpServer.on('error', (error) => {
+    console.error(ColorText.brightRed('❌ HTTP Server error:'), error);
+  });
+}
+ 
+/**
+ * Handle incoming HTTP requests with model validation
+ * @param {http.IncomingMessage} req - Request object
+ * @param {http.ServerResponse} res - Response object
+ * @private
+ */
+async handleRequest(req, res) {
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname;
+  const method = req.method;
+
+  console.log(`   ${ColorText.brightCyan('➡️')}  ${method} ${path}${ColorText.reset}`);
+
+  const route = this.routeStorage.getRoute(method, path);
+
+  if (!route) {
+    console.log(`   ${ColorText.brightRed('❌ Route not found')}${ColorText.reset}`);
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      error: 'Route not found',
+      requested: `${method} ${path}`,
+      available: this.routeStorage.getAllRoutes().map(r => `${r.method} ${r.path}`)
+    }));
+    return;
+  }
+
+  // Add helper methods to response object
+  res.json = (data) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(data));
+  };
+
+  res.status = (code) => {
+    res.statusCode = 200;
+    return res;
+  };
+
+  // Get validation options for this route
+  const validationOptions = this.routeStorage.getValidationOptions(method, path);
+  
+  // Function to send validation error response with missingKeys
+  const sendValidationError = (missingKeys = []) => {
+    console.log(`   ${ColorText.brightRed('❌ Input validation failed - returning custom response')}${ColorText.reset}`);
+    
+    if (route.input_validate) {
+      // If input_validate is an object, enhance it with missingKeys if enabled
+      if (typeof route.input_validate === 'object' && route.input_validate !== null) {
+        const enhancedResponse = { ...route.input_validate };
+        
+        // Add missingKeys only if validation options allow it
+        if (validationOptions.includeMissingKeys && missingKeys.length > 0) {
+          enhancedResponse.missingKeys = missingKeys;
+        }
+        
+        res.status(200).json(enhancedResponse);
+      } else {
+        // If input_validate is not an object, send it as is (maintaining backward compatibility)
+        res.status(200).json(route.input_validate);
+      }
+    } else {
+      // Default response if no input_validate provided
+      const defaultResponse = { 
+        error: 'Validation failed',
+        message: 'Input validation failed'
+      };
+      
+      // Add missingKeys if enabled
+      if (validationOptions.includeMissingKeys && missingKeys.length > 0) {
+        defaultResponse.missingKeys = missingKeys;
+      }
+      
+      res.status(200).json(defaultResponse);
+    }
+  };
+
+  // Parse body for POST/PUT requests
+  if (method === 'POST' || method === 'PUT') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+      if (body.length > 1e6) req.destroy();
+    });
+
+    req.on('end', async () => {
+      try {
+        let parsedBody = {};
+        const contentType = req.headers['content-type'];
+        
+        if (contentType && contentType.includes('application/json') && body) {
+          parsedBody = JSON.parse(body);
+        } else if (body) {
+          parsedBody = querystring.parse(body);
+        }
+
+        req.query = parsedUrl.query;
+        req.body = parsedBody;
+        req.params = parsedUrl.query;
+
+        // Validate input against model FIRST
+        if (route.input_model && Object.keys(route.input_model).length > 0) {
+          const validation = HTTPModelValidator.validate(
+            req.body, 
+            route.input_model, 
+            { includeMissingKeys: validationOptions.includeMissingKeys }
+          );
+          
+          if (!validation.valid) {
+            // Send validation error with missing keys
+            sendValidationError(validation.missingKeys);
+            return; // Stop execution
+          }
+          
+          // Replace body with sanitized data
+          req.body = validation.sanitized;
+          console.log(`   ${ColorText.brightGreen('✅ Input validation passed')}${ColorText.reset}`);
+        }
+
+        // Only execute handler if validation passed
+        await route.handler(req, res);
+
+      } catch (error) {
+        console.error('Error handling request:', error);
+        if (!res.headersSent) {
+          if (route.input_validate) {
+            // Check if we should include missingKeys in error response
+            if (validationOptions.includeMissingKeys) {
+              const errorResponse = typeof route.input_validate === 'object' 
+                ? { ...route.input_validate, missingKeys: [] }
+                : route.input_validate;
+              res.status(200).json(errorResponse);
+            } else {
+              res.status(200).json(route.input_validate);
+            }
+          } else {
+            res.status(200).json({ 
+              error: 'Internal server error', 
+              details: error.message 
+            });
+          }
+        }
+      }
+    });
+
+    req.on('error', (error) => {
+      console.error('Request error:', error);
+      if (!res.headersSent) {
+        if (route.input_validate) {
+          if (validationOptions.includeMissingKeys) {
+            const errorResponse = typeof route.input_validate === 'object'
+              ? { ...route.input_validate, missingKeys: [] }
+              : route.input_validate;
+            res.status(200).json(errorResponse);
+          } else {
+            res.status(200).json(route.input_validate);
+          }
+        } else {
+          res.status(200).json({ 
+            error: 'Request error', 
+            details: error.message 
+          });
+        }
+      }
+    });
+  } else {
+    // GET and DELETE requests
+    req.query = parsedUrl.query;
+    req.params = parsedUrl.query;
+    
+    // Validate query parameters for GET/DELETE FIRST
+    if (route.input_model && Object.keys(route.input_model).length > 0) {
+      const validation = HTTPModelValidator.validate(
+        req.query, 
+        route.input_model,
+        { includeMissingKeys: validationOptions.includeMissingKeys }
+      );
+      
+      if (!validation.valid) {
+        // Send validation error with missing keys
+        sendValidationError(validation.missingKeys);
+        return; // Stop execution
+      }
+      
+      req.query = validation.sanitized;
+      console.log(`   ${ColorText.brightGreen('✅ Query validation passed')}${ColorText.reset}`);
+    }
+    
+    // Only execute handler if validation passed
+    try {
+      await route.handler(req, res);
+    } catch (error) {
+      console.error('Handler error:', error);
+      if (!res.headersSent) {
+        if (route.input_validate) {
+          if (validationOptions.includeMissingKeys) {
+            const errorResponse = typeof route.input_validate === 'object'
+              ? { ...route.input_validate, missingKeys: [] }
+              : route.input_validate;
+            res.status(200).json(errorResponse);
+          } else {
+            res.status(200).json(route.input_validate);
+          }
+        } else {
+          res.status(200).json({ 
+            error: 'Handler error', 
+            details: error.message 
+          });
+        }
+      }
+    }
+  }
+}
+
+  // --------------------------- Utility Methods ---------------------------
+
+  /**
+   * Stop the HTTP server
+   */
+  stopHTTPServer() {
+    if (this.httpServer) {
+      this.httpServer.close();
+      console.log('HTTP Server stopped');
+    }
+  }
+
+  /**
+   * Get the SyAPP_Func class
+   * @returns {typeof SyAPP_Func}
+   */
   static Func() { return SyAPP_Func; }
 }
 
-// If this file is run directly, execute the CLI
-if (import.meta.url === `file://${process.argv[1]}`) {
-    new SyAPP()
-}
+// --------------------------- Export ---------------------------
 
 export default SyAPP
+
+// If this file is run directly, execute the CLI with HTTP disabled by default
+if (import.meta.url === `file://${process.argv[1]}`) {
+  new SyAPP()
+}
