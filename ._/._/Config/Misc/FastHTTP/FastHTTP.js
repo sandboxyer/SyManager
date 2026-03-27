@@ -257,6 +257,7 @@ class FastHTTP extends SyAPP.Func() {
                             }
 
                             if(props.newkeyvalue_key){
+
                                 this.Storages.Delete(uid,'keyvalue')
                                 this.Storages.Set(uid,'keyvalue',props.inputValue)
                                 this.WaitInput(uid,{question : 'Key value : ',props : {newkeyvalue_value: true}})
@@ -264,6 +265,11 @@ class FastHTTP extends SyAPP.Func() {
 
                             if(props.newkeyvalue_value){
                                await BodyKey.Model.create({RouteID : route._id,Key : this.Storages.Get(uid,'keyvalue'),Value : props.inputValue})
+                            }
+
+                            if(props.inputchangebodykey){
+                                await BodyKey.Model.update(this.Storages.Get(uid,'editbodykey'),{Value : props.inputValue})
+                                this.Storages.Delete(uid,'editbodykey')
                             }
                         }
 
@@ -273,7 +279,18 @@ class FastHTTP extends SyAPP.Func() {
 
                         if(props.editurl){ this.WaitInput(uid,{props : {newurl : true}})  }
 
-                        if(props.removebodykey){BodyKey.Model.delete(props.removebodykey)}
+                        if(props.editbodykey){
+                            this.Storages.Set(uid,'editbodykey',props.editbodykey)
+                        }
+
+                        if(props.removebodykey){
+                           await BodyKey.Model.delete(this.Storages.Get(uid,'editbodykey'))
+                           this.Storages.Delete(uid,'editbodykey')
+                        }
+
+                        if(props.changebodykey){
+                            this.WaitInput(uid,{props : {inputchangebodykey :  this.Storages.Get(uid,'editbodykey')}})
+                        }
 
                         this.Text(uid,' ')
                         this.Text(uid,`${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`)
@@ -374,13 +391,32 @@ class FastHTTP extends SyAPP.Func() {
                                 if(keys.length){this.Button(uid,this.TextColor.white('{'))}
                                 keys.forEach((e,i) => {
                                     if(i == keys.length-1){
-                                        this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}`,{props : {removebodykey : e._id}})
+                                        if(this.Storages.Has(uid,'editbodykey') && this.Storages.Get(uid,'editbodykey') == e._id){
+                                            this.Button(uid,this.TextColor.bgRed(`${e.Key} : ${e.Value}`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                        } else {
+                                            this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}`,{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                        }
+                                        
                                     } else {
-                                        this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}${this.TextColor.white(',')}`,{props : {removebodykey : e._id}})
+                                        if(this.Storages.Has(uid,'editbodykey') && this.Storages.Get(uid,'editbodykey') == e._id){
+                                            this.Button(uid,this.TextColor.bgRed(`${e.Key} : ${e.Value},`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                        } else {
+                                            this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}${this.TextColor.white(',')}`,{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                        }
                                     }
-                                    
+                                   
                                 })
                                 if(keys.length){this.Button(uid,this.TextColor.white('}'))}
+                                if(this.Storages.Has(uid,'editbodykey')){
+
+                                    this.Button(uid,' ')
+                                    this.Buttons(uid,[
+                                     {name : 'Edit',props : {changebodykey :  this.Storages.Get(uid,'editbodykey')}},
+                                     {name : 'Remove',props : {removebodykey : this.Storages.Get(uid,'editbodykey')}}
+                                    ])
+                                    this.Button(uid,' ')
+
+                                 }
                                 this.Button(uid,' ')
                             this.Button(uid,`+ New ${this.TextColor.gold('key:value')}`,{props : {newkeyvalue : true}})
                         },{up_buttontext : 'Edit body',down_buttontext : 'Edit body'})
