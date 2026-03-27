@@ -233,6 +233,21 @@ class FastHTTP extends SyAPP.Func() {
 
                 this.Text(uid,'FastHTTP')
 
+                if(props.requestcreatebody){
+                    let keys = await BodyKey.Model.find()
+                    for(const key of props.requestcreatebody){
+                        let have = false
+                        keys.forEach(e => {
+                            if(e.Key == key && e.RouteID == props.crouteid){
+                                have = true
+                            }
+                        })
+                        if(!have){
+                            await BodyKey.Model.create({RouteID : props.crouteid,Key : key,Value : 'blank value'})
+                        }
+                    }
+                }
+
                 await this.Page(uid,'',async () => {
 
                     if(props.editroute){this.Storages.Set(uid,'editroute',props.editroute)}
@@ -324,8 +339,10 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
                                 if(result.statusCode){
+                                    this.Storages.Set(uid,'request_data_routeid',route._id)
                                     this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
+                                       
                                         this.Storages.Set(uid,'request_data',result.data)
                                     }
                                     
@@ -341,6 +358,7 @@ class FastHTTP extends SyAPP.Func() {
                                     })
                                 let result = await HTTPClient.get(route.Url).catch(e =>{return e})
                                 if(result.statusCode){
+                                    this.Storages.Set(uid,'request_data_routeid',route._id)
                                     this.Storages.Set(uid,'request_data_status',result.statusCode)
                                     if(typeof result.data == 'object'){
                                         this.Storages.Set(uid,'request_data',result.data)
@@ -359,17 +377,24 @@ class FastHTTP extends SyAPP.Func() {
                             this.Text(uid,' ')
                             this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
                             let addroutes = false
+                            let addbody = false
                             if(this.Storages.Get(uid,'request_data').error && this.Storages.Get(uid,'request_data').error == 'Route not found'){
                                 if(this.Storages.Get(uid,'request_data').available && this.Storages.Get(uid,'request_data').available.length > 0){
                                     addroutes = true
                                 }
                             }
+                            
+                                if(this.Storages.Get(uid,'request_data').missingKeys && this.Storages.Get(uid,'request_data').missingKeys.length > 0){
+                                    addbody = true
+                                }
+                            
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
-                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : [])
+                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
+                            ...(addbody ? [{name : this.TextColor.gold('Create Body'),props : {crouteid : route._id,requestcreatebody : this.Storages.Get(uid,'request_data').missingKeys}}] : [])
                             ])
                             this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
 
@@ -472,6 +497,7 @@ class FastHTTP extends SyAPP.Func() {
                                 let result = await HTTPClient.post(route.Url,body).catch(e =>{return e})
                                 if(result.statusCode){
                                     this.Storages.Set(uid,'request_data_status',result.statusCode)
+                                    this.Storages.Set(uid,'request_data_routeid',route._id)
                                     if(typeof result.data == 'object'){
                                         this.Storages.Set(uid,'request_data',result.data)
                                     }
@@ -489,7 +515,9 @@ class FastHTTP extends SyAPP.Func() {
                                 let result = await HTTPClient.get(route.Url).catch(e =>{return e})
                                 if(result.statusCode){
                                     this.Storages.Set(uid,'request_data_status',result.statusCode)
+                                    this.Storages.Set(uid,'request_data_routeid',route._id)
                                     if(typeof result.data == 'object'){
+                                       
                                         this.Storages.Set(uid,'request_data',result.data)
                                     }
                                 } else {
@@ -518,17 +546,24 @@ class FastHTTP extends SyAPP.Func() {
                         if(this.Storages.Has(uid,'request_data') || this.Storages.Has(uid,'request_data_status')){
                             this.Text(uid,this.TextColor.red(`―――――――――――――――― ${this.TextColor.white('Status : ')}${formatStatusWithColor(this.Storages.Get(uid,'request_data_status'))}${this.TextColor.red(' ――――――――――――――――')}`))
                             let addroutes = false
+                            let addbody = false
                             if(this.Storages.Get(uid,'request_data').error && this.Storages.Get(uid,'request_data').error == 'Route not found'){
                                 if(this.Storages.Get(uid,'request_data').available && this.Storages.Get(uid,'request_data').available.length > 0){
                                     addroutes = true
                                 }
                             }
+
+                            if(this.Storages.Get(uid,'request_data').missingKeys && this.Storages.Get(uid,'request_data').missingKeys.length > 0){
+                                addbody = true
+                            }
+
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
-                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : [])
+                            ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
+                            ...(addbody ? [{name : this.TextColor.gold('Create Body'),props : {crouteid : this.Storages.Get(uid,'request_data_routeid'),requestcreatebody : this.Storages.Get(uid,'request_data').missingKeys}}] : [])
                             ])
                             this.Button(uid,this.TextColor.red('――――――――――――――――――――――――――――――――――――――――――――――'))
 
