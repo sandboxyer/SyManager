@@ -38,7 +38,7 @@ class JS_SyDB {
     static THREAD_POOL_WORKER_COUNT = 16;
     static THREAD_POOL_QUEUE_CAPACITY = 1000;
     static FILE_CONNECTION_POOL_SIZE = 50;
-    static RATE_LIMIT_MAX_REQUESTS = 100;
+    static RATE_LIMIT_MAX_REQUESTS = 1000000
     static RATE_LIMIT_WINDOW_SECONDS = 60;
 
     // Correct file header size (from C struct with alignment)
@@ -475,24 +475,24 @@ class JS_SyDB {
         if (!rateLimiter || !clientIpAddress) {
             return true;
         }
-
+    
         if (clientIpAddress === "127.0.0.1" ||
             clientIpAddress === "::1" ||
             clientIpAddress === "localhost") {
             return true;
         }
-
+    
         while (rateLimiter.rateLimitMutex) {
             await new Promise(resolve => setTimeout(resolve, 1));
         }
         rateLimiter.rateLimitMutex = true;
-
+    
         try {
             const currentTime = Math.floor(Date.now() / 1000);
             let requestAllowed = true;
-
+    
             let clientEntry = rateLimiter.rateLimitEntries.get(clientIpAddress);
-
+    
             if (!clientEntry) {
                 clientEntry = {
                     clientIpAddress: clientIpAddress,
@@ -503,14 +503,16 @@ class JS_SyDB {
                 rateLimiter.rateLimitEntries.set(clientIpAddress, clientEntry);
                 requestAllowed = true;
             } else {
-                const testingLimit = 1000;
-
+                // Use the class constant properly
+                const maxRequests = JS_SyDB.RATE_LIMIT_MAX_REQUESTS;
+                
                 if (currentTime - clientEntry.rateLimitWindowStart >= JS_SyDB.RATE_LIMIT_WINDOW_SECONDS) {
+                    // Reset the counter for new window
                     clientEntry.requestCount = 1;
                     clientEntry.rateLimitWindowStart = currentTime;
                     requestAllowed = true;
                 } else {
-                    if (clientEntry.requestCount >= testingLimit) {
+                    if (clientEntry.requestCount >= maxRequests) {
                         requestAllowed = false;
                     } else {
                         clientEntry.requestCount++;
@@ -519,7 +521,7 @@ class JS_SyDB {
                 }
                 clientEntry.lastRequestTime = currentTime;
             }
-
+    
             return requestAllowed;
         } finally {
             rateLimiter.rateLimitMutex = false;
@@ -1139,7 +1141,7 @@ class JS_SyDB {
 
     parseSecureFieldTypeFromString(typeString) {
         if (!typeString) return JS_SyDB.FIELD_TYPE.NULL;
-
+    
         const typeMap = {
             'string': JS_SyDB.FIELD_TYPE.STRING,
             'int': JS_SyDB.FIELD_TYPE.INTEGER,
@@ -1150,23 +1152,30 @@ class JS_SyDB {
             'array': JS_SyDB.FIELD_TYPE.ARRAY,
             'object': JS_SyDB.FIELD_TYPE.OBJECT
         };
-
-        return typeMap[typeString.toLowerCase()] || JS_SyDB.FIELD_TYPE.NULL;
+    
+        const lowerType = typeString.toLowerCase().trim();
+        const mappedType = typeMap[lowerType];
+        
+        if (mappedType === undefined) {
+            return JS_SyDB.FIELD_TYPE.NULL;
+        }
+        
+        return mappedType;
     }
 
     convertSecureFieldTypeToString(fieldType) {
-        const reverseMap = {
-            [JS_SyDB.FIELD_TYPE.STRING]: 'string',
-            [JS_SyDB.FIELD_TYPE.INTEGER]: 'int',
-            [JS_SyDB.FIELD_TYPE.FLOAT]: 'float',
-            [JS_SyDB.FIELD_TYPE.BOOLEAN]: 'bool',
-            [JS_SyDB.FIELD_TYPE.ARRAY]: 'array',
-            [JS_SyDB.FIELD_TYPE.OBJECT]: 'object',
-            [JS_SyDB.FIELD_TYPE.NULL]: 'null'
-        };
+    const reverseMap = {
+        [JS_SyDB.FIELD_TYPE.STRING]: 'string',
+        [JS_SyDB.FIELD_TYPE.INTEGER]: 'int',
+        [JS_SyDB.FIELD_TYPE.FLOAT]: 'float',
+        [JS_SyDB.FIELD_TYPE.BOOLEAN]: 'bool',
+        [JS_SyDB.FIELD_TYPE.ARRAY]: 'array',
+        [JS_SyDB.FIELD_TYPE.OBJECT]: 'object',
+        [JS_SyDB.FIELD_TYPE.NULL]: 'null'
+    };
 
-        return reverseMap[fieldType] || 'null';
-    }
+    return reverseMap[fieldType] || 'null';
+}
 
     async loadSecureSchemaFromFile(databaseName, collectionName, fields, fieldCount) {
         if (!this.validateDatabaseName(databaseName) || !this.validateCollectionName(collectionName)) {
