@@ -2541,6 +2541,47 @@ class SyDB {
    /** @private */
    static #serverCheckInterval = null;
 
+   /** @private */
+   static #defaultStartType = 'c'; // Can be 'c' or 'nodejs'
+
+   // Add these to the SyDB class (after the static properties)
+
+/**
+ * Set base URL (allows dynamic port configuration)
+ * @static
+ * @param {string} url
+ */
+static set baseUrl(url) {
+    this.#baseUrl = url;
+}
+
+/**
+ * Get base URL
+ * @static
+ * @returns {string}
+ */
+static get baseUrl() {
+    return this.#baseUrl;
+}
+
+/**
+ * Set default start type
+ * @static
+ * @param {string} type
+ */
+static set defaultStartType(type) {
+    this.#defaultStartType = type;
+}
+
+/**
+ * Get default start type
+ * @static
+ * @returns {string}
+ */
+static get defaultStartType() {
+    return this.#defaultStartType;
+}
+
    // ============================================================================
    // SERVER MANAGEMENT (FIXED - CHECKS IF SERVER IS ALREADY RUNNING)
    // ============================================================================
@@ -2600,87 +2641,110 @@ class SyDB {
    }
 
    /**
-    * Start the SYDB server (C or JS fallback) - ONLY STARTS IF NOT ALREADY RUNNING
-    * @static
-    * @async
-    * @returns {Promise<boolean>} True if server started successfully
-    */
-   static async Start() {
-       // First check if server is already running
-       const isRunning = await this.#isServerActuallyRunning();
-       if (isRunning) {
-           this.#serverStarted = true;
-           this.#serverStarting = false;
-           return true;
-       }
+ * Start the SYDB server (C or JS fallback) - ONLY STARTS IF NOT ALREADY RUNNING
+ * @static
+ * @async
+ * @param {boolean} forceNodeJS - Force using NodeJS version instead of C
+ * @returns {Promise<boolean>} True if server started successfully
+ */
+static async Start(forceNodeJS = false) {
+    // First check if server is already running
+    const isRunning = await this.#isServerActuallyRunning();
+    if (isRunning) {
+        this.#serverStarted = true;
+        this.#serverStarting = false;
+        return true;
+    }
 
-       // If server is already started in our state, return true
-       if (this.#serverStarted) return true;
-       
-       // If server is in the process of starting, wait for it
-       if (this.#serverStarting) {
-           if (this.#startPromise) {
-               await this.#startPromise;
-           } else {
-               await new Promise(resolve => setTimeout(resolve, 1000));
-           }
-           return this.#serverStarted;
-       }
+    // If server is already started in our state, return true
+    if (this.#serverStarted) return true;
+    
+    // If server is in the process of starting, wait for it
+    if (this.#serverStarting) {
+        if (this.#startPromise) {
+            await this.#startPromise;
+        } else {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        return this.#serverStarted;
+    }
 
-       // Mark as starting and create a promise for this start attempt
-       this.#serverStarting = true;
-       this.#startPromise = this.#startServer();
-       
-       // Wait for the server to start
-       return await this.#startPromise;
-   }
+    // Mark as starting and create a promise for this start attempt
+    this.#serverStarting = true;
+    this.#startPromise = this.#startServer(forceNodeJS);
+    
+    // Wait for the server to start
+    return await this.#startPromise;
+}
 
    /**
-    * Internal server start logic
-    * @private
-    * @static
-    * @async
-    * @returns {Promise<boolean>}
-    */
-   static async #startServer() {
-       try {
-           createCFileFromString(code, './test.c');
-           let c_process = await SyPM.run(`${C_Code}
-               console.log("Starting SYDB HTTP Server...");
-               console.log(await C.run('./test.c', {args : ['--server']}));
-           `, {workingDir : process.cwd(),name : 'sydb_c'});
-               
-           await new Promise(resolve => setTimeout(resolve, 3000));
+ * Internal server start logic
+ * @private
+ * @static
+ * @async
+ * @param {boolean} forceNodeJS - Force using NodeJS version instead of C
+ * @returns {Promise<boolean>}
+ */
+static async #startServer(forceNodeJS = false) {
+    try {
+        // Determine which version to start
+        const useNodeJS = forceNodeJS || (this.#defaultStartType === 'nodejs');
+        
+        if (!useNodeJS) {
+            // Try C version first
+            createCFileFromString(code, './test.c');
+            let c_process = await SyPM.run(`${C_Code}
+                console.log("Starting SYDB HTTP Server...");
+                console.log(await C.run('./test.c', {args : ['--server']}));
+            `, {workingDir : process.cwd(),name : 'sydb_c'});
+                
+            await new Promise(resolve => setTimeout(resolve, 3000));
 
-           if (!SyPM.isAlive(c_process.pid)) {
-               SyPM.cleanup();
-               console.log('SyDB C server failed to start, fallback to JS_SyDB...');
+            if (!SyPM.isAlive(c_process.pid)) {
+                SyPM.cleanup();
+                console.log('SyDB C server failed to start, fallback to JS_SyDB...');
 
-               await SyPM.run(`${js_sydb_raw}
-                   console.log("Starting SYDB JS HTTP Server...");
-                   let db = new JS_SyDB();
-                   db.httpServerStart(8080);
-               `, {workingDir : process.cwd(),name : 'sydb_js'});
+                await SyPM.run(`${js_sydb_raw}
+                    console.log("Starting SYDB JS HTTP Server...");
+                    let db = new JS_SyDB();
+                    db.httpServerStart(8080);
+                `, {workingDir : process.cwd(),name : 'sydb_js'});
 
-               await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 1000));
 
-               this.#serverStarted = true;
-               this.#serverStarting = false;
-               console.log('SYDB JS Server started successfully');
-               return true;
-           } else {
-               this.#serverStarted = true;
-               this.#serverStarting = false;
-               console.log('SYDB C Server started successfully');
-               return true;
-           }
-       } catch (error) {
-           this.#serverStarting = false;
-           this.#startPromise = null;
-           console.error('Failed to start SYDB Server:', error.message);
-           return false;
-       }
-   }
+                this.#serverStarted = true;
+                this.#serverStarting = false;
+                console.log('SYDB JS Server started successfully');
+                return true;
+            } else {
+                this.#serverStarted = true;
+                this.#serverStarting = false;
+                console.log('SYDB C Server started successfully');
+                return true;
+            }
+        } else {
+            // Directly start NodeJS version
+            console.log('Starting SYDB JS HTTP Server directly...');
+            await SyPM.run(`${js_sydb_raw}
+                console.log("Starting SYDB JS HTTP Server...");
+                let db = new JS_SyDB();
+                db.httpServerStart(8080);
+            `, {workingDir : process.cwd(),name : 'sydb_js'});
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            this.#serverStarted = true;
+            this.#serverStarting = false;
+            console.log('SYDB JS Server started successfully');
+            return true;
+        }
+    } catch (error) {
+        this.#serverStarting = false;
+        this.#startPromise = null;
+        console.error('Failed to start SYDB Server:', error.message);
+        return false;
+    }
+}
 
    /**
     * Stop the SYDB server
@@ -3769,11 +3833,11 @@ class Model {
 */
 class SyDBCLI {
    /**
-    * Print usage information
-    * @static
-    */
-   static printUsage() {
-       console.log(`
+ * Print usage information
+ * @static
+ */
+static printUsage() {
+    console.log(`
 Usage:
  sydb create <database_name>
  sydb create <database_name> <collection_name> --schema --<field>-<type>[-req][-idx] ...
@@ -3785,7 +3849,8 @@ Usage:
  sydb list
  sydb list <database_name>
  sydb list <database_name> <collection_name>
- sydb --server [port]          # Start HTTP server
+ sydb --server [port]          # Start HTTP server (non-blocking)
+ sydb --server --nodejs [port] # Start HTTP server using NodeJS version directly
  sydb --server --verbose       # Start HTTP server with extreme logging
  sydb --routes                 # Show all HTTP API routes and schemas
 
@@ -3794,8 +3859,10 @@ Add -req for required fields
 Add -idx for indexed fields
 Query format: field:value,field2:value2
 Server mode: Starts HTTP server on specified port (default: 8080)
+The --server command starts the server in background and immediately returns to terminal
+Use --nodejs flag to skip C version and use NodeJS version directly
 `);
-   }
+}
 
    /**
     * Parse field specifications
@@ -4153,51 +4220,84 @@ Server mode: Starts HTTP server on specified port (default: 8080)
        }
    }
 
-   /**
-    * Handle server command
-    * @private
-    * @static
-    * @async
-    * @param {Array} args
-    */
-   static async #handleServer(args) {
-       const verbose = args.includes('--verbose');
-       let port = 8080;
-       
-       for (let i = 2; i < args.length; i++) {
-           if (args[i] === '--server' && i + 1 < args.length && !args[i + 1].startsWith('--')) {
-               port = parseInt(args[i + 1]);
-               break;
-           }
-       }
-       
-       console.log('Starting SYDB HTTP Server...');
-       
-       try {
-           const result = await SyDB.Start();
-           if (result) {
-               console.log('SYDB Server started successfully');
-               if (verbose) console.log('Verbose logging enabled');
-               console.log(`Server running on port ${port}`);
-               console.log('Press Ctrl+C to stop the server');
-               
-               process.on('SIGINT', async () => {
-                   console.log('\nStopping server...');
-                   await SyDB.Stop();
-                   process.exit(0);
-               });
-               
-               // Keep the process alive only in server mode
-               setInterval(() => {}, 1000);
-           } else {
-               console.error('Failed to start server');
-               process.exit(1);
-           }
-       } catch (error) {
-           console.error('Failed to start SYDB Server:', error.message);
-           process.exit(1);
-       }
-   }
+  /**
+ * Handle server command - works exactly like list command but without executing list operations
+ * @private
+ * @static
+ * @async
+ * @param {Array} args
+ */
+static async #handleServer(args) {
+    const verbose = args.includes('--verbose');
+    const forceNodeJS = args.includes('--nodejs') || (SyDB.defaultStartType == 'nodejs') ? true : false 
+    let port = 8080;
+    
+    // Parse port if specified
+    for (let i = 2; i < args.length; i++) {
+        if (args[i] === '--server' && i + 1 < args.length && !args[i + 1].startsWith('--')) {
+            port = parseInt(args[i + 1]);
+            if (isNaN(port)) {
+                console.error('Error: Invalid port number');
+                process.exit(1);
+            }
+            break;
+        }
+    }
+    
+    console.log('Starting SYDB HTTP Server...');
+    
+    try {
+        // Set the base URL with the specified port
+        SyDB.baseUrl = `http://localhost:${port}`;
+        
+        // Set the default start type based on forceNodeJS flag
+        if (forceNodeJS) {
+            SyDB.defaultStartType = 'nodejs';
+        } else {
+            SyDB.defaultStartType = 'c';
+        }
+        
+        // Check if server is already running
+        const isRunning = await SyDB.isServerRunning();
+        
+        if (isRunning) {
+            console.log(`SYDB Server is already running on port ${port}`);
+            if (verbose) console.log('Verbose logging enabled');
+            process.exit(0);
+        }
+        
+        // Start the server exactly like list command does
+        // This will wait for the server to start before returning
+        const started = await SyDB.Start(forceNodeJS);
+        
+        if (started) {
+            console.log(`SYDB Server started successfully on port ${port}`);
+            if (verbose) console.log('Verbose logging enabled');
+            
+            // Wait a moment to ensure server is fully ready
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Verify server is actually running
+            const verifyRunning = await SyDB.isServerRunning();
+            if (verifyRunning) {
+                console.log(`Server is running and ready on port ${port}`);
+            } else {
+                console.error('Server started but not responding');
+                process.exit(1);
+            }
+        } else {
+            console.error('Failed to start server');
+            process.exit(1);
+        }
+        
+        // The process will naturally exit here since there are no more async operations
+        // Unlike list which would then execute find operations, we just exit
+        
+    } catch (error) {
+        console.error('Failed to start SYDB Server:', error.message);
+        process.exit(1);
+    }
+}
 
    /**
     * Handle routes command
