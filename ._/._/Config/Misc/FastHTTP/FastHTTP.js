@@ -638,8 +638,8 @@ class FastHTTP extends SyAPP.Func() {
                 await this.Page(uid,'settings',async () => {
 
                 if(props.inputValue){
-                    if(props.newvariablevalue){
-                        await Variable.Model.update(uid,{Value : props.inputValue})
+                    if(props.editnewvariablevalue){
+                        await Variable.Model.update(props.editnewvariablevalue,{Value : props.inputValue})
                     }
 
                     if(props.newvariablevalue){
@@ -653,7 +653,7 @@ class FastHTTP extends SyAPP.Func() {
                 }
 
                 if(props.editvariable){
-                    this.WaitInput(uid,{question : 'New Value : ',props : {page : 'settings',newvariablevalue : props.editvariable}})
+                    this.WaitInput(uid,{question : 'New Value : ',props : {page : 'settings',editnewvariablevalue : props.editvariable}})
                 }
 
                 if(props.removevariable){
@@ -677,7 +677,7 @@ class FastHTTP extends SyAPP.Func() {
                             ])
                         },{up_buttontext : `${variable.Key}:${variable.Value}`,down_buttontext : `${variable.Key}:${variable.Value}`})
                     }
-                    this.Button(uid,{name : '+ New',props : {newvariable : true}})
+                    this.Button(uid,{name : this.TextColor.green('+ New'),props : {newvariable : true}})
                   },{up_buttontext : 'Variables',down_buttontext : 'Variables'})
                   this.Button(uid,'Search APIs')
 
