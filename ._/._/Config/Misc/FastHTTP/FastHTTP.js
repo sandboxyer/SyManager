@@ -234,6 +234,7 @@ class FastHTTP extends SyAPP.Func() {
                 this.Text(uid,'FastHTTP')
 
                 if(props.requestcreatebody){
+                    let creation_count = 0
                     let keys = await BodyKey.Model.find()
                     for(const key of props.requestcreatebody){
                         let have = false
@@ -244,7 +245,15 @@ class FastHTTP extends SyAPP.Func() {
                         })
                         if(!have){
                             await BodyKey.Model.create({RouteID : props.crouteid,Key : key,Value : 'blank value'})
+                            creation_count++
                         }
+                    }
+                    if(creation_count > 0 ){
+                        this.Text(uid,' ')
+                        this.Text(uid,this.TextColor.green('Body Keys created !'))
+                    } else {
+                        this.Text(uid,' ')
+                        this.Text(uid,this.TextColor.red('Error or Keys exist'))
                     }
                 }
 
