@@ -5,6 +5,7 @@ import Route from './entities/Route.js'
 import Group from './entities/Group.js'
 import BodyKey from './entities/BodyKey.js'
 import Component from './entities/Component.js'
+import Variable from './entities/Variable.js'
 
 function parseHttpRequest(requestString) {
     const [method, route] = requestString.trim().split(' ');
@@ -636,8 +637,48 @@ class FastHTTP extends SyAPP.Func() {
 
                 await this.Page(uid,'settings',async () => {
 
+                if(props.inputValue){
+                    if(props.newvariablevalue){
+                        await Variable.Model.update(uid,{Value : props.inputValue})
+                    }
+
+                    if(props.newvariablevalue){
+                        this.WaitInput(uid,{question : 'Value : ',props : {page : 'settings',newvariablefinish : true,keyvalue : props.inputValue}})
+                    }
+
+                    if(props.newvariablefinish){
+                        await Variable.Model.create({Key : props.keyvalue,Value : props.inputValue})
+                    }
+    
+                }
+
+                if(props.editvariable){
+                    this.WaitInput(uid,{question : 'New Value : ',props : {page : 'settings',newvariablevalue : props.editvariable}})
+                }
+
+                if(props.removevariable){
+                    await Variable.Model.delete(props.removevariable)
+                }
+
+                if(props.newvariable){
+                    this.WaitInput(uid,{question : 'Key : ',props : {page : 'settings',newvariablevalue : true}})
+                }
+
+                
+
                   this.Button(uid,'Auto save')
-                  this.Button(uid,'Variables')
+                  await this.DropDown(uid,'variables',async () => {
+                    let variables = await Variable.Model.find()
+                    for(const variable of variables){
+                        await this.DropDown(uid,variable._id,async () => {
+                            this.Buttons(uid,[
+                                {name : 'Edit',props : {editvariable : variable._id}},
+                                {name : 'Remove',props : {removevariable : variable._id}}
+                            ])
+                        },{up_buttontext : `${variable.Key}:${variable.Value}`,down_buttontext : `${variable.Key}:${variable.Value}`})
+                    }
+                    this.Button(uid,{name : '+ New',props : {newvariable : true}})
+                  },{up_buttontext : 'Variables',down_buttontext : 'Variables'})
                   this.Button(uid,'Search APIs')
 
 
