@@ -258,6 +258,48 @@ class FastHTTP extends SyAPP.Func() {
                     }
                 }
 
+                if(props.runroute){
+                    this.Storages.Delete(uid,'reqsetvariable')
+                }
+
+                if(props.reqsetvariablecreate){
+                    let variables = await Variable.Model.find()
+                    let exist = false
+                    variables.forEach(e => {
+                        if(e.Key == props.reqsetvariablecreate.Key){
+                            exist = true
+                        }
+                    })
+                    if(!exist){
+                        await Variable.Model.create(props.reqsetvariablecreate)
+                        this.Storages.Delete(uid,'reqsetvariable')
+                        this.Text(uid,this.TextColor.green('Variable created !'))
+                    } else {
+                        this.Text(uid,this.TextColor.red('Variable exist !'))
+                    }
+                }
+
+                if(props.reqsetvariable || this.Storages.Get(uid,'reqsetvariable')){
+                    this.Storages.Set(uid,'reqsetvariable',true)
+                    let data = this.Storages.Get(uid,'request_data')
+                    this.Button(uid,this.TextColor.orange('Select the data : '))
+                    for(const key of Object.keys(data)){
+
+                        await this.DropDown(uid,`${key}:${data[key]}`,async () => {
+                            
+                            this.Button(uid,{name : `Use ${this.TextColor.green(key)} ${this.TextColor.pink('name')}`,props : {reqsetvariablecreate : {Key : key,Value : data[key]}}})
+                            this.Button(uid,{name : 'Custom Name'})
+                            this.Button(uid,{name : 'Select Existing'})
+
+                        },{up_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`,down_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`})
+                    }
+                 
+                
+                    this.Button(uid,' ')
+                    
+                }
+
+
                 await this.Page(uid,'',async () => {
 
                     if(props.editroute){this.Storages.Set(uid,'editroute',props.editroute)}
@@ -401,6 +443,7 @@ class FastHTTP extends SyAPP.Func() {
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
+                            {name : 'Set Variable',props : {reqsetvariable : true}},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
                             ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
@@ -570,6 +613,7 @@ class FastHTTP extends SyAPP.Func() {
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
+                            {name : 'Set Variable',props : {reqsetvariable : true}},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
                             ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
