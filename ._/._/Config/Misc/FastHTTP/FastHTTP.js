@@ -5,6 +5,7 @@ import Route from './entities/Route.js'
 import Group from './entities/Group.js'
 import BodyKey from './entities/BodyKey.js'
 import Component from './entities/Component.js'
+import Variable from './entities/Variable.js'
 
 function parseHttpRequest(requestString) {
     const [method, route] = requestString.trim().split(' ');
@@ -257,7 +258,55 @@ class FastHTTP extends SyAPP.Func() {
                     }
                 }
 
+                
                 await this.Page(uid,'',async () => {
+
+                    if(props.resetreqdata){
+                        this.Storages.Delete(uid,'request_data')
+                        this.Storages.Delete(uid,'request_data_status')
+                        this.Storages.Delete(uid,'reqsetvariable')
+                    }
+
+                    if(props.runroute){
+                        this.Storages.Delete(uid,'reqsetvariable')
+                    }
+    
+                    if(props.reqsetvariablecreate){
+                        let variables = await Variable.Model.find()
+                        let exist = false
+                        variables.forEach(e => {
+                            if(e.Key == props.reqsetvariablecreate.Key){
+                                exist = true
+                            }
+                        })
+                        if(!exist){
+                            await Variable.Model.create(props.reqsetvariablecreate)
+                            this.Storages.Delete(uid,'reqsetvariable')
+                            this.Text(uid,this.TextColor.green('Variable created !'))
+                        } else {
+                            this.Text(uid,this.TextColor.red('Variable exist !'))
+                        }
+                    }
+    
+                    if(props.reqsetvariable || this.Storages.Get(uid,'reqsetvariable')){
+                        this.Storages.Set(uid,'reqsetvariable',true)
+                        let data = this.Storages.Get(uid,'request_data')
+                        this.Button(uid,this.TextColor.orange('Select the data : '))
+                        for(const key of Object.keys(data)){
+    
+                            await this.DropDown(uid,`${key}:${data[key]}`,async () => {
+                                
+                                this.Button(uid,{name : `Use ${this.TextColor.green(key)} ${this.TextColor.pink('name')}`,props : {reqsetvariablecreate : {Key : key,Value : data[key]}}})
+                                this.Button(uid,{name : 'Custom Name'})
+                                this.Button(uid,{name : 'Select Existing'})
+    
+                            },{up_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`,down_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`})
+                        }
+                     
+                    
+                        this.Button(uid,' ')
+                        
+                    }
 
                     if(props.editroute){this.Storages.Set(uid,'editroute',props.editroute)}
 
@@ -320,10 +369,6 @@ class FastHTTP extends SyAPP.Func() {
                         this.Text(uid,`${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`)
                         
 
-                        if(props.resetreqdata){
-                            this.Storages.Delete(uid,'request_data')
-                            this.Storages.Delete(uid,'request_data_status')
-                        }
 
                         if(props.requestaddroutes){
                             let group = await Group.New()
@@ -400,6 +445,7 @@ class FastHTTP extends SyAPP.Func() {
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
+                            {name : 'Set Variable',props : {reqsetvariable : true}},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
                             ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
@@ -539,10 +585,7 @@ class FastHTTP extends SyAPP.Func() {
                             }
                         }
 
-                        if(props.resetreqdata){
-                            this.Storages.Delete(uid,'request_data')
-                            this.Storages.Delete(uid,'request_data_status')
-                        }
+                        
 
                         if(props.requestaddroutes){
                             let group = await Group.New()
@@ -569,6 +612,7 @@ class FastHTTP extends SyAPP.Func() {
                             formatData(this.Storages.Get(uid,'request_data'),uid)
                             this.Buttons(uid,[
                             {name : 'Save'},
+                            {name : 'Set Variable',props : {reqsetvariable : true}},
                             {name : 'Reset',props : {resetreqdata : true}},
                             {name : 'Navigate'},
                             ...(addroutes ? [{name : this.TextColor.gold('Add Routes'),props : {requestaddroutes : true}}] : []),
@@ -636,8 +680,48 @@ class FastHTTP extends SyAPP.Func() {
 
                 await this.Page(uid,'settings',async () => {
 
+                if(props.inputValue){
+                    if(props.editnewvariablevalue){
+                        await Variable.Model.update(props.editnewvariablevalue,{Value : props.inputValue})
+                    }
+
+                    if(props.newvariablevalue){
+                        this.WaitInput(uid,{question : 'Value : ',props : {page : 'settings',newvariablefinish : true,keyvalue : props.inputValue}})
+                    }
+
+                    if(props.newvariablefinish){
+                        await Variable.Model.create({Key : props.keyvalue,Value : props.inputValue})
+                    }
+    
+                }
+
+                if(props.editvariable){
+                    this.WaitInput(uid,{question : 'New Value : ',props : {page : 'settings',editnewvariablevalue : props.editvariable}})
+                }
+
+                if(props.removevariable){
+                    await Variable.Model.delete(props.removevariable)
+                }
+
+                if(props.newvariable){
+                    this.WaitInput(uid,{question : 'Key : ',props : {page : 'settings',newvariablevalue : true}})
+                }
+
+                
+
                   this.Button(uid,'Auto save')
-                  this.Button(uid,'Variables')
+                  await this.DropDown(uid,'variables',async () => {
+                    let variables = await Variable.Model.find()
+                    for(const variable of variables){
+                        await this.DropDown(uid,variable._id,async () => {
+                            this.Buttons(uid,[
+                                {name : 'Edit',props : {editvariable : variable._id}},
+                                {name : 'Remove',props : {removevariable : variable._id}}
+                            ])
+                        },{up_buttontext : `${variable.Key}:${variable.Value}`,down_buttontext : `${variable.Key}:${variable.Value}`})
+                    }
+                    this.Button(uid,{name : this.TextColor.green('+ New'),props : {newvariable : true}})
+                  },{up_buttontext : 'Variables',down_buttontext : 'Variables'})
                   this.Button(uid,'Search APIs')
 
 
