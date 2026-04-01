@@ -261,6 +261,12 @@ class FastHTTP extends SyAPP.Func() {
                 
                 await this.Page(uid,'',async () => {
 
+                    if(props.resetreqdata){
+                        this.Storages.Delete(uid,'request_data')
+                        this.Storages.Delete(uid,'request_data_status')
+                        this.Storages.Delete(uid,'reqsetvariable')
+                    }
+
                     if(props.runroute){
                         this.Storages.Delete(uid,'reqsetvariable')
                     }
@@ -363,10 +369,6 @@ class FastHTTP extends SyAPP.Func() {
                         this.Text(uid,`${route.Name} ${this.TextColor.white('|')} ${HTTPClient.colorHttpMethod(route.Method)} | ${this.TextColor.cyan(route.Url)}`)
                         
 
-                        if(props.resetreqdata){
-                            this.Storages.Delete(uid,'request_data')
-                            this.Storages.Delete(uid,'request_data_status')
-                        }
 
                         if(props.requestaddroutes){
                             let group = await Group.New()
@@ -583,10 +585,7 @@ class FastHTTP extends SyAPP.Func() {
                             }
                         }
 
-                        if(props.resetreqdata){
-                            this.Storages.Delete(uid,'request_data')
-                            this.Storages.Delete(uid,'request_data_status')
-                        }
+                        
 
                         if(props.requestaddroutes){
                             let group = await Group.New()
