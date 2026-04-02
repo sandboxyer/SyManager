@@ -353,6 +353,7 @@ class FastHTTP extends SyAPP.Func() {
                         if(props.editurl){ this.WaitInput(uid,{props : {newurl : true}})  }
 
                         if(props.editbodykey){
+                            this.Storages.Delete(uid,'variablebodykey')
                             this.Storages.Set(uid,'editbodykey',props.editbodykey)
                         }
 
@@ -363,6 +364,16 @@ class FastHTTP extends SyAPP.Func() {
 
                         if(props.changebodykey){
                             this.WaitInput(uid,{props : {inputchangebodykey :  this.Storages.Get(uid,'editbodykey')}})
+                        }
+
+                        if(props.variablebodykey){
+                            this.Storages.Set(uid,'variablebodykey',props.variablebodykey)
+                        }
+
+                        if(props.variabletobodykey){
+                            await BodyKey.Model.update(this.Storages.Get(uid,'variablebodykey'),{Value : props.variabletobodykey})
+                            this.Storages.Delete(uid,'variablebodykey')
+                            this.Storages.Delete(uid,'editbodykey')
                         }
 
                         this.Text(uid,' ')
@@ -472,14 +483,14 @@ class FastHTTP extends SyAPP.Func() {
                                 keys.forEach((e,i) => {
                                     if(i == keys.length-1){
                                         if(this.Storages.Has(uid,'editbodykey') && this.Storages.Get(uid,'editbodykey') == e._id){
-                                            this.Button(uid,this.TextColor.bgRed(`${e.Key} : ${e.Value}`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                            this.Button(uid,this.TextColor.bgBlue(`${e.Key} : '${e.Value}'`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
                                         } else {
                                             this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}`,{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
                                         }
                                         
                                     } else {
                                         if(this.Storages.Has(uid,'editbodykey') && this.Storages.Get(uid,'editbodykey') == e._id){
-                                            this.Button(uid,this.TextColor.bgRed(`${e.Key} : ${e.Value},`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
+                                            this.Button(uid,this.TextColor.bgBlue(`${e.Key} : '${e.Value}',`),{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
                                         } else {
                                             this.Button(uid,`${this.TextColor.white(e.Key)} : ${this.TextColor.gold(`'${e.Value}'`)}${this.TextColor.white(',')}`,{props : {editbodykey : e._id},jumpTo : keys.length-i+2})
                                         }
@@ -492,10 +503,17 @@ class FastHTTP extends SyAPP.Func() {
                                     this.Button(uid,' ')
                                     this.Buttons(uid,[
                                      {name : 'Edit',props : {changebodykey :  this.Storages.Get(uid,'editbodykey')}},
+                                     {name : 'Variable',props : {variablebodykey :  this.Storages.Get(uid,'editbodykey')}},
                                      {name : 'Remove',props : {removebodykey : this.Storages.Get(uid,'editbodykey')}}
                                     ])
                                     this.Button(uid,' ')
-
+                                    if(this.Storages.Has(uid,'variablebodykey')){
+                                        let variables = await Variable.Model.find()
+                                        this.Button(uid,this.TextColor.orange('Variable selection : '))
+                                        variables.forEach(e => {
+                                            this.Button(uid,`${this.TextColor.white(e.Key)}:${this.TextColor.yellow(e.Value)}`,{props : {variabletobodykey : e.Value}})
+                                        })
+                                    }
                                  }
                                 this.Button(uid,' ')
                             this.Button(uid,`+ New ${this.TextColor.gold('key:value')}`,{props : {newkeyvalue : true}})
