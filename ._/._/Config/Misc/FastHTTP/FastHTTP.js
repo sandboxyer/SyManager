@@ -287,6 +287,28 @@ class FastHTTP extends SyAPP.Func() {
                             this.Text(uid,this.TextColor.red('Variable exist !'))
                         }
                     }
+
+                    if(props.inputValue){
+                        if(props.reqsetvariable){
+                            let variables = await Variable.Model.find()
+                            let exist = false
+                            variables.forEach(e => {
+                                if(e.Key == props.inputValue){
+                                    exist = true
+                                }
+                            })
+                            if(!exist){
+                                await Variable.Model.create({Key : props.inputValue,Value : props.reqsetvariable})
+                                this.Text(uid,this.TextColor.green('Variable created !'))
+                            } else {
+                                this.Text(uid,this.TextColor.red('Variable exist !'))
+                            }
+                        }
+                    }
+
+                    if(props.reqsetvariablecustom){
+                        this.WaitInput(uid,{question : 'Variable name : ',props : {reqsetvariable : props.reqsetvariablecustom}})
+                    }
     
                     if(props.reqsetvariable || this.Storages.Get(uid,'reqsetvariable')){
                         this.Storages.Set(uid,'reqsetvariable',true)
@@ -297,7 +319,7 @@ class FastHTTP extends SyAPP.Func() {
                             await this.DropDown(uid,`${key}:${data[key]}`,async () => {
                                 
                                 this.Button(uid,{name : `Use ${this.TextColor.green(key)} ${this.TextColor.pink('name')}`,props : {reqsetvariablecreate : {Key : key,Value : data[key]}}})
-                                this.Button(uid,{name : 'Custom Name'})
+                                this.Button(uid,{name : 'Custom Name',props : {reqsetvariablecustom : data[key]}})
                                 this.Button(uid,{name : 'Select Existing'})
     
                             },{up_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`,down_buttontext : `${this.TextColor.white(key)}:${this.TextColor.yellow(data[key])}`})
