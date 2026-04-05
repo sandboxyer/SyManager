@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { promisify } from 'util';
+import { exec } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,7 @@ const readdir = promisify(fs.readdir);
 const stat = promisify(fs.stat);
 const readFile = promisify(fs.readFile);
 const access = promisify(fs.access);
+const execPromise = promisify(exec);
 
 // ANSI color codes for terminal output
 const colors = {
@@ -620,6 +622,159 @@ class BinaryAnalyzer extends BaseAnalyzer {
 }
 
 /**
+ * NEW: Analyzer for Git repositories to get contributors and commits
+ * This is a completely separate analyzer that won't affect existing functionality
+ */
+class GitAnalyzer extends BaseAnalyzer {
+  constructor() {
+    super();
+    this.name = 'Git Analyzer';
+    this.repositories = [];
+    this.gitDirs = new Set(); // Store unique .git directories found
+  }
+
+  async findGitRepositories(dir) {
+    const gitRepos = [];
+    
+    async function scan(currentPath) {
+      try {
+        const items = await readdir(currentPath);
+        
+        // Check if current directory has a .git folder
+        if (items.includes('.git')) {
+          const gitPath = path.join(currentPath, '.git');
+          const stats = await stat(gitPath);
+          if (stats.isDirectory()) {
+            gitRepos.push(currentPath);
+            return; // Don't go deeper into git repos
+          }
+        }
+        
+        // Continue scanning subdirectories (skip ignored dirs)
+        for (const item of items) {
+          if (IGNORE_DIRS.has(item)) {
+            continue;
+          }
+          
+          const fullPath = path.join(currentPath, item);
+          const stats = await stat(fullPath);
+          
+          if (stats.isDirectory() && !fullPath.includes('.git')) {
+            await scan(fullPath);
+          }
+        }
+      } catch (error) {
+        // Silently skip directories that can't be read
+      }
+    }
+    
+    await scan(dir);
+    return gitRepos;
+  }
+
+  async analyzeRepository(repoPath) {
+    try {
+      // Get total commit count
+      const { stdout: commitCountOutput } = await execPromise('git rev-list --all --count', {
+        cwd: repoPath,
+        encoding: 'utf8'
+      });
+      const totalCommits = parseInt(commitCountOutput.trim(), 10) || 0;
+      
+      // Get unique contributors (by email)
+      const { stdout: contributorsOutput } = await execPromise('git log --format="%ae" | sort -u | wc -l', {
+        cwd: repoPath,
+        shell: true,
+        encoding: 'utf8'
+      });
+      const uniqueContributors = parseInt(contributorsOutput.trim(), 10) || 0;
+      
+      // Get detailed contributor list with names and emails
+      const { stdout: contributorDetailsOutput } = await execPromise('git log --format="%an|%ae" | sort -u', {
+        cwd: repoPath,
+        shell: true,
+        encoding: 'utf8'
+      });
+      
+      const contributors = contributorDetailsOutput
+        .split('\n')
+        .filter(line => line.trim() && line.includes('|'))
+        .map(line => {
+          const [name, email] = line.split('|');
+          return { name: name.trim(), email: email.trim() };
+        });
+      
+      return {
+        path: repoPath,
+        name: path.basename(repoPath),
+        totalCommits,
+        uniqueContributors,
+        contributors,
+        success: true
+      };
+    } catch (error) {
+      // Git command failed - might not be a valid git repo or git not installed
+      return {
+        path: repoPath,
+        name: path.basename(repoPath),
+        totalCommits: 0,
+        uniqueContributors: 0,
+        contributors: [],
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async processFile(filePath, stats) {
+    // This analyzer doesn't process individual files
+    // It will be called separately
+  }
+
+  async scanDirectory(dir) {
+    const repositories = await this.findGitRepositories(dir);
+    
+    for (const repo of repositories) {
+      const analysis = await this.analyzeRepository(repo);
+      this.repositories.push(analysis);
+    }
+  }
+
+  getReport() {
+    const totalRepos = this.repositories.length;
+    const successfulRepos = this.repositories.filter(r => r.success).length;
+    const totalCommitsAcrossRepos = this.repositories.reduce((sum, repo) => sum + repo.totalCommits, 0);
+    const totalUniqueContributorsAcrossRepos = this.repositories.reduce((sum, repo) => sum + repo.uniqueContributors, 0);
+    
+    // Find repo with most contributors
+    const repoWithMostContributors = this.repositories.length > 0
+      ? this.repositories.reduce((max, repo) => repo.uniqueContributors > max.uniqueContributors ? repo : max, this.repositories[0])
+      : null;
+    
+    // Find repo with most commits
+    const repoWithMostCommits = this.repositories.length > 0
+      ? this.repositories.reduce((max, repo) => repo.totalCommits > max.totalCommits ? repo : max, this.repositories[0])
+      : null;
+    
+    return {
+      totalRepositories: totalRepos,
+      successfulRepositories: successfulRepos,
+      failedRepositories: totalRepos - successfulRepos,
+      totalCommits: totalCommitsAcrossRepos,
+      totalUniqueContributors: totalUniqueContributorsAcrossRepos,
+      repositories: this.repositories,
+      repoWithMostContributors: repoWithMostContributors,
+      repoWithMostCommits: repoWithMostCommits
+    };
+  }
+
+  reset() {
+    this.repositories = [];
+    this.gitDirs.clear();
+  }
+}
+
+/**
  * Main class to orchestrate file traversal and analyzers
  */
 class DirectoryAnalyzer {
@@ -710,6 +865,60 @@ function printKeyValue(label, value, color = colors.white, width1 = 20, width2 =
   const truncatedLabel = truncate(label, width1);
   const truncatedValue = truncate(value.toString(), width2);
   console.log(`  ${colors.dim}${truncatedLabel.padEnd(width1)}:${colors.reset} ${color}${truncatedValue.padEnd(width2)}${colors.reset}`);
+}
+
+/**
+ * NEW: Print Git analysis for single directory mode
+ */
+function printGitAnalysis(gitReport) {
+  if (!gitReport || gitReport.totalRepositories === 0) {
+    return;
+  }
+  
+  printHeader('🔀 GIT REPOSITORY ANALYSIS', colors.magenta);
+  
+  printKeyValue('Git repositories', gitReport.totalRepositories, colors.bright, 25, 15);
+  
+  if (gitReport.successfulRepositories > 0) {
+    printKeyValue('Total commits (all repos)', gitReport.totalCommits.toLocaleString(), colors.green, 25, 15);
+    printKeyValue('Unique contributors (all repos)', gitReport.totalUniqueContributors.toLocaleString(), colors.cyan, 25, 15);
+    
+    if (gitReport.repoWithMostContributors && gitReport.repoWithMostContributors.uniqueContributors > 0) {
+      console.log(`\n  ${colors.dim}Repository with most contributors:${colors.reset}`);
+      console.log(`    ${colors.yellow}📦 ${truncate(gitReport.repoWithMostContributors.name, 50)}${colors.reset}`);
+      console.log(`    ${colors.cyan}   👥 ${gitReport.repoWithMostContributors.uniqueContributors} unique contributors${colors.reset}`);
+      console.log(`    ${colors.green}   📝 ${gitReport.repoWithMostContributors.totalCommits.toLocaleString()} total commits${colors.reset}`);
+    }
+    
+    if (gitReport.repoWithMostCommits && gitReport.repoWithMostCommits !== gitReport.repoWithMostContributors) {
+      console.log(`\n  ${colors.dim}Repository with most commits:${colors.reset}`);
+      console.log(`    ${colors.yellow}📦 ${truncate(gitReport.repoWithMostCommits.name, 50)}${colors.reset}`);
+      console.log(`    ${colors.green}   📝 ${gitReport.repoWithMostCommits.totalCommits.toLocaleString()} total commits${colors.reset}`);
+      console.log(`    ${colors.cyan}   👥 ${gitReport.repoWithMostCommits.uniqueContributors} unique contributors${colors.reset}`);
+    }
+    
+    // List all repositories found
+    if (gitReport.repositories.length > 0) {
+      console.log(`\n  ${colors.dim}Repositories found:${colors.reset}`);
+      gitReport.repositories.slice(0, 5).forEach((repo, idx) => {
+        if (repo.success) {
+          const statusIcon = repo.uniqueContributors > 0 ? '✓' : '○';
+          console.log(`    ${colors.green}${statusIcon}${colors.reset} ${truncate(repo.name, 40)} - ${colors.cyan}${repo.uniqueContributors} contributors${colors.reset}, ${colors.green}${repo.totalCommits.toLocaleString()} commits${colors.reset}`);
+        } else {
+          console.log(`    ${colors.red}✗${colors.reset} ${truncate(repo.name, 40)} - ${colors.dim}Failed to analyze${colors.reset}`);
+        }
+      });
+      
+      if (gitReport.repositories.length > 5) {
+        console.log(`    ${colors.dim}... and ${gitReport.repositories.length - 5} more repositories${colors.reset}`);
+      }
+    }
+  } else {
+    console.log(`  ${colors.yellow}⚠ No valid Git repositories could be analyzed${colors.reset}`);
+    if (gitReport.failedRepositories > 0) {
+      console.log(`  ${colors.dim}Failed repositories: ${gitReport.failedRepositories}${colors.reset}`);
+    }
+  }
 }
 
 /**
@@ -832,6 +1041,65 @@ function printLanguagesComparison(directories, reportsByDir) {
   console.log(colors.dim + '└' + '─'.repeat(maxDirNameLength + 2) + '┴' + '─'.repeat((langWidth + 4) * dirCount - 1) + '┘' + colors.reset);
 }
 
+/**
+ * NEW: Print Git comparison for multi-directory mode
+ */
+function printGitComparison(directories, reportsByDir) {
+  const hasGitRepos = directories.some(dir => {
+    const gitReport = reportsByDir[dir]['Git Analyzer'];
+    return gitReport && gitReport.totalRepositories > 0;
+  });
+  
+  if (!hasGitRepos) return;
+  
+  console.log('\n' + colors.magenta + colors.bright + '🔀 GIT REPOSITORY COMPARISON' + colors.reset);
+  
+  const gitMetrics = [
+    { 
+      label: 'Git Repos', 
+      key: 'totalRepositories', 
+      winner: 'largest', 
+      getValue: (r) => r['Git Analyzer'].totalRepositories 
+    },
+    { 
+      label: 'Total Commits', 
+      key: 'totalCommits', 
+      winner: 'largest', 
+      getValue: (r) => r['Git Analyzer'].totalCommits?.toLocaleString() || '0' 
+    },
+    { 
+      label: 'Unique Contributors', 
+      key: 'totalUniqueContributors', 
+      winner: 'largest', 
+      getValue: (r) => r['Git Analyzer'].totalUniqueContributors?.toLocaleString() || '0' 
+    }
+  ];
+  
+  createTable(directories, gitMetrics, reportsByDir);
+  
+  // Show detailed repository info for each directory
+  console.log(`\n  ${colors.dim}Detailed repository information:${colors.reset}`);
+  directories.forEach(dir => {
+    const gitReport = reportsByDir[dir]['Git Analyzer'];
+    if (gitReport && gitReport.totalRepositories > 0 && gitReport.repositories.length > 0) {
+      const shortName = truncate(path.basename(dir), 40);
+      console.log(`\n    ${colors.yellow}📁 ${shortName}${colors.reset}`);
+      
+      gitReport.repositories.slice(0, 3).forEach(repo => {
+        if (repo.success) {
+          console.log(`      ${colors.green}└─${colors.reset} ${truncate(repo.name, 35)} - ${colors.cyan}${repo.uniqueContributors} contributors${colors.reset}, ${colors.green}${repo.totalCommits.toLocaleString()} commits${colors.reset}`);
+        } else {
+          console.log(`      ${colors.red}└─${colors.reset} ${truncate(repo.name, 35)} - ${colors.dim}Failed to analyze${colors.reset}`);
+        }
+      });
+      
+      if (gitReport.repositories.length > 3) {
+        console.log(`      ${colors.dim}   ... and ${gitReport.repositories.length - 3} more repositories${colors.reset}`);
+      }
+    }
+  });
+}
+
 function printWinnerPodium(winners) {
   const sortedWinners = Object.entries(winners)
     .sort(([,a], [,b]) => b - a)
@@ -885,6 +1153,10 @@ async function processSingleDirectory(targetDir) {
   analyzer.registerAnalyzer(new ArchiveAnalyzer());
   analyzer.registerAnalyzer(new BinaryAnalyzer());
   
+  // NEW: Register Git analyzer (optional, won't break anything if git is not available)
+  const gitAnalyzer = new GitAnalyzer();
+  analyzer.registerAnalyzer(gitAnalyzer);
+  
   console.log(`\n${colors.dim}Registered analyzers:${colors.reset}`);
   analyzer.analyzers.forEach(a => console.log(`  ${colors.green}✓${colors.reset} ${a.name}`));
   
@@ -899,6 +1171,9 @@ async function processSingleDirectory(targetDir) {
   
   analyzer.resetAll();
   await analyzer.traverseDirectory(absolutePath);
+  
+  // NEW: Run Git analysis separately (since it's not file-based)
+  await gitAnalyzer.scanDirectory(absolutePath);
   
   clearInterval(spinnerInterval);
   process.stdout.write('\r' + ' '.repeat(30) + '\r');
@@ -1022,6 +1297,12 @@ async function processSingleDirectory(targetDir) {
     console.log(`  ${colors.yellow}No binary files found${colors.reset}`);
   }
   
+  // NEW: Git Analysis Report
+  const gitReport = reports['Git Analyzer'];
+  if (gitReport && gitReport.totalRepositories > 0) {
+    printGitAnalysis(gitReport);
+  }
+  
   // Summary
   printHeader('⚡ SUMMARY', colors.white + colors.bgBlue);
   
@@ -1033,6 +1314,15 @@ async function processSingleDirectory(targetDir) {
     { icon: '📊', label: 'Lines', value: locReport.totalLinesFormatted, color: colors.green },
     { icon: '📋', label: 'Files', value: sizeReport.fileCount.toLocaleString(), color: colors.cyan }
   ];
+  
+  // NEW: Add Git summary if available
+  if (gitReport && gitReport.totalRepositories > 0) {
+    summaryItems.push(
+      { icon: '🔀', label: 'Repos', value: gitReport.totalRepositories, color: colors.magenta },
+      { icon: '👥', label: 'Contributors', value: gitReport.totalUniqueContributors.toLocaleString(), color: colors.cyan },
+      { icon: '📝', label: 'Commits', value: gitReport.totalCommits.toLocaleString(), color: colors.green }
+    );
+  }
   
   summaryItems.forEach(({icon, label, value, color}) => {
     console.log(`  ${icon} ${colors.bright}${label}:${colors.reset} ${color}${value}${colors.reset}`);
@@ -1083,6 +1373,7 @@ async function processMultipleDirectories(directories) {
 
   // Create analyzer for each directory
   const reports = {};
+  const gitAnalyzers = {}; // Store Git analyzers separately
 
   // Progress tracking
   let completedDirs = 0;
@@ -1105,8 +1396,16 @@ async function processMultipleDirectories(directories) {
     analyzer.registerAnalyzer(new ArchiveAnalyzer());
     analyzer.registerAnalyzer(new BinaryAnalyzer());
     
+    // NEW: Register Git analyzer
+    const gitAnalyzer = new GitAnalyzer();
+    analyzer.registerAnalyzer(gitAnalyzer);
+    gitAnalyzers[dir] = gitAnalyzer;
+    
     analyzer.resetAll();
     await analyzer.traverseDirectory(dir);
+    
+    // NEW: Run Git analysis separately
+    await gitAnalyzer.scanDirectory(dir);
     
     reports[dir] = analyzer.getReport();
     completedDirs++;
@@ -1123,13 +1422,15 @@ async function processMultipleDirectories(directories) {
     const locReport = reports[dir]['Lines of Code Analyzer'];
     const archiveReport = reports[dir]['Archive Files Analyzer'];
     const binaryReport = reports[dir]['Binary Files Analyzer'];
+    const gitReport = reports[dir]['Git Analyzer'];
     
     flattenedReports[dir] = {
       ...sizeReport,
       'Package.json Analyzer': pkgReport,
       'Lines of Code Analyzer': locReport,
       'Archive Files Analyzer': archiveReport,
-      'Binary Files Analyzer': binaryReport
+      'Binary Files Analyzer': binaryReport,
+      'Git Analyzer': gitReport
     };
   });
 
@@ -1190,6 +1491,9 @@ async function processMultipleDirectories(directories) {
     createTable(validDirs, binaryMetrics, flattenedReports);
   }
 
+  // NEW: Git Comparison Table
+  printGitComparison(validDirs, flattenedReports);
+
   // Calculate winners
   const winners = {};
   validDirs.forEach(dir => winners[dir] = 0);
@@ -1203,6 +1507,16 @@ async function processMultipleDirectories(directories) {
   if (hasLoc) allMetrics.push({ label: 'Total Lines', key: 'totalLines', winner: 'largest' });
   if (hasArchives) allMetrics.push({ label: 'Archive Files', key: 'totalCount', winner: 'smallest' });
   if (hasBinaries) allMetrics.push({ label: 'Binary Files', key: 'totalCount', winner: 'smallest' });
+  
+  // NEW: Add Git metrics to winners calculation
+  const hasGit = validDirs.some(dir => flattenedReports[dir]['Git Analyzer'].totalRepositories > 0);
+  if (hasGit) {
+    allMetrics.push(
+      { label: 'Git Repos', key: 'totalRepositories', winner: 'largest' },
+      { label: 'Total Commits', key: 'totalCommits', winner: 'largest' },
+      { label: 'Unique Contributors', key: 'totalUniqueContributors', winner: 'largest' }
+    );
+  }
 
   allMetrics.forEach(metric => {
     const values = validDirs.map(dir => {
@@ -1224,6 +1538,10 @@ async function processMultipleDirectories(directories) {
         if (metric.label.includes('Binary')) {
           return flattenedReports[dir]['Binary Files Analyzer'].totalCount;
         }
+      }
+      // NEW: Handle Git metrics
+      if (metric.key === 'totalRepositories' || metric.key === 'totalCommits' || metric.key === 'totalUniqueContributors') {
+        return flattenedReports[dir]['Git Analyzer'][metric.key] || 0;
       }
       return parseFloat(flattenedReports[dir][metric.key]) || 0;
     });
