@@ -2542,7 +2542,7 @@ class SyDB {
    static #serverCheckInterval = null;
 
    /** @private */
-   static #defaultStartType = 'c'; // Can be 'c' or 'nodejs'
+   static #defaultStartType = 'nodejs'; // Can be 'c' or 'nodejs'
 
    // Add these to the SyDB class (after the static properties)
 
@@ -3849,8 +3849,9 @@ Usage:
  sydb list
  sydb list <database_name>
  sydb list <database_name> <collection_name>
- sydb --server [port]          # Start HTTP server (non-blocking)
- sydb --server --nodejs [port] # Start HTTP server using NodeJS version directly
+ sydb --server [port]          # Start HTTP server using default version
+ sydb --server --nodejs [port] # Force NodeJS version (overrides default)
+ sydb --server --c [port]      # Force C version (overrides default)
  sydb --server --verbose       # Start HTTP server with extreme logging
  sydb --routes                 # Show all HTTP API routes and schemas
 
@@ -3860,7 +3861,7 @@ Add -idx for indexed fields
 Query format: field:value,field2:value2
 Server mode: Starts HTTP server on specified port (default: 8080)
 The --server command starts the server in background and immediately returns to terminal
-Use --nodejs flag to skip C version and use NodeJS version directly
+Use --nodejs or --c flags to override the default version setting
 `);
 }
 
@@ -4221,7 +4222,7 @@ Use --nodejs flag to skip C version and use NodeJS version directly
    }
 
   /**
- * Handle server command - works exactly like list command but without executing list operations
+ * Handle server command - supports both --nodejs and --c overrides
  * @private
  * @static
  * @async
@@ -4229,7 +4230,27 @@ Use --nodejs flag to skip C version and use NodeJS version directly
  */
 static async #handleServer(args) {
     const verbose = args.includes('--verbose');
-    const forceNodeJS = args.includes('--nodejs') || (SyDB.defaultStartType == 'nodejs') ? true : false 
+    
+    // Check for override flags
+    const forceNodeJS = args.includes('--nodejs');
+    const forceC = args.includes('--c');
+    
+    // Determine which version to use based on priority:
+    // 1. Explicit flags (--nodejs or --c) override everything
+    // 2. Otherwise use the defaultStartType
+    let useNodeJS;
+    
+    if (forceNodeJS && forceC) {
+        console.error('Error: Cannot specify both --nodejs and --c flags');
+        process.exit(1);
+    } else if (forceNodeJS) {
+        useNodeJS = true;
+    } else if (forceC) {
+        useNodeJS = false;
+    } else {
+        useNodeJS = (SyDB.defaultStartType === 'nodejs');
+    }
+    
     let port = 8080;
     
     // Parse port if specified
@@ -4245,17 +4266,14 @@ static async #handleServer(args) {
     }
     
     console.log('Starting SYDB HTTP Server...');
+    console.log(`Using ${useNodeJS ? 'NodeJS' : 'C'} version`);
     
     try {
         // Set the base URL with the specified port
         SyDB.baseUrl = `http://localhost:${port}`;
         
-        // Set the default start type based on forceNodeJS flag
-        if (forceNodeJS) {
-            SyDB.defaultStartType = 'nodejs';
-        } else {
-            SyDB.defaultStartType = 'c';
-        }
+        // Set the default start type based on the determined version
+        SyDB.defaultStartType = useNodeJS ? 'nodejs' : 'c';
         
         // Check if server is already running
         const isRunning = await SyDB.isServerRunning();
@@ -4266,12 +4284,11 @@ static async #handleServer(args) {
             process.exit(0);
         }
         
-        // Start the server exactly like list command does
-        // This will wait for the server to start before returning
-        const started = await SyDB.Start(forceNodeJS);
+        // Start the server with the determined version
+        const started = await SyDB.Start(!useNodeJS ? false : true);
         
         if (started) {
-            console.log(`SYDB Server started successfully on port ${port}`);
+            console.log(`SYDB Server started successfully on port ${port} (${useNodeJS ? 'NodeJS' : 'C'} version)`);
             if (verbose) console.log('Verbose logging enabled');
             
             // Wait a moment to ensure server is fully ready
@@ -4289,9 +4306,6 @@ static async #handleServer(args) {
             console.error('Failed to start server');
             process.exit(1);
         }
-        
-        // The process will naturally exit here since there are no more async operations
-        // Unlike list which would then execute find operations, we just exit
         
     } catch (error) {
         console.error('Failed to start SYDB Server:', error.message);
