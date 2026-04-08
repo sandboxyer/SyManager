@@ -84,7 +84,8 @@ const LANGUAGE_EXTENSIONS = {
   groovy: ['.groovy', '.gvy', '.gy', '.gsh'],
   powershell: ['.ps1', '.psm1', '.psd1'],
   make: ['Makefile', '.mk', '.mak'],
-  cmake: ['CMakeLists.txt', '.cmake']
+  cmake: ['CMakeLists.txt', '.cmake'],
+  zig : ['.zig']
 };
 
 // Archive file extensions
